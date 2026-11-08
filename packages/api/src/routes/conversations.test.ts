@@ -18,6 +18,7 @@ const services = vi.hoisted(() => ({
   createConversation: vi.fn(),
   ensureDirectConversation: vi.fn(),
   greetEmptyDirectThread: vi.fn(async () => {}),
+  warmAgentSandbox: vi.fn(async () => {}),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
   requireConversation: vi.fn(),
@@ -81,6 +82,10 @@ vi.mock("../services/turn-service", () => ({
   abortTurn: services.abortTurn,
   requestSendNow: services.requestSendNow,
   readTranscript: services.readTranscript,
+}));
+
+vi.mock("../services/sandbox-warm-service", () => ({
+  warmAgentSandbox: services.warmAgentSandbox,
 }));
 
 vi.mock("../services/follow-up-service", () => ({
@@ -287,6 +292,20 @@ describe("conversations", () => {
     expect(services.createConversation).not.toHaveBeenCalled();
   });
 
+  it("refuses the platform-only memory review source: no client can fake a review of another thread", async () => {
+    const res = await app.request("/v1/conversations", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        agentId: "ag-1",
+        source: "memory_review",
+        externalRef: "someone-elses-thread",
+      }),
+    });
+    expect(res.status).toBe(422);
+    expect(services.createConversation).not.toHaveBeenCalled();
+  });
+
   it("lists, filtered by agent when asked — as the session's user", async () => {
     const res = await app.request("/v1/conversations?agentId=ag-1", {
       headers: AUTH,
@@ -359,6 +378,9 @@ describe("the direct door — PUT /v1/agents/:agentId/conversations/direct", () 
       headers: AUTH,
     });
     expect(services.greetEmptyDirectThread).not.toHaveBeenCalled();
+    // Same rule for the thread-open wake: a program's open is not a person
+    // about to type, and must not start a machine as a side effect.
+    expect(services.warmAgentSandbox).not.toHaveBeenCalled();
   });
 
   it("refuses a RUNNER token — token families do not cross", async () => {

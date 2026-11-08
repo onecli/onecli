@@ -1,234 +1,68 @@
 // @vitest-environment jsdom
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentChannelsView, AgentContact, AgentPeer } from "@/lib/api";
+import type { ActAsYouSlot } from "./act-as-you-slot";
 
 /**
- * The Contacts section composes rows from three existing queries into four
- * kind groups. Acceptance behaviors: a person's inbound reach row and
- * outbound contact merge into ONE row (the duplicate "@akim" / "Alex Kim"
- * was the bug), every row lands in the group of its kind, reach rows come
- * only from LIVE presences, workspace members are a sentence (not a row
- * with a fake setting), an empty group says so, and loading is a skeleton.
+ * Contacts is ONE list. Entitled, the licensed "acts as you" layer wraps it
+ * and hands it a slot; unentitled, the plain list renders with nothing
+ * added. A legacy `?as=you` is ignored either way.
  */
 
 const state = vi.hoisted(() => ({
-  view: undefined as AgentChannelsView | undefined,
-  contacts: [] as AgentContact[],
-  peers: [] as AgentPeer[],
+  entitled: true as boolean | undefined,
 }));
 
+const slot: ActAsYouSlot = {
+  columns: true,
+  header: <div data-testid="as-you-header" />,
+  forRow: () => null,
+  standaloneRows: () => [],
+};
+
+vi.mock("next/dynamic", () => ({
+  default:
+    () =>
+    ({ children }: { children: (s: ActAsYouSlot) => React.ReactNode }) => (
+      <div data-testid="act-as-you">{children(slot)}</div>
+    ),
+}));
+vi.mock("@/hooks/use-instance", () => ({
+  useInstance: () =>
+    state.entitled === undefined ? null : { entitled: state.entitled },
+}));
 vi.mock("../../_components/agent-page-frame", () => ({
-  useAgentPageAgent: () => ({ id: "ag-1", name: "Donna", kind: "hosted" }),
+  useAgentPageAgent: () => ({ id: "ag-1", name: "Donna" }),
 }));
-
-vi.mock("@/hooks/use-channels", () => ({
-  useAgentChannels: () => ({
-    data: state.view,
-    isPending: state.view === undefined,
-    isError: false,
-    refetch: vi.fn(),
-  }),
-  useAgentContacts: () => ({
-    data: { contacts: state.contacts },
-    isPending: false,
-    isError: false,
-    refetch: vi.fn(),
-  }),
-  useAgentPeers: () => ({
-    data: { peers: state.peers },
-    isPending: false,
-    isError: false,
-    refetch: vi.fn(),
-  }),
-}));
-
-// The rows are each their own tested component; here they are stubs that
-// say which group they landed in and which halves they carry.
-vi.mock("./two-way-row", () => ({
-  directionHeadings: (kind: string) =>
-    kind === "person"
-      ? { inbound: "Can message Donna", outbound: "Donna can message them" }
-      : { inbound: "Donna answers", outbound: "Donna can post" },
-  TwoWayRow: ({
-    entry,
-  }: {
-    entry: { key: string; reach: unknown; contact: unknown };
-  }) => (
-    <div data-testid="two-way">
-      {entry.key}:{entry.reach ? "in" : "-"}/{entry.contact ? "out" : "-"}
-    </div>
-  ),
-}));
-vi.mock("./contact-row", () => ({
-  ContactRow: ({ contact }: { contact: AgentContact }) => (
-    <div data-testid="contact">{contact.displayName}</div>
-  ),
-}));
-vi.mock("./peer-row", () => ({
-  PeerRow: ({ peer }: { peer: AgentPeer }) => (
-    <div data-testid="peer">{peer.name}</div>
+vi.mock("./contacts-list", () => ({
+  ContactsList: ({ actAsYou }: { actAsYou?: ActAsYouSlot }) => (
+    <div data-testid="list">{actAsYou?.header}</div>
   ),
 }));
 
-import { ContactsSection } from "./contacts-section";
-
-const presence = (
-  status: "active" | "disabled",
-): AgentChannelsView["presences"][number] =>
-  ({
-    id: `p-${status}`,
-    provider: "slack",
-    status,
-    transport: "socket",
-    externalId: "A1",
-    identityRef: "B1",
-    identityName: "donna",
-    tenant: { externalId: "T1", name: "Acme" },
-    managedBy: null,
-    groupThreads: [],
-    spaces: [
-      {
-        externalRef: `C-${status}`,
-        label: "#room",
-        state: "approved",
-        decidedAt: null,
-      },
-    ],
-    people: [
-      {
-        externalRef: `U-${status}`,
-        label: "@dana",
-        state: "approved",
-        decidedAt: null,
-      },
-    ],
-  }) as unknown as AgentChannelsView["presences"][number];
-
-const view = (presences: AgentChannelsView["presences"]): AgentChannelsView =>
-  ({
-    presences,
-    posture: { transport: "socket" },
-    organizationId: "org-1",
-    orgIntegrations: [],
-    adapter: { online: true },
-  }) as unknown as AgentChannelsView;
-
-const contact = (
-  kind: AgentContact["kind"],
-  displayName: string,
-  externalRef: string = displayName,
-): AgentContact => ({
-  id: `c-${displayName}`,
-  kind,
-  externalRef,
-  displayName,
-  policy: "ask",
-  updatedAt: "2026-09-16T00:00:00Z",
-});
-
-const group = (title: string) =>
-  screen.getByRole("heading", { name: title }).closest("section")!;
-
-const renderSection = () =>
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <ContactsSection />
-    </QueryClientProvider>,
-  );
-
-beforeEach(() => {
-  state.view = undefined;
-  state.contacts = [];
-  state.peers = [];
-});
+const { ContactsSection } = await import("./contacts-section");
 
 describe("ContactsSection", () => {
-  it("loading is a skeleton, never an empty group", () => {
-    renderSection();
-    expect(screen.queryByRole("heading", { name: "People" })).toBeNull();
+  beforeEach(() => {
+    state.entitled = true;
   });
 
-  it("puts every row in the group of its kind", () => {
-    state.view = view([presence("active")]);
-    state.contacts = [
-      contact("person", "Dana"),
-      contact("channel", "#ops"),
-      contact("app", "Jira"),
-    ];
-    state.peers = [
-      {
-        agentId: "ag-ray",
-        name: "Ray",
-        workspaceName: null,
-        paused: false,
-        taskOpen: false,
-        myPolicy: "ask",
-        theirPolicy: "ask",
-        conversationId: null,
-      },
-    ];
-    renderSection();
-
-    const people = within(group("People"));
-    expect(
-      people.getByText(/Members of this workspace can always message/),
-    ).toBeDefined();
-    expect(
-      people.getAllByTestId("two-way").map((el) => el.textContent),
-    ).toEqual(["U-active:in/-", "Dana:-/out"]);
-    expect(people.getByText("Can message Donna")).toBeDefined();
-    expect(people.getByText("Donna can message them")).toBeDefined();
-
-    const channels = within(group("Channels"));
-    expect(
-      channels.getAllByTestId("two-way").map((el) => el.textContent),
-    ).toEqual(["C-active:in/-", "#ops:-/out"]);
-
-    expect(within(group("Agents")).getByTestId("peer").textContent).toBe("Ray");
-    expect(within(group("Apps")).getByTestId("contact").textContent).toBe(
-      "Jira",
-    );
+  it("entitled: one list, wrapped by the acts-as-you layer", () => {
+    render(<ContactsSection />);
+    expect(screen.getByTestId("act-as-you")).toBeTruthy();
+    expect(screen.getByTestId("list")).toBeTruthy();
+    expect(screen.getByTestId("as-you-header")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /acts as/ })).toBeNull();
   });
 
-  it("the same person, written to AND writing in, is ONE row with both halves", () => {
-    state.view = view([presence("active")]);
-    state.contacts = [
-      contact("person", "Alex Kim", "U-active"),
-      contact("channel", "#room", "C-active"),
-    ];
-    renderSection();
-    expect(
-      within(group("People"))
-        .getAllByTestId("two-way")
-        .map((el) => el.textContent),
-    ).toEqual(["U-active:in/out"]);
-    expect(
-      within(group("Channels"))
-        .getAllByTestId("two-way")
-        .map((el) => el.textContent),
-    ).toEqual(["C-active:in/out"]);
-  });
-
-  it("reach rows come from LIVE presences only — a removed app's rows are moot", () => {
-    state.view = view([presence("disabled")]);
-    renderSection();
-    expect(screen.queryByTestId("two-way")).toBeNull();
-  });
-
-  it("an empty group says so, and People always explains workspace members", () => {
-    state.view = view([]);
-    renderSection();
-    expect(
-      screen.getByText(/Members of this workspace can always message/),
-    ).toBeDefined();
-    expect(screen.queryByText("Workspace members")).toBeNull();
-    expect(screen.getByText("No one yet.")).toBeDefined();
-    expect(
-      screen.getByText("Mention the agent in a channel to add it here."),
-    ).toBeDefined();
-    expect(screen.getByText("No other agents yet.")).toBeDefined();
-    expect(screen.getByText("None yet.")).toBeDefined();
-  });
+  it.each([false, undefined])(
+    "unentitled (%s): the plain list, nothing licensed",
+    (entitled) => {
+      state.entitled = entitled;
+      render(<ContactsSection />);
+      expect(screen.getByTestId("list")).toBeTruthy();
+      expect(screen.queryByTestId("act-as-you")).toBeNull();
+      expect(screen.queryByTestId("as-you-header")).toBeNull();
+    },
+  );
 });

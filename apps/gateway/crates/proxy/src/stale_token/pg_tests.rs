@@ -17,6 +17,8 @@ use hyper::body::Incoming;
 use hyper::{Request, StatusCode};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use telemetry::core::RequestDecision;
+use tokio::sync::mpsc;
 
 use crate::connect::PolicyEngine;
 use crate::forward::forward_request;
@@ -154,8 +156,11 @@ async fn serve(router: Router) -> SocketAddr {
 fn salesforce_config(token_url: &'static str) -> &'static apps::RefreshConfig {
     let real = apps::refresh_config("salesforce").expect("salesforce refreshes");
     Box::leak(Box::new(apps::RefreshConfig {
-        token_url,
-        alternate_token_urls: &[],
+        endpoint: apps::TokenEndpoint::Fixed {
+            url: token_url,
+            alternates: &[],
+        },
+        requested_lifetimes: None,
         client_id_env: "ONECLI_STALE_TEST_UNSET_ID",
         client_secret_env: "ONECLI_STALE_TEST_UNSET_SECRET",
         body_format: apps::TokenBodyFormat::Form,
@@ -298,6 +303,7 @@ impl World {
             policy_rules_v2: db::PolicyV2Rules::default(),
             available_apps: db::AvailableApps::default(),
             access_restricted: None,
+            credential_unavailable: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,
@@ -347,6 +353,39 @@ impl Drop for World {
     }
 }
 
+/// The gateway's activity feed (telemetry's request events). The channel is
+/// process-wide, so other tests' events pass through it too: a reader
+/// filters by its own workspace.
+struct ActivityFeed(mpsc::Receiver<telemetry::RequestEvent>);
+
+impl ActivityFeed {
+    /// The `NeedsConnection` error recorded for `workspace_id`, waiting
+    /// briefly for it: recording happens as the answer is returned.
+    async fn needs_connection(&mut self, workspace_id: &str) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.0.recv()).await {
+            if let (true, RequestDecision::NeedsConnection { error }) =
+                (event.workspace_id == workspace_id, event.decision)
+            {
+                return Some(error);
+            }
+        }
+        None
+    }
+}
+
+/// Takes the process-wide telemetry channel. It can be installed once per
+/// process, so exactly one test in this binary reads it. Wide, because
+/// `on_request` drops events when it is full.
+fn activity_feed() -> ActivityFeed {
+    let (tx, rx) = mpsc::channel(1 << 16);
+    assert!(
+        telemetry::core::SENDER.set(tx).is_ok(),
+        "one reader of the activity feed per test binary"
+    );
+    ActivityFeed(rx)
+}
+
 /// Serve one request through `forward_request` to `upstream`, the way the
 /// MITM lane would with `rules` resolved for this connection. Returns the
 /// address to call.
@@ -365,7 +404,8 @@ async fn gateway(
     let ctx = Arc::new(ProxyContext {
         workspace_id: Some(world.workspace_id.clone()),
         organization_id: Some(world.org_id.clone()),
-        agent_id: None,
+        // An agent's request: the gateway records activity rows only for one.
+        agent_id: Some("agent".to_string()),
         agent_name: None,
         agent_identifier: None,
         agent_token: "agent-token".to_string(),
@@ -537,10 +577,14 @@ async fn a_request_with_a_body_is_not_resent_but_the_token_is_replaced() {
 /// A refusal no refresh can fix (Salesforce known issue W-18029118: a
 /// JWT-based token from the refresh flow refused at once) is not recovered
 /// again: the refresh token is spent once, and every later refusal of the
-/// token that refresh obtained is forwarded as is.
+/// token that refresh obtained answers `connection_needs_reconnect` (the
+/// link the agent's chat card renders), never the provider's raw 401 and
+/// never a retry. The answer reaches the activity feed as the guidance the
+/// agent got.
 #[tokio::test]
 async fn a_refused_recovery_is_not_recovered_again() {
     let Some(h) = harness().await else { return };
+    let mut activity = activity_feed();
     let fresh = h.world.minted(1);
     h.seen.also_dead.lock().expect("lock").push(fresh.clone());
 
@@ -556,7 +600,8 @@ async fn a_refused_recovery_is_not_recovered_again() {
         "the resend is refused too"
     );
 
-    // The next request resolves the token the recovery stored.
+    // The next request resolves the token the recovery stored; its refusal
+    // is one no refresh fixes, so the agent is told to ask for a reconnect.
     let second = gateway(h.upstream, &h.world, h.world.rules(&fresh), &h).await;
     let resp = reqwest::Client::new()
         .get(format!("http://{second}/services/data/v62.0/limits"))
@@ -564,7 +609,24 @@ async fn a_refused_recovery_is_not_recovered_again() {
         .await
         .expect("gateway answered");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(resp.text().await.expect("body"), SF_401);
+    assert_eq!(
+        resp.headers().get("x-should-retry").map(|v| v.as_bytes()),
+        Some(&b"false"[..])
+    );
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "connection_needs_reconnect");
+    assert!(body["connect_url"]
+        .as_str()
+        .is_some_and(|u| u.contains("/connections/apps/salesforce?reconnect=")));
+    assert!(!body.to_string().contains(&fresh), "no token in the answer");
+    assert_eq!(
+        activity
+            .needs_connection(&h.world.workspace_id)
+            .await
+            .as_deref(),
+        Some("connection_needs_reconnect"),
+        "the reconnect answer is recorded as guidance"
+    );
 
     assert_eq!(h.tokens.calls(&h.world.refresh_token), 1, "spent once");
     assert_eq!(

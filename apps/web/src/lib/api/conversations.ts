@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPut } from "./client";
+import { apiGet, apiPost, apiPut, workspaceScope } from "./client";
 import type {
   AbortTurnResult,
   Conversation,
@@ -34,10 +34,16 @@ export const conversationPath = (conversationId: string, sub = "") =>
  * unique index guarantees every caller gets the same row. The id is encoded
  * for the same reason as `conversationPath`: it can arrive from a URL.
  */
-export const ensureDirect = (agentId: string) =>
+export const ensureDirect = (
+  agentId: string,
+  // Onboarding opens the thread from outside any workspace URL, so the
+  // greeting is dispatched while the person is still on the flow.
+  options: { workspaceId?: string } = {},
+) =>
   apiPut<Conversation>(
     `/v1/agents/${encodeURIComponent(agentId)}/conversations/direct`,
     {},
+    workspaceScope(options.workspaceId),
   );
 
 /**

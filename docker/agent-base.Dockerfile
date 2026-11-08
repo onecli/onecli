@@ -31,7 +31,7 @@
 # a glibc binary needing glibc >= 2.39 and a dynamic libssl (the thin image's
 # build proves the fit). The Node pin is shared with the thin image's build
 # stages, so the app is built and run on the same Node and glibc.
-FROM node:22.23.2-trixie-slim
+FROM node:22.23.4-trixie-slim
 
 # tini as PID 1: Node is not an init (signal handling differs, orphans are
 # never reaped). Common tools are the agent's hands — every outbound request
@@ -119,6 +119,10 @@ FROM node:22.23.2-trixie-slim
 # burns turns on it).
 # xz-utils: `.tar.xz` is the release format of half the tools an agent will
 # fetch (Nix itself ships that way); slim has no xz.
+# postgresql-client: `psql` and libpq, the way an agent reaches a database the
+# user connected: the supervisor writes each one as a libpq service (and the
+# agent's token as its password), so `psql "service=<name>"` logs in through
+# the gateway's database front door with no flags.
 # tzdata-legacy: the zone names tzdata dropped in trixie (`Asia/Calcutta`,
 # `Europe/Kiev`, `US/Pacific`, 1.3 MB). The sandbox keeps time in whatever
 # zone the control plane hands it in TZ, and libc resolves that name as a
@@ -135,6 +139,7 @@ RUN apt-get update \
     dbus-x11 chromium chromium-sandbox xvfb xdotool fonts-liberation fonts-noto-color-emoji ffmpeg libnss3-tools \
     gcc g++ make libc6-dev python3-dev \
     procps jq zip unzip wget xz-utils tzdata-legacy \
+    postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/bin/tini", "--"]
 

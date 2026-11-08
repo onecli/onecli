@@ -285,7 +285,7 @@ describe("ConnectLibraryForm", () => {
     ).toBeTruthy();
   });
 
-  it("without the skills-only install, no org account says: connect GitHub to the organization first", async () => {
+  it("without the skills-only install, no org account offers Connect GitHub App in place", async () => {
     answer([]);
     render(
       wrap(
@@ -298,12 +298,15 @@ describe("ConnectLibraryForm", () => {
       ),
     );
     expect(
-      await screen.findByText(/Connect GitHub to the organization first/),
+      await screen.findByText(/Connect GitHub to the organization, then pick/),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Install GitHub/ })).toBeNull();
     expect(
-      screen.getByRole("link", { name: "Go to Shared Connections" }),
-    ).toHaveAttribute("href", "/org/org-1/settings/global-connections");
+      screen.getByRole("button", { name: "Connect GitHub App" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("link", { name: "Go to Shared Connections" }),
+    ).toBeNull();
   });
 
   it("without the skills-only install, an org account is offered alone (no install link)", async () => {

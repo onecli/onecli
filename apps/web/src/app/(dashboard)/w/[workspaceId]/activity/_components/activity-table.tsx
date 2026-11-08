@@ -28,6 +28,7 @@ import {
   isRateLimitedRequest,
   getApprovalDecision,
   getApprovalId,
+  getDatabaseRequestView,
   type RequestLogEntry,
 } from "@onecli/api/services/request-log-service";
 import { ApprovalActions } from "@/lib/components/approvals";
@@ -80,6 +81,7 @@ export const ActivityTable = ({
               ? liveApprovals.get(approvalId)
               : undefined;
             const decision = getApprovalDecision(log);
+            const db = getDatabaseRequestView(log);
             return (
               <TableRow
                 key={log.id}
@@ -99,17 +101,43 @@ export const ActivityTable = ({
                   </span>
                 </TableCell>
                 <TableCell>
-                  <MethodBadge method={log.method} />
+                  <MethodBadge method={db?.kind ?? log.method} />
                 </TableCell>
                 <TableCell className="max-w-[18rem]">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">
-                      {log.host.replace(/:(?:443|80)$/, "")}
+                  {db ? (
+                    // A database row: its connection, and the statement on one
+                    // line (full text in the tooltip and the details dialog),
+                    // never the synthetic policy host and path.
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {db.connection ?? "PostgreSQL"}
+                      </div>
+                      {db.statement && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="text-muted-foreground truncate font-mono text-xs">
+                              {db.statement.replace(/\s+/g, " ")}
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            side="bottom"
+                            className="max-w-md font-mono text-xs [overflow-wrap:anywhere]"
+                          >
+                            {db.statement}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
                     </div>
-                    <div className="text-muted-foreground truncate font-mono text-xs">
-                      {log.path || "/"}
+                  ) : (
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {log.host.replace(/:(?:443|80)$/, "")}
+                      </div>
+                      <div className="text-muted-foreground truncate font-mono text-xs">
+                        {log.path || "/"}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1.5 min-w-0">

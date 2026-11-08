@@ -111,10 +111,26 @@ export const approvalPendingEventSchema = z.object({
   description: z.string(),
 });
 
+/**
+ * The model call's token counts at the turn's end: the provider's numbers
+ * for the LATEST call, not a running total. The input and cache counters are
+ * raw, and their accounting differs by provider (one reports cache reads and
+ * writes apart from the input, another counts them inside it), so they never
+ * add up to how full the context was on their own: `promptTokens` does.
+ */
 export const turnUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
   cacheReadInputTokens: z.number().int().nonnegative().optional(),
+  /** Prompt tokens written to the provider's cache on this call. */
+  cacheCreationInputTokens: z.number().int().nonnegative().optional(),
+  /**
+   * How many tokens the call put in front of the model, normalized by the
+   * harness for its provider's accounting: the context the call carried.
+   * Absent when the harness cannot tell, and then nothing reads the raw
+   * counters as a substitute.
+   */
+  promptTokens: z.number().int().nonnegative().optional(),
 });
 export type TurnUsage = z.infer<typeof turnUsageSchema>;
 

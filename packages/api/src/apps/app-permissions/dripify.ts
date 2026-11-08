@@ -1,4 +1,4 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import { toolFactory, type AppPermissionDefinition } from "./types";
 
 // Dripify Open API (api.dripify.com), every operation from the OpenAPI the
 // reference page embeds. One dedicated API host, every path under
@@ -16,25 +16,11 @@ const API_HOST = "api.dripify.com";
 const MCP_HOST = "app.dripify.com";
 const P = "/v1/open-api";
 
-const tool = (
-  id: string,
-  name: string,
-  description: string,
-  pathPattern: string,
-  methods: string[],
-  aliasPatterns?: string[],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: API_HOST,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+const tool = toolFactory(API_HOST);
 
 export const dripifyPermissions: AppPermissionDefinition = {
   provider: "dripify",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

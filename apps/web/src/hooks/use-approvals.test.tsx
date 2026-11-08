@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   holding: false,
 }));
 
-vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/overview" }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/activity" }));
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
@@ -221,5 +221,16 @@ describe("useApproveCustomConnection", () => {
       expect(client.getMutationCache().getAll()).toHaveLength(0),
     );
     vi.doUnmock("@/lib/api/channels");
+  });
+});
+
+describe("approvedToast", () => {
+  it("says the handler's outcome when it gave one, else the generic line", async () => {
+    const { approvedToast } = await import("./use-approvals");
+    expect(approvedToast("Sent to Sam.", false)).toBe("Sent to Sam.");
+    expect(approvedToast("  ", false)).toBe("Approved and done.");
+    expect(approvedToast(undefined, true)).toBe(
+      "Done. Always allowed from now on.",
+    );
   });
 });

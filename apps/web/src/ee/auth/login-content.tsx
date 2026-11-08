@@ -124,7 +124,7 @@ export const LoginContent = () => {
             // No workspace context: the /org index server-redirects to the
             // validated /org/<defaultOrgId>/workspaces (the home destination).
             router.replace(
-              data.workspaceId ? `/w/${data.workspaceId}/overview` : "/org",
+              data.workspaceId ? `/w/${data.workspaceId}` : "/org",
             );
           }
         } else if (res.status === 401) {

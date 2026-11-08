@@ -459,8 +459,8 @@ mod tests {
         let whole = r#"{"data":[{"range":"A1","values":[[1]]},{"range":"B1","values":[[2]]}]}"#;
         let cut = &whole[..whole.len() - 20];
         let path = format!("/v4/spreadsheets/{ID}/values:batchUpdate");
-        assert_eq!(sheets("POST", &path, Some(cut)).action, "POST request");
-        assert_eq!(sheets("POST", &path, Some("[1]")).action, "POST request");
+        assert!(sheets("POST", &path, Some(cut)).is_generic());
+        assert!(sheets("POST", &path, Some("[1]")).is_generic());
         assert_eq!(sheets("POST", &path, Some(whole)).action, "Update cells");
     }
 
@@ -568,7 +568,7 @@ mod tests {
             &format!("/v4/spreadsheets/{ID}:getByDataFilter"),
             None,
         );
-        assert_eq!(s.action, "POST request");
+        assert!(s.is_generic());
         // An id that isn't a plain token is never a record.
         let s = sheets("PUT", "/v4/spreadsheets/a%2Fb/values/A1", Some("{}"));
         assert_eq!(s.ref_ids().count(), 0);

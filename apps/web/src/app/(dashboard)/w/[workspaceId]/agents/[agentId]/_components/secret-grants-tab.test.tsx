@@ -105,13 +105,16 @@ describe("SecretGrantsTab", () => {
     expect(screen.queryByText("stripe")).not.toBeInTheDocument();
   });
 
-  it("keeps every custom secret in view unfolded, for the new agent's chooser", () => {
-    hoisted.secretsData = [generic("stripe")];
-    render(
-      <SecretGrantsTab agentId="agent-1" kind="secret" foldInactive={false} />,
-    );
+  it("lays the new agent's chooser out A to Z, every secret in view", () => {
+    hoisted.secretsData = [generic("stripe"), generic("Anthropic proxy")];
+    render(<SecretGrantsTab agentId="agent-1" kind="secret" chooser />);
 
-    expect(screen.getByText("stripe")).toBeInTheDocument();
+    const switches = screen.getAllByRole("switch");
+    expect(switches.map((s) => s.getAttribute("aria-label"))).toEqual([
+      "Attach Anthropic proxy",
+      "Attach stripe",
+    ]);
+    // Nothing folded away: each one starts off and IS the choice.
     expect(screen.queryByText(/None are on for this agent yet/)).toBeNull();
   });
 });

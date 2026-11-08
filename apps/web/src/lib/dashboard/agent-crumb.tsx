@@ -10,6 +10,7 @@ import {
 } from "@onecli/ui/components/dropdown-menu";
 import { cn } from "@onecli/ui/lib/utils";
 import { useAgents } from "@/hooks/use-agents";
+import { sortAgentsOldestFirst } from "@/lib/agents/agent-order";
 import { agentSectionPath, matchAgentPage } from "@/lib/navigation";
 import {
   agentSectionBlocked,
@@ -53,7 +54,8 @@ export const AgentCrumb = ({ agentId }: { agentId: string }) => {
         <ChevronsUpDown className="size-3 shrink-0" aria-hidden />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        {agents.map((agent) => (
+        {/* The sidebar's order (oldest first), so the two agent lists agree. */}
+        {sortAgentsOldestFirst(agents).map((agent) => (
           <DropdownMenuItem
             key={agent.id}
             onSelect={() => {

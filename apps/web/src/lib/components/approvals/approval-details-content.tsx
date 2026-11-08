@@ -52,11 +52,17 @@ export const ApprovalDetailsContent = ({
           kind={approval.summary?.kind}
           details={details}
           bulk={approval.summary?.bulk}
+          titled={!!approval.summary?.subject}
         />
       )}
       <ApprovalRawRequest approval={approval} />
       <DialogFooter>
-        <ApprovalActions approvalId={approval.id} onResolved={onResolved} />
+        <ApprovalActions
+          approvalId={approval.id}
+          similar={approval.similar}
+          agentName={approval.agent.name}
+          onResolved={onResolved}
+        />
       </DialogFooter>
     </>
   );

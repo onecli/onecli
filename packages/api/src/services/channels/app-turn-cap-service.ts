@@ -9,7 +9,7 @@ import {
   registerActionHandler,
   requestActionApproval,
 } from "./action-approval-service";
-import { resolvePersonReach, resolveSpaceReach } from "./agent-reach-service";
+import { resolveSpaceReach } from "./agent-reach-service";
 import { channelProvider } from "./registry";
 import type { ChannelProviderId } from "./types";
 
@@ -304,24 +304,16 @@ const verifyContinueStillAllowed = async (
     link.agentChannel.provider as ChannelProviderId,
   ).reach;
   if (!reach) throw new Error("this channel provider has no reach facet");
-  const scope = {
+  const space = await resolveSpaceReach({
     agentId,
     integrationId: link.agentChannel.integrationId,
-  };
-  const space = await resolveSpaceReach({
-    ...scope,
     externalRef: reach.spaceOf(link.externalThreadId),
   });
   if (space !== "approved") {
     throw new Error("the channel is no longer open to everyone");
   }
-  const person = await resolvePersonReach({
-    ...scope,
-    externalRef: speaker.externalRef,
-  });
-  if (person === "blocked" || person === "members_only") {
-    throw new Error("the workspace owner has blocked this app");
-  }
+  // The channel's setting is the whole answer in a channel (one setting
+  // per surface): a person-level row for the app's ref is not consulted.
 };
 
 /**
@@ -331,8 +323,8 @@ const verifyContinueStillAllowed = async (
  * — a system-origin turn (`userId: null`, the guest posture) in a sourced
  * conversation. Fenced on the approval's OWN agent: the payload names the
  * conversation, the row says whose it must be, and a disagreement is a
- * not-found, never a write. No always-allow hook: the decision is one round,
- * never standing.
+ * not-found, never a write. No standing question: each decision is one
+ * round.
  */
 registerActionHandler(APP_TURN_CONTINUE_ACTION, async (approval) => {
   const payload = continuePayloadSchema.parse(approval.payload);

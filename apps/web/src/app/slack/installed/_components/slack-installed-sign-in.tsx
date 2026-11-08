@@ -1,9 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import Image from "next/image";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { BrandLogo } from "@/lib/components/brand-logo";
 
 interface SlackInstalledSignInProps {
   callbackUrl: string;
@@ -31,24 +31,7 @@ export const SlackInstalledSignIn = ({
 
   return (
     <div className="flex min-h-svh flex-col items-center justify-center px-4">
-      <div className="mb-8">
-        <Image
-          src="/onecli-full-logo.png"
-          alt="OneCLI"
-          width={140}
-          height={40}
-          priority
-          className="dark:hidden"
-        />
-        <Image
-          src="/onecli-full-logo-dark.png"
-          alt="OneCLI"
-          width={140}
-          height={40}
-          priority
-          className="hidden dark:block"
-        />
-      </div>
+      <BrandLogo />
 
       <Card className="w-full max-w-md p-8">
         <h1 className="text-center text-sm font-medium">

@@ -54,6 +54,7 @@ vi.mock("@/hooks/use-agents", () => ({
     isError: state.error,
     refetch: vi.fn(),
   }),
+  useWarmAgent: () => () => {},
 }));
 vi.mock("../../_components/agent-page-header", () => ({
   AgentPageHeader: () => <div>Agent header</div>,

@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/overview" }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/w/ws-1/activity" }));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/lib/api/channels", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/channels")>()),
@@ -30,7 +30,7 @@ const ask = (id: string): PendingChannelApprovalItem => ({
   agentId: "ag-1",
   agentName: "Donna",
   summary: `Send message ${id}`,
-  offersAlwaysAllow: false,
+  standingChoice: false,
   conversationId: null,
   createdAt: "2026-10-15T10:00:00Z",
   expiresAt: "2026-10-16T10:00:00Z",
@@ -78,6 +78,36 @@ describe("useDecideChannelAction", () => {
     answer.resolve({ kind: "decided", status: "done" });
     await waitFor(() =>
       expect(mocks.toast.success).toHaveBeenCalledWith("Approved and done."),
+    );
+  });
+
+  it("a standing question's outcome is said in its own words", async () => {
+    const { result } = setup();
+    mocks.decide.mockResolvedValue({ kind: "decided", status: "executed" });
+
+    act(() =>
+      result.current.mutate({
+        approvalId: "a",
+        decision: "approve",
+        standing: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith(
+        "Done. Always allowed from now on.",
+      ),
+    );
+    act(() =>
+      result.current.mutate({
+        approvalId: "b",
+        decision: "reject",
+        standing: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith(
+        "Never. The agent was told.",
+      ),
     );
   });
 

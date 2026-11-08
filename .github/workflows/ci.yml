@@ -198,6 +198,18 @@ jobs:
               - 'packages/api/src/services/policy-translation/**'
               - '.github/workflows/ci.yml'
 
+      # The restored gateway target, the workspace test build on top of it,
+      # node_modules and the Postgres image can leave the stock runner
+      # almost no free disk, and a full disk kills the linker mid-build. The
+      # preinstalled toolchains nothing in this lane uses (~20 GB) go first,
+      # as in the e2e lane.
+      - name: Free runner disk
+        if: steps.changes.outputs.rust == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h /
+
       - name: Setup Node.js
         if: steps.changes.outputs.rust == 'true'
         uses: ./.github/actions/setup-node
@@ -205,6 +217,12 @@ jobs:
       - name: Setup Rust
         if: steps.changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
+
+      # pg_query (the database front door's SQL parser) runs bindgen over
+      # PostgreSQL's parser headers at build time, which loads libclang.
+      - name: Install libclang
+        if: steps.changes.outputs.rust == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libclang-dev clang
 
       # `shared-key` joins the cache family the ci-cache-seed workflow writes
       # on every main merge — without it Swatinem keys per-job and a fresh
@@ -398,6 +416,12 @@ jobs:
       - name: Setup Rust
         if: steps.changes.outputs.e2e == 'true'
         uses: dtolnay/rust-toolchain@stable
+
+      # pg_query (the database front door's SQL parser) runs bindgen at build
+      # time, which loads libclang.
+      - name: Install libclang
+        if: steps.changes.outputs.e2e == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libclang-dev clang
 
       # Same shared-key as the unit-rust job and the ci-cache-seed workflow,
       # so this lane restores the seeded build instead of recompiling cold

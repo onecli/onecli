@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { Button } from "@onecli/ui/components/button";
 import { GitHubMark } from "./github-mark";
+import { ConnectGitHubAppButton } from "./connect-github-app-button";
 
 export interface LibraryAccessEmptyProps {
   /** "Install GitHub for skills only" is offered (the server allows it and
@@ -15,7 +15,8 @@ export interface LibraryAccessEmptyProps {
 /**
  * The connect dialog with no GitHub access to pick: install the GitHub App
  * for skills only when that is available, otherwise connect GitHub to the
- * organization first and come back to pick it.
+ * organization right here (setup + popup), and the picker appears once it
+ * lands.
  */
 export const LibraryAccessEmpty = ({
   canInstall,
@@ -38,17 +39,9 @@ export const LibraryAccessEmpty = ({
     ) : (
       <>
         <p className="text-muted-foreground max-w-sm text-sm">
-          Connect GitHub to the organization first, then pick it here.
+          Connect GitHub to the organization, then pick the repo here.
         </p>
-        {orgId && (
-          <Button asChild variant="outline">
-            <Link
-              href={`/org/${encodeURIComponent(orgId)}/settings/global-connections`}
-            >
-              Go to Shared Connections
-            </Link>
-          </Button>
-        )}
+        {orgId && <ConnectGitHubAppButton orgId={orgId} />}
       </>
     )}
   </div>

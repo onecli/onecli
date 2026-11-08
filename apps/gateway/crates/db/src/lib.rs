@@ -742,6 +742,80 @@ pub async fn find_source_connection_credentials(
     .context("querying source connection credentials")
 }
 
+/// A credential snapshot, never serialized or logged.
+#[derive(FromRow)]
+pub struct TestableConnection {
+    pub id: String,
+    pub scope: String,
+    pub organization_id: String,
+    pub credentials: String,
+}
+
+/// Tenant membership and both scope arms are fenced in SQL, not fetch-then-check.
+pub async fn find_testable_connection(
+    pool: &PgPool,
+    user_id: &str,
+    workspace_id: Option<&str>,
+    organization_id: Option<&str>,
+    id: &str,
+) -> Result<Option<TestableConnection>> {
+    sqlx::query_as::<_, TestableConnection>(
+        r#"SELECT c.id, c.scope, COALESCE(w.organization_id, c.organization_id) AS organization_id, c.credentials
+           FROM app_connections c LEFT JOIN workspaces w ON w.id = $2
+           JOIN organization_members m ON m.organization_id = COALESCE(w.organization_id, c.organization_id)
+           WHERE c.id = $3 AND m.user_id = $1 AND m.status <> 'suspended'
+             AND c.provider = 'postgres' AND c.status = 'connected' AND c.credentials IS NOT NULL
+             AND (($2 IS NOT NULL AND c.scope = 'workspace' AND c.workspace_id = w.id
+                   AND (c.organization_id IS NULL OR c.organization_id = w.organization_id))
+               OR ($2 IS NULL AND c.scope = 'organization' AND c.organization_id = $4
+                   AND c.workspace_id IS NULL))"#,
+    )
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .context("finding testable connection")
+}
+
+/// Update only the credential snapshot tested, with membership rechecked and an
+/// audit row in the same statement. A reconnect/move/delete race cannot bless a
+/// different credential. Zero updated rows is intentionally harmless.
+pub async fn record_connection_test(
+    pool: &PgPool,
+    user_id: &str,
+    workspace_id: Option<&str>,
+    row: &TestableConnection,
+    superuser: bool,
+) -> Result<()> {
+    sqlx::query(
+        r#"WITH updated AS (
+          UPDATE app_connections c
+          SET metadata = COALESCE(c.metadata, '{}'::jsonb) || jsonb_build_object('superuser', $7::boolean),
+              updated_at = now()
+          FROM organization_members m
+          WHERE c.id = $3 AND c.credentials = $4 AND c.scope = $5
+            AND m.organization_id = $6 AND m.user_id = $1 AND m.status <> 'suspended'
+            AND c.provider = 'postgres' AND c.status = 'connected'
+            AND (($2::text IS NOT NULL AND c.scope = 'workspace' AND c.workspace_id = $2
+                  AND (c.organization_id IS NULL OR c.organization_id = $6)
+                  AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $2 AND w.organization_id = $6))
+              OR ($2::text IS NULL AND c.scope = 'organization' AND c.organization_id = $6 AND c.workspace_id IS NULL))
+            AND (c.metadata->'superuser') IS DISTINCT FROM to_jsonb($7::boolean)
+          RETURNING c.id, c.scope
+        ) INSERT INTO audit_logs
+          (id, workspace_id, organization_id, user_id, user_email, action, service, status, source, metadata, created_at)
+          SELECT gen_random_uuid()::text, CASE WHEN updated.scope = 'workspace' THEN $2 ELSE NULL END,
+                 $6, $1, u.email, 'update', 'app-connection', 'success', 'api',
+                 jsonb_build_object('connectionId', updated.id, 'superuser', $7::boolean), now()
+          FROM updated JOIN users u ON u.id = $1"#,
+    ).bind(user_id).bind(workspace_id).bind(&row.id).bind(&row.credentials)
+        .bind(&row.scope).bind(&row.organization_id).bind(superuser)
+        .execute(pool).await.context("recording connection test")?;
+    Ok(())
+}
+
 /// An app connection row from the `app_connections` table.
 #[derive(Debug, Clone, PartialEq, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct AppConnectionRow {
@@ -866,6 +940,12 @@ where
 /// Replace a connection's encrypted credentials, but only while the row still
 /// holds `expected`, the ciphertext the refresh was computed from.
 ///
+/// A credential the provider just accepted supersedes any earlier refusal,
+/// so the write also clears `reauth_required_at`: a suspended installation
+/// that was unsuspended, or a disabled key that was re-enabled, stops reading
+/// "Needs reconnect" the moment a mint succeeds again (the dashboard's own
+/// credential write, `reconnectConnection`, does the same).
+///
 /// Returns whether the write landed. `false` means the row moved underneath
 /// the refresh (a reconnect wrote a fresh pair, a disconnect cleared it, or a
 /// delete removed it), and the newer state wins: a plain overwrite here is how
@@ -880,7 +960,8 @@ where
     E: sqlx::PgExecutor<'e>,
 {
     let result = sqlx::query(
-        r#"UPDATE app_connections SET credentials = $1, updated_at = now()
+        r#"UPDATE app_connections
+           SET credentials = $1, reauth_required_at = NULL, updated_at = now()
            WHERE id = $2 AND credentials = $3"#,
     )
     .bind(encrypted_credentials)
@@ -923,6 +1004,48 @@ pub async fn lock_app_connection_refresh(
         Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => Ok(false),
         Err(e) => Err(e).context("taking the app_connection refresh lock"),
     }
+}
+
+/// Record on a database connection's metadata whether its stored role logs
+/// in with superuser powers (a superuser, or a role that reaches the
+/// server's own files and programs), which the dashboard warns about: such a
+/// role can reach past the statement checks the gateway applies. The row is
+/// written only when the stored value differs, so a session start on an
+/// unchanged connection updates nothing. The authorized credential snapshot
+/// and tenant fence prevent a stale CONNECT-cache entry from stamping a
+/// reconnected, moved, disconnected or repurposed row.
+pub async fn record_app_connection_superuser<'e, E>(
+    executor: E,
+    expected: &AppConnectionRow,
+    workspace_id: &str,
+    organization_id: &str,
+    superuser: bool,
+) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query(
+        r#"UPDATE app_connections c
+              SET metadata = jsonb_set(COALESCE(c.metadata, '{}'::jsonb), '{superuser}', to_jsonb($2::boolean))
+            WHERE c.id = $1 AND c.credentials = $3 AND c.provider = $4 AND c.scope = $5
+              AND c.status = 'connected'
+              AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $6 AND w.organization_id = $7)
+              AND ((c.scope = 'workspace' AND c.workspace_id = $6
+                    AND (c.organization_id IS NULL OR c.organization_id = $7))
+                OR (c.scope = 'organization' AND c.organization_id = $7 AND c.workspace_id IS NULL))
+              AND COALESCE((c.metadata->>'superuser')::boolean, false) IS DISTINCT FROM $2"#,
+    )
+    .bind(&expected.id)
+    .bind(superuser)
+    .bind(&expected.credentials)
+    .bind(&expected.provider)
+    .bind(&expected.scope)
+    .bind(workspace_id)
+    .bind(organization_id)
+    .execute(executor)
+    .await
+    .context("recording app_connection superuser")?;
+    Ok(())
 }
 
 /// Record that the provider refused the refresh token of `expected`, only

@@ -5,6 +5,15 @@ import {
   type AdapterWorkItem,
   type AdapterWorkTurn,
 } from "@onecli/agent-protocol";
+import {
+  BLOCKED_BY_POLICY_MESSAGE,
+  GATEWAY_UNAVAILABLE_MESSAGE,
+  HOME_READ_ONLY_HELD_MESSAGE,
+  HOME_READ_ONLY_MESSAGE,
+  MODEL_EMPTY_RESPONSE_MESSAGE,
+  MODEL_KEY_UNREADABLE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import {
   dropDanglingLeadIn,
@@ -313,6 +322,24 @@ describe("what gets posted", () => {
     expect(posted.map((call) => call.form.text)).toEqual([
       ':stopwatch: Watch on "tests"\nTests passed &lt;ok&gt;',
     ]);
+  });
+
+  it("never mirrors a platform resume prompt (source approval): only the agent's answer posts", async () => {
+    const controlPlane = createFakeControlPlane(transcriptWith("Sent to Sam."));
+
+    await mirror({
+      controlPlane,
+      workItem: item({
+        source: "approval",
+        userId: null,
+        message:
+          "Sent as Helper to Sam. Already delivered: don't send it again. Confirm in one short line.",
+      }),
+    });
+
+    const texts = slack.callsTo("chat.postMessage").map((c) => c.form.text);
+    expect(texts).toEqual(["Sent to Sam."]);
+    expect(texts.join("\n")).not.toMatch(/Already delivered|one short line/);
   });
 
   it("posts only the answer for a provider-sourced turn", async () => {
@@ -1752,6 +1779,94 @@ describe("what gets posted", () => {
     expect("blocks" in posted[0]!.form).toBe(false);
   });
 
+  it("posts the attach-key card when the key exists but is not attached", async () => {
+    // The gateway's `access_restricted` on a model call: the workspace holds
+    // a key this agent was not given. Same card family, the attach verb.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: "This agent doesn't have access to your model key yet.",
+        errorCode: "model_key_not_attached",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*This agent doesn't have access to your model key*",
+    );
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Attach the key");
+  });
+
+  it("posts the re-enter card when the agent's key could not be read", async () => {
+    // The gateway's `credential_unavailable`: the agent HAS the key, but its
+    // saved value could not be read. Same card family, the re-enter verb,
+    // and never the usage-limit wording of a provider refusal.
+    const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+    await mirror({
+      controlPlane,
+      modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+      workItem: item({
+        source: "slack",
+        error: MODEL_KEY_UNREADABLE_MESSAGE,
+        errorCode: "model_key_unreadable",
+      }),
+    });
+
+    const posted = slack.callsTo("chat.postMessage");
+    expect(posted).toHaveLength(1);
+    const blocks = JSON.parse(posted[0]!.form.blocks!) as {
+      type: string;
+      text?: { text: string };
+      elements?: { text?: { text: string }; url?: string }[];
+    }[];
+    expect(blocks[0]?.text?.text).toBe(
+      "*OneCLI couldn't read this agent's model key*",
+    );
+    expect(posted[0]!.form.blocks).not.toMatch(/usage limit/i);
+    const button = blocks.find((b) => b.type === "actions")?.elements?.[0];
+    expect(button?.url).toBe("https://app.example.com/w/ws1/agents/ag1/models");
+    expect(button?.text?.text).toBe("Re-enter the key");
+  });
+
+  it.each([
+    ["blocked_by_policy", BLOCKED_BY_POLICY_MESSAGE],
+    ["gateway_unavailable", GATEWAY_UNAVAILABLE_MESSAGE],
+    // A read-only home: the Slack reply is the canonical sentence, never
+    // the kernel's "Read-only file system (os error 30)".
+    ["home_read_only", HOME_READ_ONLY_MESSAGE],
+    ["home_read_only_held", HOME_READ_ONLY_HELD_MESSAGE],
+  ])(
+    "posts the canonical sentence for %s as plain text, no card",
+    async (errorCode, error) => {
+      const controlPlane = createFakeControlPlane(transcriptWith(null));
+
+      await mirror({
+        controlPlane,
+        modelsUrl: "https://app.example.com/w/ws1/agents/ag1/models",
+        workItem: item({ source: "slack", error, errorCode }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toBe(error);
+      // No fix is a click away, so there is no button to offer.
+      expect("blocks" in posted[0]!.form).toBe(false);
+    },
+  );
+
   it("posts the provider-error card — headline, context line, and a button to the Models page", async () => {
     // The supervisor now produces `model_provider_error` and finishTurn's
     // allowlist carries it, so the code earns the web's same call to action
@@ -2071,6 +2186,59 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     expect(posted[0]?.form.text).toContain(
       "Something went wrong and this message didn",
     );
+  });
+
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) posts its canonical sentence: never silence",
+    async (errorCode, sentence) => {
+      // The shape the control plane closes a model's refusal or empty answer
+      // with: failed, coded, canonical copy on the row, and a transcript that
+      // holds only the run's start and clean end (no text, no error event).
+      // Before, the same turn closed `done` with nothing and posted nothing.
+      const controlPlane = createFakeControlPlane(
+        transcriptOf([
+          { type: "turn.started", payload: {} },
+          { type: "turn.done", payload: {} },
+        ]),
+      );
+
+      await mirror({
+        controlPlane,
+        workItem: item({
+          source: "slack",
+          status: "failed",
+          error: sentence,
+          errorCode,
+        }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toContain(sentence);
+      expect(posted[0]?.form.text).not.toMatch(/stop_reason|guardrail/);
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) posts nothing: why it must close failed", async () => {
+    // The before-state, kept as a pin: a successful turn with no words is the
+    // mirror's legitimate quiet (a deliberate no-reply), so the only way a
+    // refusal reaches the thread is the failed close the supervisor now sends.
+    const controlPlane = createFakeControlPlane(
+      transcriptOf([
+        { type: "turn.started", payload: {} },
+        { type: "turn.done", payload: {} },
+      ]),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "done" }),
+    });
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
   });
 
   it("a FAILED turn with only a transcript error event posts that message", async () => {

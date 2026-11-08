@@ -35,7 +35,10 @@ export const sentryPermissions: AppPermissionDefinition = {
           name: "Get project",
           description: "Retrieve project details",
           hostPattern: "*.sentry.io",
-          pathPattern: "/api/0/projects/*/*",
+          // Trailing slash = exactly the `{org}/{project}` depth. The bare
+          // `/projects/*/*` also took every deeper segment, among them
+          // `/keys/` (client key secrets) and `/hooks/` (signing secrets).
+          pathPattern: "/api/0/projects/*/*/",
           method: "GET",
         },
         {

@@ -1,6 +1,9 @@
 import {
+  approvalButtons,
+  APPROVE_ACTION,
   clampHeader,
   clampLabel,
+  DENY_ACTION,
   escapeSlackText,
   GROUP_APPROVE_ACTION,
   GROUP_DENY_ACTION,
@@ -11,6 +14,7 @@ import {
   rowActionId,
   shareFileWithBlocks,
   SharedMessageUnknownError,
+  similarNoteBlocks,
   SlackApiError,
   unpackMessageRef,
   updateBlocksMessage,
@@ -24,7 +28,12 @@ import {
   recordNounOf,
   summarizeChanges,
 } from "@onecli/api/lib/approval-groups";
+import { isProse } from "@onecli/api/lib/approval-text";
 import { mergeBatchTables } from "@onecli/api/lib/batch-table";
+import {
+  CHANNEL_CARD_DONE_LABEL,
+  type ChannelCardEnding,
+} from "@onecli/api/lib/channel-card-ending";
 import {
   BULK_VERBS,
   bulkTitle,
@@ -69,6 +78,31 @@ const fitting = (
     used += cost;
   }
   return kept;
+};
+
+/** The most one prose value may take of the section budget, so a long
+ *  template still leaves room for the rows after it. */
+const PROSE_BUDGET = 1_800;
+
+/** A value in a Slack code block: shown exactly as written (no bold, no
+ *  links, no mentions). Inside a code block Slack still decodes `&lt;` and
+ *  friends, so the text is escaped as everywhere else. A backtick could
+ *  close the block early (a run of three, or one beside a fence), so every
+ *  backtick sits between zero-width spaces: no two touch, and none touches
+ *  a fence. */
+const codeBlock = (value: string): string => {
+  const fenced = (raw: string) =>
+    escapeSlackText(raw).replace(/`/g, "\u200b`\u200b");
+  // Cut the text as written, then escape (a cut never splits an entity);
+  // escaping grows it, so cut shorter until the escaped text fits.
+  const raw = normalizeLines(value);
+  let keep = Math.min(raw.length, PROSE_BUDGET);
+  let text = fenced(raw.slice(0, keep));
+  while (text.length > PROSE_BUDGET && keep > 0) {
+    keep = Math.floor(keep * 0.8);
+    text = fenced(raw.slice(0, keep));
+  }
+  return `\`\`\`${text}${keep < raw.length ? "\n…" : ""}\`\`\``;
 };
 
 /** A detail value as Slack mrkdwn, linked to its record when it has one.
@@ -122,15 +156,24 @@ export const approvalCardBlocks = (
     : undefined;
   const fallbackTitle = `${escapeSlackText(approval.method ?? "?")} ${escapeSlackText(approval.host ?? "")}${clampLabel(escapeSlackText(approval.path ?? ""))}`;
   const subject = approval.summary?.subject;
-  const detailLines = (approval.summary?.details ?? [])
-    .slice(0, 8)
-    .map((d, i) => {
-      // The record the action is about reads by name alone ("Contact:
-      // Dana Reyes", linked): its id is noise on a one-record card.
-      const value =
-        i === subject?.row && subject.record ? subject.record : d.value;
-      return `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:* ${detailValue(value, d.url).replace(/\n/g, "\n>")}`;
-    });
+  // Every row the gateway sent: it already bounds them (field rows, files),
+  // and the section budget below keeps whole lines and names the rest, so
+  // a row past a fixed count is never dropped without a word.
+  const detailLines = (approval.summary?.details ?? []).map((d, i) => {
+    // The record the action is about reads by name alone ("Contact:
+    // Dana Reyes", linked): its id is noise on a one-record card.
+    const value =
+      i === subject?.row && subject.record ? subject.record : d.value;
+    const label = `>*${clampLabel(escapeSlackText(normalizeLines(d.label)))}:*`;
+    // Prose (a message template, a before → after, an email body) reads
+    // whole, as written: in a code block under its label, so a `*` in it
+    // stays a `*` and its line breaks stay. The section budget still
+    // bounds the card; a value too long for it is cut with a mark.
+    if (isProse(value) && !d.url) {
+      return `${label}\n${codeBlock(value)}`;
+    }
+    return `${label} ${detailValue(value, d.url).replace(/\n/g, "\n>")}`;
+  });
   // Hard section budget: keep whole lines while they fit, and say how many
   // were dropped rather than truncating silently.
   const kept = fitting(detailLines, "\n", DETAILS_BUDGET);
@@ -168,23 +211,9 @@ export const approvalCardBlocks = (
       : []),
     {
       type: "actions",
-      elements: [
-        {
-          type: "button",
-          style: "primary",
-          text: { type: "plain_text", text: "Approve" },
-          action_id: "channel_approve",
-          value: approval.id,
-        },
-        {
-          type: "button",
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
-        },
-      ],
+      elements: approvalButtons(approval.id, approval.similar),
     },
+    ...similarNoteBlocks(approval.similar, approval.agent?.name),
   ];
 };
 
@@ -465,23 +494,13 @@ const singleRecordCardBlocks = (
       : []),
     {
       type: "actions",
-      elements: [
-        {
-          type: "button",
-          style: "primary",
-          text: { type: "plain_text", text: kindCopy(bulk).approve },
-          action_id: "channel_approve",
-          value: approval.id,
-        },
-        {
-          type: "button",
-          style: "danger",
-          text: { type: "plain_text", text: "Deny" },
-          action_id: "channel_deny",
-          value: approval.id,
-        },
-      ],
+      elements: approvalButtons(
+        approval.id,
+        approval.similar,
+        kindCopy(bulk).approve,
+      ),
     },
+    ...similarNoteBlocks(approval.similar, approval.agent?.name),
   ];
 };
 
@@ -610,14 +629,14 @@ const bulkCardBlocks = (
           // A merged batch decides EXACTLY the requests it merged, through
           // the group click (the control plane refuses any id this presence
           // never posted), never one id standing for the rest.
-          action_id: merged ? GROUP_APPROVE_ACTION : "channel_approve",
+          action_id: merged ? GROUP_APPROVE_ACTION : APPROVE_ACTION,
           value: merged ? merged.packedIds : approval.id,
         },
         {
           type: "button",
           style: "danger",
           text: { type: "plain_text", text: "Deny" },
-          action_id: merged ? GROUP_DENY_ACTION : "channel_deny",
+          action_id: merged ? GROUP_DENY_ACTION : DENY_ACTION,
           value: merged ? merged.packedIds : approval.id,
         },
         // Slack's phone app opens a CSV as plain text, one cell per line;
@@ -738,12 +757,26 @@ const rowText = (
   return `${escapeSlackText(a.method ?? "?")} ${clampLabel(escapeSlackText(a.path ?? ""))}`;
 };
 
-const OUTCOME_ICON = {
+const OUTCOME_ICON: Record<ChannelCardEnding, string> = {
   approved: "✅",
   denied: "⛔",
   expired: "⌛",
+  cancelled: "↩️",
+  replaced: "✏️",
   decided: "☑️",
-} as const;
+  unknown: "➖",
+};
+
+/** The done line's order: decisions first, then the endings no one chose. */
+const DONE_ORDER: readonly ChannelCardEnding[] = [
+  "approved",
+  "denied",
+  "decided",
+  "expired",
+  "replaced",
+  "cancelled",
+  "unknown",
+];
 
 /**
  * The GROUPED card, and the table its CSV carries when it has one. A batch
@@ -799,11 +832,15 @@ const rowsCardBlocks = (view: GroupCardView): unknown[] => {
   const host = view.live[0]?.host;
   const blocks: unknown[] = [];
 
-  const doneCounts = { approved: 0, denied: 0, expired: 0, decided: 0 };
-  for (const s of view.settled) doneCounts[s.outcome] += 1;
-  const doneLine = (Object.keys(doneCounts) as (keyof typeof doneCounts)[])
-    .filter((k) => doneCounts[k] > 0)
-    .map((k) => `${OUTCOME_ICON[k]} ${doneCounts[k]} ${k}`)
+  const doneCounts = new Map<ChannelCardEnding, number>();
+  for (const s of view.settled) {
+    doneCounts.set(s.outcome, (doneCounts.get(s.outcome) ?? 0) + 1);
+  }
+  const doneLine = DONE_ORDER.filter((k) => doneCounts.has(k))
+    .map(
+      (k) =>
+        `${OUTCOME_ICON[k]} ${doneCounts.get(k)} ${CHANNEL_CARD_DONE_LABEL[k]}`,
+    )
     .join(" · ");
 
   if (live.length === 0) {
@@ -1050,9 +1087,12 @@ const isGone = (err: unknown): boolean =>
 export const slackApprovalCardUi: ApprovalCardUi = {
   async renderGroup(input) {
     const live = input.view.live.length;
+    // The notification text: a finished card can hold requests no one
+    // decided (the agent stopped waiting), so it says "done", like its
+    // Done line, never "decided".
     const text = live
       ? `${count(live, "approval")} needed`
-      : `${count(input.view.settled.length, "request")} decided`;
+      : `${count(input.view.settled.length, "request")} done`;
     const { blocks, table } = groupCard(input.view);
     try {
       await updateBlocksMessage(input.credential, {

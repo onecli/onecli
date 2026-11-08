@@ -272,6 +272,7 @@ describe.skipIf(!PROOF_URL)(
       expect(connect.status).toBe(200);
       const connectionId = (connect.json as { connection: { id: string } })
         .connection.id;
+      expect(connect.json).toMatchObject({ connectionId });
       for (const agent of [alpha, beta]) {
         expect((await grantsOf(agent.id)).connections).toEqual([]);
         expect((await injectableFor(agent.id)).connections).toEqual([]);
@@ -354,7 +355,10 @@ describe.skipIf(!PROOF_URL)(
       });
       expect(fromBeta.status).toBe(200);
       // A re-add carries no `connection` (nothing was created).
-      expect(fromBeta.json).toEqual({ success: true });
+      expect(fromBeta.json).toEqual({
+        success: true,
+        connectionId: alphaConnection,
+      });
       expect((await grantsOf(alpha.id)).connections).toEqual([
         `${alphaConnection}:full`,
       ]);
@@ -370,6 +374,10 @@ describe.skipIf(!PROOF_URL)(
         agentId: gamma.id,
       });
       expect(byId.status).toBe(200);
+      expect(byId.json).toEqual({
+        success: true,
+        connectionId: alphaConnection,
+      });
       expect((await grantsOf(gamma.id)).connections).toEqual([]);
 
       // ── 5. A foreign agent id is refused and leaves nothing behind.

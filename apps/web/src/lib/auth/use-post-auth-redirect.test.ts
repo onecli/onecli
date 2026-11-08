@@ -245,7 +245,7 @@ describe("usePostAuthRedirect — a parked join link", () => {
     renderHook(() => usePostAuthRedirect());
 
     await waitFor(() => {
-      expect(replace).toHaveBeenCalledWith("/w/ws-1/overview");
+      expect(replace).toHaveBeenCalledWith("/w/ws-1");
     });
     expect(apiFetch).toHaveBeenCalledWith("/v1/auth/session");
     expect(assign).not.toHaveBeenCalled();

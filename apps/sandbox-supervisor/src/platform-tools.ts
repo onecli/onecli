@@ -38,6 +38,10 @@ import { log } from "./log";
  * boot-time state never mixes with agent-owned files.
  */
 
+/** Failed calls in a row of one tool in one turn before its refusal says
+ * stop. */
+const MAX_FAILURES_IN_A_ROW = 2;
+
 /**
  * Per-process, deliberately: one container runs one supervisor, but tests —
  * and any future co-located pair — must never race each other on a fixed
@@ -49,6 +53,11 @@ export const platformToolsSocketPath = (): string =>
 
 /** Under jcode's own 30s MCP-call failure, so timeouts stay OUR words. */
 const TOOL_CALL_TIMEOUT_MS = 25_000;
+
+/** Of a call's budget, what a `prepare` step must leave for the forward:
+ * the control plane's send path (recipient lookup, the approval card)
+ * answers well inside this. */
+const FORWARD_RESERVE_MS = 10_000;
 
 /** A tool the platform serves, in the shape MCP advertises: name, prose, and
  * a plain JSON Schema (the api's zod is the enforcement authority; this is
@@ -71,6 +80,20 @@ export interface PlatformToolDefinition {
     args: unknown,
     context: { conversationId: string; turnId: string } | null,
   ) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  /**
+   * A LOCAL step before a control-plane-executed call: rewrites the args
+   * (or refuses) in this container first. send_message `files` uses it:
+   * the bytes live here, so each path is read and streamed as a staged
+   * attachment, and the call is forwarded with `attachmentIds` instead.
+   * A refusal answers the model and nothing is forwarded. It shares the
+   * call's clock: it must settle by `deadline` (epoch ms), which leaves
+   * `FORWARD_RESERVE_MS` for the forward inside jcode's 30s cap.
+   */
+  prepare?: (
+    args: unknown,
+    context: { conversationId: string; turnId: string } | null,
+    deadline: number,
+  ) => Promise<{ ok: true; args: unknown } | { ok: false; error: string }>;
 }
 
 /** A capability contributes its instruction fragment through the renderer and
@@ -79,6 +102,8 @@ export interface PlatformToolsOptions {
   socketPath?: string;
   /** Test seam only; production always uses TOOL_CALL_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Test seam only; production always reserves FORWARD_RESERVE_MS. */
+  forwardReserveMs?: number;
   /**
    * The tool set, or a function returning the CURRENT one. jcode spawns a
    * fresh bridge per session and the bridge asks once at startup, so a
@@ -164,10 +189,20 @@ export const startPlatformTools = async (
   const pending = new Map<string, PendingCall>();
   const connections = new Set<Socket>();
   let closed = false;
+  /**
+   * Failed calls in a row per (turn, tool): the loop guard. A model that
+   * keeps retrying a refused call with name variations burns the turn; from
+   * the cap on, the refusal itself tells it to stop and ask. A success
+   * resets it, so legitimate work spread over many calls (several messages
+   * changed, one bad id among them) is never cut off. Code, not prompt, so
+   * it holds whatever the model does.
+   */
+  const failuresInARow = new Map<string, number>();
 
   const callTool = (
     tool: string,
     args: unknown,
+    timeoutMs: number,
   ): Promise<Extract<WorkItem, { kind: "tool.result" }>> =>
     new Promise((resolve) => {
       const callId = randomUUID();
@@ -193,7 +228,7 @@ export const startPlatformTools = async (
           error:
             "The platform did not answer this tool call in time. It may have been applied — check before retrying anything that creates or cancels.",
         });
-      }, options.timeoutMs ?? TOOL_CALL_TIMEOUT_MS);
+      }, timeoutMs);
       timer.unref();
       pending.set(callId, { resolve, timer });
 
@@ -320,7 +355,53 @@ export const startPlatformTools = async (
         });
         return;
       }
-      const result = await callTool(tool, request.args);
+      // One clock for the whole call: a local `prepare` (send_message files
+      // staged here) and the forward both fit inside jcode's 30s cap, so
+      // the model always reads OUR answer, never the vendor's timeout.
+      const deadline = Date.now() + (options.timeoutMs ?? TOOL_CALL_TIMEOUT_MS);
+      let forwardArgs: unknown = request.args;
+      let refused: string | null = null;
+      if (definition.prepare) {
+        try {
+          const prepared = await definition.prepare(
+            request.args,
+            options.activeTurn(tool),
+            deadline - (options.forwardReserveMs ?? FORWARD_RESERVE_MS),
+          );
+          if (prepared.ok) forwardArgs = prepared.args;
+          else refused = prepared.error;
+        } catch (error) {
+          refused = `The tool failed: ${String(error).slice(0, 200)}`;
+        }
+        // A prepare that overran its share leaves nothing for the forward:
+        // refuse here rather than send a call whose answer can't arrive.
+        if (!refused && deadline - Date.now() <= 0) {
+          refused = "The tool ran out of time. Nothing was sent; try again.";
+        }
+      }
+      // A local refusal counts toward the loop guard like a remote one.
+      const result: { ok: boolean; result?: unknown; error?: string } = refused
+        ? { ok: false, error: refused }
+        : await callTool(tool, forwardArgs, deadline - Date.now());
+      const turnId = options.activeTurn(tool)?.turnId ?? null;
+      if (turnId) {
+        const key = `${turnId}:${tool}`;
+        if (result.ok) {
+          failuresInARow.delete(key);
+        } else {
+          const failures = (failuresInARow.get(key) ?? 0) + 1;
+          if (failuresInARow.size >= 500) failuresInARow.clear();
+          failuresInARow.set(key, failures);
+          if (failures >= MAX_FAILURES_IN_A_ROW) {
+            respond(socket, {
+              id,
+              ok: false,
+              error: `${result.error ?? "Tool call failed"}\n\n"${tool}" has now failed ${failures} times in a row in this turn. Stop calling it. Tell the person in one short line what failed and ask how to proceed.`,
+            });
+            return;
+          }
+        }
+      }
       respond(socket, {
         id,
         ok: result.ok,

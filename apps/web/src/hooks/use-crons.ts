@@ -27,10 +27,32 @@ export const useCrons = (agentId: string) =>
   useQuery({
     queryKey: queryKeys.crons.agent(agentId),
     queryFn: () => crons.list(agentId),
+    // While a run is going, the row follows it to its result, then the
+    // polling stops (the eval row does the same).
+    refetchInterval: (query) =>
+      query.state.data?.crons.some((c) => c.running) ? 3_000 : false,
   });
 
 const refreshCrons = (qc: QueryClient) =>
   qc.invalidateQueries({ queryKey: queryKeys.crons.all() });
+
+/**
+ * "When" words the dialog's own rules did not understand, read by a fast
+ * model on the agent's key. Off while `text` is null (rules understood it,
+ * or the user is still typing). The same words are never asked twice.
+ */
+export const useParseWords = (
+  agentId: string,
+  text: string | null,
+  timezone: string,
+) =>
+  useQuery({
+    queryKey: queryKeys.crons.parse(agentId, text ?? "", timezone),
+    queryFn: () => crons.parseWords(agentId, { text: text ?? "", timezone }),
+    enabled: text !== null && text.trim() !== "",
+    staleTime: Infinity,
+    retry: false,
+  });
 
 const cronRow = (cronId: string) =>
   throughField<{ crons: AgentCron[] }, "crons", AgentCron>(
@@ -99,9 +121,16 @@ export const useRunCronNow = (agentId: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (cronId: string) => crons.runNow(agentId, cronId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.crons.all() });
-    },
+    // The fire lands within a poll tick: take the server's row (a re-run
+    // one-shot comes back enabled) and show it running now, instead of a
+    // refetch that can predate the fire. The poll then follows the run.
+    onSuccess: (cron, cronId) =>
+      patchItem(
+        qc,
+        queryKeys.crons.agent(agentId),
+        cronRow(cronId),
+        (c) => c && { ...c, ...cron, running: true },
+      ),
   });
 };
 

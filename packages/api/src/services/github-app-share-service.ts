@@ -60,6 +60,9 @@ export interface SharedInstallation {
   /** Connections that already reach the caller's scope (its own, or an
    *  org-level one a workspace inherits). */
   connectedHere: number;
+  /** Those connections' ids, this scope's own first, then org-level ones.
+   * An agent page turns one on for the agent instead of building another. */
+  connectedHereIds: string[];
 }
 
 /** Every connected GitHub App connection of the caller's org, originals and
@@ -184,14 +187,19 @@ export const listSharedInstallations = async (
 
   const byInstallation = new Map<
     string,
-    { root: (typeof rows)[number] | null; connectedHere: number }
+    {
+      root: (typeof rows)[number] | null;
+      ownIds: string[];
+      orgIds: string[];
+    }
   >();
   for (const row of rows) {
     const installationId = metaString(row.metadata, "installationId");
     if (!installationId) continue;
     const entry = byInstallation.get(installationId) ?? {
       root: null,
-      connectedHere: 0,
+      ownIds: [],
+      orgIds: [],
     };
     if (!row.sourceConnectionId && !entry.root) entry.root = row;
     // The caller's own original wins over an older one elsewhere: the same
@@ -204,22 +212,25 @@ export const listSharedInstallations = async (
     ) {
       entry.root = row;
     }
-    if (reachesScope(row, target)) entry.connectedHere += 1;
+    if (isInScope(row, target)) entry.ownIds.push(row.id);
+    else if (reachesScope(row, target)) entry.orgIds.push(row.id);
     byInstallation.set(installationId, entry);
   }
 
   const result: SharedInstallation[] = [];
-  for (const [installationId, { root, connectedHere }] of byInstallation) {
+  for (const [installationId, { root, ownIds, orgIds }] of byInstallation) {
     // Only an original connection can be a source: a derived one holds a
     // narrowed grant, and its own source already represents the installation.
     if (!root) continue;
+    const connectedHereIds = [...ownIds, ...orgIds];
     result.push({
       sourceConnectionId: root.id,
       installationId,
       account: metaString(root.metadata, "username"),
       accountType: metaString(root.metadata, "accountType"),
       avatarUrl: metaString(root.metadata, "avatarUrl"),
-      connectedHere,
+      connectedHere: connectedHereIds.length,
+      connectedHereIds,
     });
   }
   return result;

@@ -7,6 +7,7 @@ import { docker } from "./docker";
 import { github } from "./github";
 import { githubApp } from "./github-app";
 import { gitlab } from "./gitlab";
+import { bitbucket } from "./bitbucket";
 import { gmail } from "./gmail";
 import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
@@ -18,6 +19,7 @@ import { googleContacts } from "./google-contacts";
 import { googleDocs } from "./google-docs";
 import { googleDrive } from "./google-drive";
 import { googleForms } from "./google-forms";
+import { googleKeep } from "./google-keep";
 import { googleMeet } from "./google-meet";
 import { googlePhotos } from "./google-photos";
 import { googleSearchConsole } from "./google-search-console";
@@ -61,8 +63,10 @@ import { fathom } from "./fathom";
 import { fireflies } from "./fireflies";
 import { timeless } from "./timeless";
 import { circleback } from "./circleback";
+import { heyreach } from "./heyreach";
 import { zohoCrm } from "./zoho-crm";
 import { snowflake } from "./snowflake";
+import { postgres } from "./postgres";
 import { stripe } from "./stripe";
 import { navan } from "./navan";
 import { salesforce } from "./salesforce";
@@ -73,6 +77,8 @@ import { onyx } from "./onyx";
 import { twilio } from "./twilio";
 import { dripify } from "./dripify";
 import { webflow } from "./webflow";
+import { tavily } from "./tavily";
+import { zendesk } from "./zendesk";
 
 const staticApps: AppDefinition[] = [
   salesforce,
@@ -80,6 +86,7 @@ const staticApps: AppDefinition[] = [
   github,
   githubApp,
   gitlab,
+  bitbucket,
   googleDrive,
   googleCalendar,
   googleChat,
@@ -96,6 +103,7 @@ const staticApps: AppDefinition[] = [
   googleSheets,
   googleSlides,
   googleTasks,
+  googleKeep,
   notion,
   jira,
   confluence,
@@ -135,8 +143,10 @@ const staticApps: AppDefinition[] = [
   fireflies,
   timeless,
   circleback,
+  heyreach,
   zohoCrm,
   snowflake,
+  postgres,
   stripe,
   navan,
   pylon,
@@ -146,6 +156,8 @@ const staticApps: AppDefinition[] = [
   twilio,
   dripify,
   webflow,
+  tavily,
+  zendesk,
 ];
 
 export const getApps = (): AppDefinition[] => [...staticApps];

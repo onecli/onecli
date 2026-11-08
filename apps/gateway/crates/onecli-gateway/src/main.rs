@@ -218,6 +218,13 @@ async fn main() -> Result<()> {
     };
     let pool = db::create_pool(&database_url).await?;
     info!("database pool created");
+    // No agent is ever dialed to the gateway's own database or Redis, whatever
+    // GATEWAY_ALLOW_PRIVATE_DESTINATIONS opens (`proxy::egress`).
+    proxy::egress::install_own_stores(&proxy::egress::own_stores_from(
+        &database_url,
+        configured_redis().as_ref().map(|(h, p)| (h.as_str(), *p)),
+    ))
+    .await;
     let telemetry_pool = pool.clone();
     // The pool itself moves into the PolicyEngine below, and that moves into
     // the server — so the shutdown sequence needs its own handle to close it.
@@ -279,6 +286,10 @@ async fn main() -> Result<()> {
     info!("gateway ready");
 
     // Serve until a shutdown signal stops the listener.
+    // SQL parsing for the database front door runs on its own threads, in
+    // bounded memory; starting them can only fail on thread exhaustion.
+    let parse_pool =
+        dbproxy::parse_pool::ParsePool::new().context("starting the SQL parse threads")?;
     let server = GatewayServer::new(
         ca,
         cli.port,
@@ -286,6 +297,7 @@ async fn main() -> Result<()> {
         vault_service,
         cache,
         approval_store,
+        parse_pool,
     );
     let entrypoints: Vec<Box<dyn Entrypoint>> = vec![Box::new(server)];
     let result = server::entrypoint::run_all(entrypoints).await;
@@ -321,6 +333,21 @@ fn expand_tilde(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+/// The Redis endpoint this process is configured to use (`REDIS_HOST`, and
+/// `REDIS_PORT` defaulting to 6379), or `None` when it runs without Redis.
+/// Same blank-means-unset rule as the store selection in `wiring`.
+fn configured_redis() -> Option<(String, u16)> {
+    if !cache::redis_host_configured() {
+        return None;
+    }
+    let host = std::env::var("REDIS_HOST").ok()?;
+    let port = std::env::var("REDIS_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or(6379);
+    Some((host.trim().to_string(), port))
 }
 
 /// Assemble a postgres URL from the individual DB_* parts (some deployments

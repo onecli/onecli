@@ -385,12 +385,27 @@ describe.skipIf(!PROOF_URL)("the sweep", () => {
       select: { awakeSeconds: true },
     });
     const todayMidnight = new Date(midnight.getTime() + 24 * HOUR);
+    // Every share comes from the planted times, so the test holds at any
+    // wall clock. In the first 45 s after a UTC midnight `closedAt` is still
+    // yesterday: then D+1 gets all of r2 and there is no row for today.
     // Postgres truncates the sum to a bigint; the planted ms edge may round
-    // either way, so today's share is checked to the second.
-    const todayShare = (closedAt.getTime() - todayMidnight.getTime()) / 1000;
+    // either way, so the open-ended shares are checked to the second.
+    const r2Start = midnight.getTime() + 5 * HOUR;
+    const r2Yesterday =
+      (Math.min(closedAt.getTime(), todayMidnight.getTime()) - r2Start) / 1000;
+    const r2Today =
+      Math.max(0, closedAt.getTime() - todayMidnight.getTime()) / 1000;
     const totals = after.map((d) => Number(d.awakeSeconds));
-    expect(totals.slice(0, 2)).toEqual([3600, 3 * 3600 + 19 * 3600]);
-    expect(Math.abs((totals[2] ?? 0) - todayShare)).toBeLessThanOrEqual(1);
+    expect(totals[0]).toBe(3600);
+    expect(
+      Math.abs((totals[1] ?? 0) - (3 * 3600 + r2Yesterday)),
+    ).toBeLessThanOrEqual(1);
+    if (r2Today > 0) {
+      expect(totals).toHaveLength(3);
+      expect(Math.abs((totals[2] ?? 0) - r2Today)).toBeLessThanOrEqual(1);
+    } else {
+      expect(totals).toHaveLength(2);
+    }
   });
 
   it("the rollup leaves a row closed inside the lag for the next pass (the in-flight window)", async () => {
@@ -456,12 +471,15 @@ describe.skipIf(!PROOF_URL)("the usage reads", () => {
     );
 
     const before = sinceMidnight();
-    const result = await usage.getAgentRuntimeUsage(
-      WORKSPACE,
-      ORG,
-      agentId,
-      lastDays(3),
-    );
+    // The window ends at tomorrow's UTC midnight, not `now`: a `to` of now
+    // clips s2 (00:20 to 00:35 UTC) whenever the suite runs before 00:35
+    // (seen on CI at 00:15 UTC: 899 s short), the same trap the org read
+    // below hit. Closed runs are then exact under any wall clock, and the
+    // open run s3 is still bounded by the database's `now()`.
+    const result = await usage.getAgentRuntimeUsage(WORKSPACE, ORG, agentId, {
+      from: midnight(3),
+      to: midnight(-1),
+    });
     const after = sinceMidnight();
     // The open run's today share is read at the database's `now()`, which
     // sits between the two local readings; everything else is exact.
@@ -541,7 +559,7 @@ describe.skipIf(!PROOF_URL)("the usage reads", () => {
     const foreign = await seedAgent("org-foreign", WORKSPACE_B);
     await plantDay(a, midnight(1), 3600);
     await plantDay(b, midnight(1), 3600);
-    // b also ran today: 1h closed.
+    // b also ran today: 1h closed, 01:00 to 02:00 UTC.
     await plantInterval(
       b,
       "ob",
@@ -557,7 +575,14 @@ describe.skipIf(!PROOF_URL)("the usage reads", () => {
       sandboxId: `${P}sb-f`,
     });
 
-    const result = await usage.getOrgRuntimeUsage(ORG, lastDays(2));
+    // The window ends at today 02:00 UTC, not `now`: a `to` of now clips
+    // b's run whenever the suite runs before 02:00 UTC (seen on CI at
+    // 01:22 UTC: 4919 s). The read is exact for a closed run under any
+    // wall clock, a `to` in the future only bounds open runs (none here).
+    const result = await usage.getOrgRuntimeUsage(ORG, {
+      from: midnight(2),
+      to: new Date(midnight().getTime() + 2 * HOUR),
+    });
     expect(result.agents).toEqual([
       { agentId: b, awakeSeconds: 7200 },
       { agentId: a, awakeSeconds: 3600 },

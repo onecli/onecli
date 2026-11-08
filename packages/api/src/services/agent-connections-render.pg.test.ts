@@ -33,6 +33,7 @@ const FOREIGN = `${P}conn-foreign`;
 const OTHER_ORG = `${P}other-org`;
 const ORG_CONN = `${P}conn-org`;
 const FOREIGN_ORG_CONN = `${P}conn-foreign-org`;
+const PG = `${P}conn-pg`;
 const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
 
 const reset = async () => {
@@ -99,6 +100,7 @@ beforeAll(async () => {
   });
   await conn(GMAIL, { provider: "gmail", label: "j@example.com" });
   await conn(UNGRANTED, { provider: "dropbox", label: "nobody" });
+  await conn(PG, { provider: "postgres", label: "orders-db" });
   await conn(FOREIGN, {
     provider: "salesforce",
     label: "foreign",
@@ -192,6 +194,22 @@ describe.skipIf(!PROOF_URL)("connectionsForRender over real PostgreSQL", () => {
     expect(list[1]?.apiHosts).toEqual([]);
     // Another agent in the same workspace holds no grant — sees nothing.
     expect(await render.connectionsForRender(OTHER_AGENT)).toEqual([]);
+  });
+
+  it("names a database by connection id for the front door, with no HTTP facts", async () => {
+    await grants.setConnectionGrant(SCOPE, AGENT, PG, { access: "full" }, null);
+    const database = (await render.connectionsForRender(AGENT)).find(
+      (c) => c.provider === "postgres",
+    );
+    expect(database).toMatchObject({
+      name: "PostgreSQL",
+      label: "orders-db",
+      host: null,
+      apiHosts: [],
+      endpoints: [],
+      database: { engine: "postgres", connectionId: PG },
+    });
+    await grants.removeConnectionGrant(SCOPE, AGENT, PG, null);
   });
 
   it("drops a connection once its grant is removed", async () => {

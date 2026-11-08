@@ -1,5 +1,18 @@
 import { db } from "@onecli/db";
+import { cleanLabel } from "../lib/format";
 import { ServiceError } from "./errors";
+
+/** A person's name as the agent says it (their name, else their email),
+ * cleaned for prose; null when the user is gone or has neither. */
+export const userDisplayName = async (
+  userId: string,
+): Promise<string | null> => {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { name: true, email: true },
+  });
+  return cleanLabel(user?.name || user?.email || "") || null;
+};
 
 export const getUser = async (userId: string) => {
   const user = await db.user.findUnique({

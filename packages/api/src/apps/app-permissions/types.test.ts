@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   allGroupTools,
+  defaultOtherReads,
   toAppPermissionDefinitionSummary,
+  toolFactory,
   wildcardCoversGroup,
   type AppPermissionDefinition,
   type AppTool,
@@ -104,6 +106,39 @@ describe("toAppPermissionDefinitionSummary", () => {
         .unlisted,
     ).toBe("block");
   });
+
+  it("carries the exhaustive flag only when the catalog sets one", () => {
+    expect(toAppPermissionDefinitionSummary(definition)).not.toHaveProperty(
+      "exhaustive",
+    );
+    expect(
+      toAppPermissionDefinitionSummary({
+        ...definition,
+        unlisted: "block",
+        exhaustive: true,
+      }).exhaustive,
+    ).toBe(true);
+  });
+
+  it("carries the unlisted-reads opt-in only when the catalog sets one", () => {
+    expect(toAppPermissionDefinitionSummary(definition)).not.toHaveProperty(
+      "unlistedReads",
+    );
+    expect(
+      toAppPermissionDefinitionSummary({
+        ...definition,
+        unlistedReads: "allow",
+      }).unlistedReads,
+    ).toBe("allow");
+  });
+});
+
+describe("defaultOtherReads", () => {
+  it("allows other reads only for a catalog that opted in", () => {
+    expect(defaultOtherReads({ unlistedReads: "allow" })).toBe("allow");
+    expect(defaultOtherReads({})).toBe("ask");
+    expect(defaultOtherReads(undefined)).toBe("ask");
+  });
 });
 
 describe("allGroupTools", () => {
@@ -173,5 +208,59 @@ describe("wildcardCoversGroup", () => {
   it("is false when a tool is on a different host", () => {
     const otherHost: AppTool = { ...covered, hostPattern: "cdn.testapp.com" };
     expect(wildcardCoversGroup(wildcard, [otherHost])).toBe(false);
+  });
+});
+
+describe("toolFactory", () => {
+  it("stores one method as `method` and omits unset optional keys", () => {
+    const tool = toolFactory("api.testapp.com")(
+      "read_one",
+      "Read one",
+      "Reads one",
+      "/api/one",
+      ["GET"],
+    );
+    expect(tool).toStrictEqual({
+      id: "read_one",
+      name: "Read one",
+      description: "Reads one",
+      hostPattern: "api.testapp.com",
+      pathPattern: "/api/one",
+      method: "GET",
+    });
+    expect(Object.keys(tool)).not.toContain("hostAliasPatterns");
+    expect(Object.keys(tool)).not.toContain("aliasPatterns");
+    expect(Object.keys(tool)).not.toContain("methods");
+  });
+
+  it("stores several methods as `methods` and keeps both alias axes", () => {
+    const tool = toolFactory("api.testapp.com", ["api.eu.testapp.com"])(
+      "write_one",
+      "Write one",
+      "Writes one",
+      "/api/one",
+      ["PUT", "DELETE"],
+      ["/api/one/*/"],
+    );
+    expect(Object.keys(tool)).toStrictEqual([
+      "id",
+      "name",
+      "description",
+      "hostPattern",
+      "hostAliasPatterns",
+      "pathPattern",
+      "aliasPatterns",
+      "methods",
+    ]);
+    expect(tool).toStrictEqual({
+      id: "write_one",
+      name: "Write one",
+      description: "Writes one",
+      hostPattern: "api.testapp.com",
+      hostAliasPatterns: ["api.eu.testapp.com"],
+      pathPattern: "/api/one",
+      aliasPatterns: ["/api/one/*/"],
+      methods: ["PUT", "DELETE"],
+    });
   });
 });

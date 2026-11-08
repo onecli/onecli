@@ -209,15 +209,21 @@ export const SecretCard = ({
                 variant="ghost"
                 size="icon"
                 className="size-7"
+                aria-label={`Edit ${secret.name}`}
                 onClick={() => setEditOpen(true)}
               >
-                <Pencil className="size-3.5" />
+                <Pencil className="size-3.5" aria-hidden="true" />
               </Button>
 
               <AlertDialog>
                 <AlertDialogTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-7">
-                    <Trash2 className="size-3.5" />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={`Delete ${secret.name}`}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden="true" />
                   </Button>
                 </AlertDialogTrigger>
                 <AlertDialogContent>

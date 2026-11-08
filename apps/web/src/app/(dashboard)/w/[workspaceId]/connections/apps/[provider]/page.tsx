@@ -1,7 +1,6 @@
-import { notFound } from "next/navigation";
-import { getApp } from "@onecli/api/apps/registry";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
 import { AppDetail } from "../../_components/app-detail";
+import { loadAppDetail } from "../../_components/load-app-detail";
 
 interface Props {
   params: Promise<{ provider: string }>;
@@ -9,43 +8,9 @@ interface Props {
 
 const AppDetailPage = async ({ params }: Props) => {
   const { provider } = await params;
-  const app = getApp(provider);
-  if (!app) notFound();
+  const data = await loadAppDetail(provider, checkAppConfigExists);
 
-  let hasEnvDefaults = false;
-  if (app.configurable) {
-    const defaults = Object.values(app.configurable.envDefaults ?? {});
-    hasEnvDefaults =
-      defaults.length > 0 && defaults.every((envVar) => !!process.env[envVar]);
-  }
-
-  let hasAppConfig = false;
-  try {
-    hasAppConfig = await checkAppConfigExists(provider);
-  } catch {
-    // Auth may not be resolved; treat as defaults
-  }
-
-  return (
-    <AppDetail
-      app={{
-        id: app.id,
-        name: app.name,
-        icon: app.icon,
-        darkIcon: app.darkIcon,
-        description: app.description,
-        connectionType: app.connectionMethod.type,
-        hasApiKeyAlternate: (app.additionalMethods ?? []).some(
-          (m) => m.type === "api_key",
-        ),
-        blocklist: app.blocklist,
-        setupGuideUrl: app.setupGuideUrl,
-      }}
-      configurable={app.configurable}
-      hasEnvDefaults={hasEnvDefaults}
-      hasAppConfig={hasAppConfig}
-    />
-  );
+  return <AppDetail {...data} />;
 };
 
 export default AppDetailPage;

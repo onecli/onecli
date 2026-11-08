@@ -24,7 +24,7 @@ export interface SlackReadConnectionRowProps {
  * caller has connected. The switch reads ON and cannot be flipped here: the
  * connection is the caller's own Slack on this agent's app, and turning it
  * off means disconnecting (which also stops every share), so that lives on
- * the Slack page that Manage opens, beside the shares themselves.
+ * Contacts ("acts as you") that Manage opens, beside the shares themselves.
  */
 export const SlackReadConnectionRow = ({
   agentId,
@@ -38,7 +38,7 @@ export const SlackReadConnectionRow = ({
   const label =
     profile?.email ?? profile?.realName ?? profile?.handle ?? "Your Slack";
   const mine = (grants.data?.grants ?? []).filter((g) => g.mine).length;
-  const href = agentSectionPath(pathname, agentId, "channels");
+  const href = agentSectionPath(pathname, agentId, "contacts");
 
   return (
     <div className="flex items-center justify-between gap-4 py-3">
@@ -72,7 +72,7 @@ export const SlackReadConnectionRow = ({
                 size="sm"
                 checked
                 disabled
-                aria-label="Slack read access is on. Manage it on the Slack page."
+                aria-label="Slack read access is on. Manage it in Contacts."
               />
             </span>
           </TooltipTrigger>

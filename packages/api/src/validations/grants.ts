@@ -24,10 +24,9 @@ export const connectionGrantSchema = z
       resources: sessionPolicySchema.nullish(),
     }),
     // The product-default attach (the attach toggles, the connecting agent's
-    // grant): the server resolves it per provider (`defaultConnectionGrant`):
-    // read tools allowed, write tools and requests outside the tool list
-    // needing approval (full access for an app with no tool list). Never
-    // stored as such, so it never reads back.
+    // grant): the server resolves it per provider (`defaultConnectionGrant`,
+    // whose doc says what it writes). Never stored as such, so it never reads
+    // back.
     z.object({
       access: z.literal("default"),
       resources: sessionPolicySchema.nullish(),

@@ -1,9 +1,14 @@
 "use client";
 
 import { Message, MessageContent } from "@onecli/ui/components/message";
+import { APPROVAL_RESUME_SOURCE } from "@onecli/api/validations/conversation";
 import type { Turn } from "@/lib/api/types";
 import type { RenderedTurn, SentNowOutcome } from "@/lib/chat/transcript";
-import { isAutomationTurn, isJoiningTurn } from "@/lib/chat/turns";
+import {
+  isAutomationTurn,
+  isJoiningTurn,
+  isPlatformAuthoredTurn,
+} from "@/lib/chat/turns";
 import { AgentAnswer } from "./agent-answer";
 import { AutomationTurnHeader } from "./automation-turn";
 import { NarrationText } from "./narration-text";
@@ -64,6 +69,14 @@ export const FollowUpExchange = ({
           source={followUp.source}
           title={followUp.message}
         />
+      ) : isPlatformAuthoredTurn(followUp) ? (
+        // A platform resume: its prompt is for the agent only, never shown
+        // as anyone's words. After a decided card, say what woke it.
+        followUp.source === APPROVAL_RESUME_SOURCE ? (
+          <p className="text-muted-foreground text-xs">
+            Continued after your choice
+          </p>
+        ) : null
       ) : (
         <UserBubble
           text={followUp.message}

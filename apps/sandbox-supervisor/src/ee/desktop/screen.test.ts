@@ -1,5 +1,6 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DESKTOP_CLIPBOARD_MAX_WIRE_BYTES } from "@onecli/agent-protocol";
 import { describe, expect, it } from "vitest";
 import { startDesktop } from "../../desktop";
 import {
@@ -53,7 +54,8 @@ const withLayerFakes = (
     fake(
       bin,
       "X0tigervnc",
-      `port=""; input=""
+      `printf '%s\\n' "$@" > "${log}.args"
+port=""; input=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -rfbport) port="$2"; shift ;;
@@ -193,7 +195,39 @@ describe("the screen servers", () => {
       ]);
       expect(startedPids(bin)).toHaveLength(4);
 
+      const expectServerArgs = (port: number, accept: "0" | "1") => {
+        // Captured by the fake executable, not a reimplementation of serverArgs.
+        expect(readFileSync(`${log}.args`, "utf8").trim().split("\n")).toEqual([
+          "-display",
+          ":1",
+          "-rfbport",
+          String(port),
+          "-localhost",
+          "-SecurityTypes",
+          "None",
+          "-AlwaysShared",
+          `-AcceptPointerEvents=${accept}`,
+          `-AcceptKeyEvents=${accept}`,
+          `-AcceptCutText=${accept}`,
+          `-SendCutText=${accept}`,
+          "-SendPrimary=0",
+          "-SetPrimary=0",
+          `-MaxCutText=${DESKTOP_CLIPBOARD_MAX_WIRE_BYTES}`,
+          "-AcceptSetDesktopSize=0",
+          "-FrameRate",
+          "60",
+          "-PollingCycle",
+          "10",
+          "-MaxProcessorUsage",
+          "50",
+          "-Log",
+          "*:stderr:10",
+        ]);
+      };
+      expectServerArgs(5900, "0");
+
       await layer.startControl();
+      expectServerArgs(5901, "1");
       expect(logLines(log).at(-1)).toBe("X0tigervnc 5901 input=1");
       const controlPid = startedPids(bin).at(-1)!;
       expect(startedPids(bin)).toHaveLength(5);

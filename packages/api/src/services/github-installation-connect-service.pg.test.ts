@@ -8,7 +8,11 @@ import {
   it,
   vi,
 } from "vitest";
-import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof";
+import {
+  deferred,
+  proofDatabaseUrl,
+  waitForLockWaiters,
+} from "../testing/pg-proof";
 
 const homes = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("./home-sync-service", () => ({ bumpHomeForScope: homes }));
@@ -98,14 +102,6 @@ afterAll(async () => {
   });
   await db.$disconnect();
 });
-
-const deferred = () => {
-  let release = () => {};
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { promise, release };
-};
 
 describe.skipIf(!url)(
   "atomic GitHub installation OAuth persistence on PostgreSQL",

@@ -15,6 +15,7 @@ import { SkillRow } from "./skill-row";
 import { SkillDialog } from "./skill-dialog";
 import type { SkillSourceKind } from "./skill-source-chip";
 import { AddFromLibraryButton } from "./add-from-library-button";
+import { ImportSkillZipButton } from "./import-skill-zip-button";
 import { AgentLibrarySection } from "./agent-library-section";
 import { OrgLibrarySection } from "./org-library-section";
 
@@ -109,17 +110,22 @@ export const SkillsSection = (props: SkillsSectionProps) => {
   const toggle = (skill: SkillSummary, next: boolean) =>
     setEnabled.mutate({ skillId: skill.id, enabled: next });
 
+  // Every way to add a skill, together and in one order (New skill first):
+  // in the empty card when there are none, else top right.
+  const addButtons = (
+    <>
+      <Button size="sm" onClick={openCreate}>
+        <Plus className="size-4" />
+        New skill
+      </Button>
+      {!isOrg && agentId && <AddFromLibraryButton agentId={agentId} />}
+      <ImportSkillZipButton agentId={isOrg ? undefined : agentId} />
+    </>
+  );
+
   return (
     <div className="space-y-4">
-      <div className="flex justify-end gap-2">
-        {!isOrg && agentId && <AddFromLibraryButton agentId={agentId} />}
-        {!noSkills && (
-          <Button size="sm" onClick={openCreate}>
-            <Plus className="size-4" />
-            New skill
-          </Button>
-        )}
-      </div>
+      {!noSkills && <div className="flex justify-end gap-2">{addButtons}</div>}
 
       {noSkills ? (
         <Card className="flex flex-col items-center gap-3 p-8 text-center">
@@ -133,10 +139,9 @@ export const SkillsSection = (props: SkillsSectionProps) => {
               up within seconds, or at its next start if it is asleep.
             </p>
           </div>
-          <Button size="sm" onClick={openCreate}>
-            <Plus className="size-4" />
-            New skill
-          </Button>
+          <div className="mt-3 flex flex-wrap justify-center gap-2">
+            {addButtons}
+          </div>
         </Card>
       ) : rows.length > 0 ? (
         <div className="divide-y rounded-md border">

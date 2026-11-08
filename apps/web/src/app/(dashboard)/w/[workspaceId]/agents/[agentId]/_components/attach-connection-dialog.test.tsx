@@ -6,8 +6,14 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { grants } from "@/lib/api";
 import type { Connection } from "@/lib/api";
+import type { AppPermissionDefinitionSummary } from "@onecli/api/apps/app-permissions/types";
 import { queryKeys } from "@/lib/api/keys";
 import { AttachConnectionDialog } from "./attach-connection-dialog";
+
+// The rows' ⋮ menu links to the app's page, built from the current route.
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/agent-1/chat",
+}));
 
 // The drawer brings its own data graph; the unit here is which connection the
 // dialog targets it at (the apps-section stub pattern).
@@ -55,8 +61,23 @@ interface SeedOptions {
   connections?: Connection[];
   grantedIds?: string[];
   credentials?: unknown[];
-  definitions?: unknown[];
+  definitions?: AppPermissionDefinitionSummary[];
 }
+
+/** A catalog with a tool list to split on, like every real one. */
+const GMAIL_CATALOG: AppPermissionDefinitionSummary = {
+  provider: "gmail",
+  groups: [
+    {
+      category: "read",
+      tools: [{ id: "read", name: "Read email", description: "" }],
+    },
+    {
+      category: "write",
+      tools: [{ id: "send", name: "Send email", description: "" }],
+    },
+  ],
+};
 
 /** Seeded client so the dialog's queries never hit the network: connections
  * pool, the agent's grants, its effective credentials, and the permission
@@ -270,7 +291,7 @@ describe("AttachConnectionDialog", () => {
   it("empty pool with a connect door: reads as Connect, not Attach", async () => {
     const onConnectNew = vi.fn();
     renderDialog(
-      { definitions: [{ provider: "gmail" }] },
+      { definitions: [GMAIL_CATALOG] },
       { onConnectNew, agentName: "Arik" },
     );
     const dialog = screen.getByRole("dialog");
@@ -279,9 +300,10 @@ describe("AttachConnectionDialog", () => {
     ).toBeInTheDocument();
     expect(dialog).not.toHaveTextContent("Attach Gmail");
     // The consent line every connect door states: the connect carries this
-    // agent, so the new account is on for it alone.
+    // agent, so the new account is on for it alone. A catalog not checked
+    // safe for reads holds requests outside its tool list too.
     expect(dialog).toHaveTextContent(
-      "Connecting turns the account on for Arik, not for your other agents. Reads are allowed. Writes and anything else need your approval.",
+      "Only Arik gets access. Writes, and reads that could expose secrets, need your approval.",
     );
     // One action, no "another" (nothing exists yet), and no empty-state
     // filler under a header that already says what to do.
@@ -312,10 +334,19 @@ describe("AttachConnectionDialog", () => {
   it("says full access for an app with no tool list (what the server writes)", () => {
     renderDialog({ connections: [gmailConnection("conn-1")], definitions: [] });
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent(
-      "Turning one on applies immediately. It gets full access.",
-    );
+    expect(dialog).toHaveTextContent("should use. It gets full access.");
     expect(dialog).not.toHaveTextContent(/needs your approval/);
+  });
+
+  it("says every read is allowed for a catalog checked safe for reads", () => {
+    renderDialog({
+      connections: [gmailConnection("conn-1")],
+      definitions: [{ ...GMAIL_CATALOG, unlistedReads: "allow" }],
+    });
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      "should use. Writes need your approval.",
+    );
+    expect(screen.getByRole("dialog")).not.toHaveTextContent(/expose secrets/);
   });
 
   it("attaches with the DEFAULT access on toggle-on: the stated consent contract", async () => {
@@ -379,7 +410,7 @@ describe("AttachConnectionDialog", () => {
           provenance: [],
         },
       ],
-      definitions: [{ provider: "gmail" }],
+      definitions: [GMAIL_CATALOG],
     });
     const toggle = screen.getByRole("switch", { name: "Detach Gmail" });
     expect(toggle).toBeChecked();
@@ -394,7 +425,7 @@ describe("AttachConnectionDialog", () => {
     renderDialog({
       connections: [gmailConnection("conn-1"), gmailConnection("conn-2")],
       grantedIds: ["conn-1", "conn-2"],
-      definitions: [{ provider: "gmail" }],
+      definitions: [GMAIL_CATALOG],
     });
     const manageButtons = screen.getAllByRole("button", { name: "Manage" });
     expect(manageButtons).toHaveLength(2);

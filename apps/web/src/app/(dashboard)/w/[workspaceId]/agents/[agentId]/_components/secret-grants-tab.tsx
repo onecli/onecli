@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { KeyRound, Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { cn } from "@onecli/ui/lib/utils";
 import { useSecrets } from "@/hooks/use-secrets";
 import { useAgentGrants } from "@/hooks/use-grants";
 import { useEffectiveCredentials } from "@/lib/api/policy-visibility";
@@ -14,11 +15,15 @@ import { connectionsPath } from "@/lib/navigation";
 import type { Secret } from "@/lib/api";
 import { SecretGrantRow } from "./secret-grant-row";
 import { InactiveConnections } from "./inactive-connections";
+import { sortSecretsForChooser } from "./chooser-order";
+import { chooserEmptyClassName, chooserGridClassName } from "./chooser-layout";
 
 interface SecretGrantsTabProps {
   agentId: string;
   /** "secret" = generic secrets; "llm" = typed LLM keys (type !== "generic" —
-   * the counts-service split). One tab component, two filters. */
+   * the counts-service split). One tab component, two filters. Custom folds
+   * the ones that are off for this agent away; Models keeps every key in
+   * view. */
   kind: "secret" | "llm";
   /** Opens the section's in-place add door (the Connections section's secret
    * dialog with attach-on-create); without it the empty state falls back to
@@ -26,10 +31,10 @@ interface SecretGrantsTabProps {
   onAdd?: () => void;
   /** Opens the section's edit dialog for one secret. */
   onEdit?: (secret: Secret) => void;
-  /** Fold the secrets that are off for this agent away. Defaults to the
-   * Connections section's custom tab only (Models keeps every key in view,
-   * and so does the new agent's "choose connections" window). */
-  foldInactive?: boolean;
+  /** The new agent's "choose connections" window: every secret in view as a
+   * tile, A to Z (none folded away, since each starts off and IS the
+   * choice). */
+  chooser?: boolean;
 }
 
 const COPY = {
@@ -61,7 +66,7 @@ export const SecretGrantsTab = ({
   kind,
   onAdd,
   onEdit,
-  foldInactive = kind === "secret",
+  chooser = false,
 }: SecretGrantsTabProps) => {
   const pathname = usePathname();
   const secretsQuery = useSecrets();
@@ -111,7 +116,12 @@ export const SecretGrantsTab = ({
   );
   if (pool.length === 0) {
     return (
-      <Card className="flex flex-col items-center justify-center py-16 text-center">
+      <Card
+        className={cn(
+          "flex flex-col items-center justify-center py-16 text-center",
+          chooser && chooserEmptyClassName,
+        )}
+      >
         <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-full dark:bg-white/10 dark:border-white/10">
           <KeyRound className="text-muted-foreground size-5" aria-hidden />
         </div>
@@ -172,12 +182,20 @@ export const SecretGrantsTab = ({
         // the workspace-fenced update can never own it.
         onEdit={secret.scope === "organization" ? undefined : onEdit}
         onBeforeToggle={() => placement.pin(secret.id)}
+        compact={chooser}
       />
     );
   };
 
-  // Unfolded (Models, the new agent's chooser): every key in view.
-  if (!foldInactive) {
+  if (chooser) {
+    return (
+      <div className={chooserGridClassName}>
+        {sortSecretsForChooser(pool).map(renderRow)}
+      </div>
+    );
+  }
+
+  if (kind === "llm") {
     return <div className="divide-y">{pool.map(renderRow)}</div>;
   }
 

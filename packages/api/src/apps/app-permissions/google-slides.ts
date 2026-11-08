@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleSlidesPermissions: AppPermissionDefinition = {
   provider: "google-slides",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

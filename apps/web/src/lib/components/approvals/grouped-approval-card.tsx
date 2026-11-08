@@ -220,6 +220,18 @@ export const GroupedApprovalCard = ({
       !sharedRecord &&
       (nameCounts.get(a.summary?.subject?.record ?? "") ?? 0) > 1,
   });
+  // A row with no fields of its own (a read that only pages) would print
+  // the card's title again on every row: it reads as its place on the card.
+  const ordinalOf = new Map(
+    rows
+      .filter((a) => groupRowFields(a, layoutOf(a)).length === 0)
+      .map((a, i) => [a.id, i + 1]),
+  );
+  const rowName = (a: PendingApproval) =>
+    groupRowFields(a, layoutOf(a))[0]?.value ??
+    (ordinalOf.has(a.id)
+      ? `Request ${ordinalOf.get(a.id)}`
+      : a.summary?.action);
   const mergedTitle = merged ? bulkTitle(merged.bulk) : null;
   const title = mergedTitle ? (
     mergedTitle
@@ -388,13 +400,7 @@ export const GroupedApprovalCard = ({
 
       {compact && !expanded && (
         <p className="truncate px-4 ps-[2.625rem] pb-3 text-sm">
-          {rows
-            .slice(0, 2)
-            .map(
-              (a) =>
-                groupRowFields(a, layoutOf(a))[0]?.value ?? a.summary?.action,
-            )
-            .join(" · ")}
+          {rows.slice(0, 2).map(rowName).join(" · ")}
           {rows.length > 2 && (
             <span className="text-muted-foreground">
               {" "}
@@ -461,6 +467,7 @@ export const GroupedApprovalCard = ({
                 key={a.id}
                 approval={a}
                 layout={layoutOf(a)}
+                ordinal={ordinalOf.get(a.id)}
                 odd={!merged && isOddOneOut(group, a)}
                 busy={busy}
                 outcome={outcomeOf.get(a.id)?.outcome}

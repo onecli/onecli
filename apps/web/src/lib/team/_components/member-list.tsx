@@ -48,11 +48,16 @@ import {
   removeTeamMember,
   getWorkspacesDeletedOnRemove,
 } from "@/lib/team/actions";
-import { Checkbox } from "@onecli/ui/components/checkbox";
 import { useInvitations, useCancelInvitation } from "@/hooks/use-invitations";
 import { useUpdateOrgMember } from "@/hooks/use-org-members";
 import { getInitials } from "@/lib/user-display";
 import { LeaveOrgDialog } from "./leave-org-dialog";
+import {
+  CHAT_APPS_UNINSTALLED_NOTE,
+  WorkspaceDeletionChecklist,
+  useWorkspaceAcknowledgements,
+  type DeletedWorkspace,
+} from "./workspace-deletion-checklist";
 import { ManageAccessDialog } from "@/ee/team/_components/manage-access-dialog";
 import type { TeamMember } from "@onecli/api/ee/services/team-service";
 
@@ -85,12 +90,11 @@ export const MemberList = ({
   } | null>(null);
   // What removing them destroys, loaded when the dialog opens: their personal
   // workspaces and the chat apps that go with them. Each must be acknowledged.
-  const [removeWorkspaces, setRemoveWorkspaces] = useState<
-    { id: string; name: string | null; channelApps: { provider: string }[] }[]
-  >([]);
-  const [ackedWorkspaces, setAckedWorkspaces] = useState(
-    () => new Set<string>(),
+  const [removeWorkspaces, setRemoveWorkspaces] = useState<DeletedWorkspace[]>(
+    [],
   );
+  const removeAcks = useWorkspaceAcknowledgements(removeWorkspaces);
+  const { reset: resetRemoveAcks } = removeAcks;
   const [suspendTarget, setSuspendTarget] = useState<{
     userId: string;
     email: string;
@@ -108,32 +112,16 @@ export const MemberList = ({
   useEffect(() => {
     if (!removeTarget) {
       setRemoveWorkspaces([]);
-      setAckedWorkspaces(new Set());
+      resetRemoveAcks();
       return;
     }
     getWorkspacesDeletedOnRemove(removeTarget.userId)
       .then(setRemoveWorkspaces)
       .catch(() => setRemoveWorkspaces([]));
-  }, [removeTarget]);
-
-  const removeAcknowledged =
-    removeWorkspaces.length === 0 ||
-    ackedWorkspaces.size === removeWorkspaces.length;
-  const removeTotalApps = removeWorkspaces.reduce(
-    (n, p) => n + p.channelApps.length,
-    0,
-  );
-
-  const toggleAckedWorkspace = (workspaceId: string) =>
-    setAckedWorkspaces((prev) => {
-      const next = new Set(prev);
-      if (next.has(workspaceId)) next.delete(workspaceId);
-      else next.add(workspaceId);
-      return next;
-    });
+  }, [removeTarget, resetRemoveAcks]);
 
   const handleRemove = () => {
-    if (!removeTarget || !removeAcknowledged) return;
+    if (!removeTarget || !removeAcks.allAcknowledged) return;
     startTransition(async () => {
       const result = await removeTeamMember(removeTarget.userId);
       if (!result.ok) {
@@ -379,48 +367,18 @@ export const MemberList = ({
             <AlertDialogTitle>Remove member</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                {removeWorkspaces.length > 0 && (
-                  <>
-                    <p>
-                      Acknowledge each workspace that will be permanently
-                      deleted:
-                    </p>
-                    <div className="rounded-md border">
-                      {removeWorkspaces.map((workspace) => (
-                        <label
-                          key={workspace.id}
-                          className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 border-b px-4 py-3 last:border-b-0"
-                        >
-                          <Checkbox
-                            checked={ackedWorkspaces.has(workspace.id)}
-                            onCheckedChange={() =>
-                              toggleAckedWorkspace(workspace.id)
-                            }
-                          />
-                          <span className="text-foreground text-sm font-medium">
-                            {workspace.name ?? "Untitled"}
-                            {workspace.channelApps.length > 0 && (
-                              <span className="text-muted-foreground ml-2 font-normal">
-                                · uninstalls{" "}
-                                {workspace.channelApps.length === 1
-                                  ? "1 chat app"
-                                  : `${workspace.channelApps.length} chat apps`}
-                              </span>
-                            )}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  </>
-                )}
+                <WorkspaceDeletionChecklist
+                  workspaces={removeWorkspaces}
+                  acknowledged={removeAcks.acknowledged}
+                  onToggle={removeAcks.toggle}
+                />
                 <p>
                   Are you sure you want to remove{" "}
                   <span className="text-foreground font-medium">
                     {removeTarget?.email}
                   </span>{" "}
                   from {orgName}?
-                  {removeTotalApps > 0 &&
-                    " Their chat apps are uninstalled from your chat workspace, and anyone talking to them there loses the agent."}
+                  {removeAcks.hasChatApps && CHAT_APPS_UNINSTALLED_NOTE}
                 </p>
               </div>
             </AlertDialogDescription>
@@ -432,7 +390,7 @@ export const MemberList = ({
                 e.preventDefault();
                 handleRemove();
               }}
-              disabled={pending || !removeAcknowledged}
+              disabled={pending || !removeAcks.allAcknowledged}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {pending ? "Removing..." : "Remove"}
