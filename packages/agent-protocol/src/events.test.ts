@@ -38,6 +38,16 @@ describe("agentEventSchema", () => {
       type: "turn.done",
       usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 2 },
     },
+    {
+      type: "turn.done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadInputTokens: 2,
+        cacheCreationInputTokens: 7,
+        promptTokens: 19,
+      },
+    },
     { type: "error", message: "provider unreachable", code: "internal" },
     // SEND NOW's answer: moved with a name, or nothing moved.
     { type: "message.sent_now", moved: true, toolName: "bash" },

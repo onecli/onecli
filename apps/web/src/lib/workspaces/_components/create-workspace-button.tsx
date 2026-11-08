@@ -56,7 +56,7 @@ export const CreateWorkspaceButton = ({
         toast.error(result.error);
         return;
       }
-      router.push(`/w/${result.data.workspaceId}/overview`);
+      router.push(`/w/${result.data.workspaceId}`);
     });
   };
 

@@ -14,7 +14,7 @@ const state = vi.hoisted(() => ({
   agents: [] as { id: string; kind: string; createdAt: string }[],
   agentsPending: false,
 }));
-const mocks = vi.hoisted(() => ({ push: vi.fn() }));
+const mocks = vi.hoisted(() => ({ push: vi.fn(), warm: vi.fn() }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock("@/hooks/use-workspaces", () => ({
@@ -25,6 +25,7 @@ vi.mock("@/hooks/use-agents", () => ({
     data: id ? state.agents : [],
     isPending: id ? state.agentsPending : false,
   }),
+  useWarmAgent: () => mocks.warm,
 }));
 
 const { GetStartedPicker } = await import("./get-started-picker");
@@ -50,6 +51,7 @@ beforeEach(() => {
   state.agents = [];
   state.agentsPending = false;
   mocks.push.mockClear();
+  mocks.warm.mockClear();
 });
 
 const open = () =>
@@ -71,6 +73,10 @@ describe("the workspace picker", () => {
     open();
     await waitFor(() =>
       expect(mocks.push).toHaveBeenCalledWith("/w/w1/agents/ag-1/chat"),
+    );
+    // The destination's machine is warmed as the picker routes to it.
+    expect(mocks.warm).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "ag-1", kind: "hosted" }),
     );
   });
 

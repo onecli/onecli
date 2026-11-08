@@ -1,6 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -11,6 +18,7 @@ import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
 import {
   activeTurn,
+  isAddKeyCode,
   isJoiningTurn,
   resendableKeylessTurn,
 } from "@/lib/chat/turns";
@@ -21,12 +29,13 @@ import {
   type OutgoingMessage,
 } from "@/hooks/use-conversations";
 import { useUploadAttachment } from "@/hooks/use-attachments";
+import { ChatSendContext, type ChatSend } from "@/lib/chat/chat-send";
 import { useConversationTranscript } from "@/hooks/use-conversation-transcript";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import { useHasDesktop } from "@/hooks/use-has-desktop";
 import { usePortalHost } from "@/hooks/use-portal-host";
 import dynamic from "next/dynamic";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { agentComputerPath, agentSectionPath } from "@/lib/navigation";
 import type { DesktopDockHandle } from "@/ee/desktop/desktop-dock";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
@@ -35,7 +44,8 @@ import { useCreateThenAttachSecret } from "@/hooks/use-create-then-attach-secret
 import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/secret-dialog";
 import type { TurnsPage } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
-import { Composer } from "./composer";
+import { Composer, type ComposerHandle } from "./composer";
+import { FileDropZone } from "./file-drop-zone";
 import { OfflineBanner } from "./offline-banner";
 
 // The agent's hosted desktop (hosted platform only). Lazy, so its code never
@@ -78,6 +88,17 @@ export const DirectThreadSection = () => {
   // shows it (the hosted platform, with previews).
   const hasDesktop = useHasDesktop();
   const dock = useRef<DesktopDockHandle>(null);
+  /** Files dropped anywhere on the pane stage in the composer. */
+  const composer = useRef<ComposerHandle>(null);
+  // `?draft=` opens the chat with a message ready to finish and send (the
+  // schedule dialog's "Change" link). From the router, not window.location:
+  // on an in-app navigation the first render still sees the old URL there.
+  // Read once, then dropped from the URL so a reload never re-seeds it.
+  const searchParams = useSearchParams();
+  const [draft] = useState(() => searchParams.get("draft") ?? undefined);
+  useEffect(() => {
+    if (draft) router.replace(pathname);
+  }, [draft, pathname, router]);
   // The chat renders into this node, never straight into the frame: the
   // theater moves the node, not the React subtree, so draft text, staged
   // files and scroll state survive.
@@ -103,10 +124,28 @@ export const DirectThreadSection = () => {
   // as this send does: a failed or reset send drops it, so history and other
   // tabs never pin.
   const [sentFresh, setSentFresh] = useState(false);
-  const send = (outgoing: OutgoingMessage, fresh: boolean) => {
-    setSentFresh(fresh);
-    sendMessage.mutate(outgoing);
-  };
+  const { mutate: mutateSend } = sendMessage;
+  const send = useCallback(
+    (outgoing: OutgoingMessage, fresh: boolean) => {
+      setSentFresh(fresh);
+      mutateSend(outgoing);
+    },
+    [mutateSend],
+  );
+  // What the person sends from the thread: the composer, and anything inside
+  // the thread that writes their next message for them (the app picker's
+  // custom-connection door, through ChatSendContext). Stable while the run
+  // state holds: the thread re-renders on every stream read, and a new
+  // context value would re-render every reader with it, memo or not.
+  const idle = active === undefined;
+  const sendNow = useCallback(
+    (outgoing: OutgoingMessage) => send(outgoing, idle),
+    [send, idle],
+  );
+  const chatSend = useCallback<ChatSend>(
+    (message) => sendNow({ message }),
+    [sendNow],
+  );
   const pinnedSend =
     sentFresh && (sendMessage.isPending || sendMessage.isSuccess);
 
@@ -142,8 +181,8 @@ export const DirectThreadSection = () => {
       // read as failure. Say so; name the manual step when files are why.
       const lastOwn = [...fresh].reverse().find((turn) => turn.userId !== null);
       toast.success(
-        (lastOwn?.errorCode === "no_model_key" ||
-          lastOwn?.errorCode === "trial_credit_exhausted") &&
+        lastOwn &&
+          isAddKeyCode(lastOwn.errorCode) &&
           lastOwn.attachments.length > 0
           ? "Model key connected. Re-send your message to include its files."
           : "Model key connected.",
@@ -213,7 +252,13 @@ export const DirectThreadSection = () => {
       <div ref={chatHome} className="flex min-h-0 min-w-0 flex-1 flex-col" />
       {chatHost &&
         createPortal(
-          <>
+          <FileDropZone
+            onFiles={
+              footer
+                ? (files) => composer.current?.stageFiles(files)
+                : undefined
+            }
+          >
             <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
               {children}
               {hasDesktop && (
@@ -231,7 +276,7 @@ export const DirectThreadSection = () => {
               )}
             </div>
             {footer}
-          </>,
+          </FileDropZone>,
           chatHost,
         )}
     </div>
@@ -296,29 +341,31 @@ export const DirectThreadSection = () => {
       {transcriptLoading ? (
         <ThreadSkeleton />
       ) : (
-        <ChatThread
-          turns={turns}
-          folded={folded}
-          pending={pending}
-          conversationId={conversationId}
-          modelsHref={agentSectionPath(pathname, agentId, "models")}
-          computerHref={hasDesktop ? computerHref : undefined}
-          onOpenComputer={
-            hasDesktop
-              ? (requestId) => {
-                  if (dock.current) dock.current.expand();
-                  else router.push(computerHref(requestId));
-                }
-              : undefined
-          }
-          agentName={agent.name}
-          agentId={agentId}
-          onConnectModelKey={() => setKeyDialogOpen(true)}
-          hasOlder={transcript.hasOlder}
-          loadingOlder={transcript.loadingOlder}
-          onLoadOlder={transcript.loadOlder}
-          pinnedSend={pinnedSend}
-        />
+        <ChatSendContext value={chatSend}>
+          <ChatThread
+            turns={turns}
+            folded={folded}
+            pending={pending}
+            conversationId={conversationId}
+            modelsHref={agentSectionPath(pathname, agentId, "models")}
+            computerHref={hasDesktop ? computerHref : undefined}
+            onOpenComputer={
+              hasDesktop
+                ? (requestId) => {
+                    if (dock.current) dock.current.expand();
+                    else router.push(computerHref(requestId));
+                  }
+                : undefined
+            }
+            agentName={agent.name}
+            agentId={agentId}
+            onConnectModelKey={() => setKeyDialogOpen(true)}
+            hasOlder={transcript.hasOlder}
+            loadingOlder={transcript.loadingOlder}
+            onLoadOlder={transcript.loadOlder}
+            pinnedSend={pinnedSend}
+          />
+        </ChatSendContext>
       )}
     </>,
     <>
@@ -336,7 +383,8 @@ export const DirectThreadSection = () => {
       )}
 
       <Composer
-        onSend={(outgoing) => send(outgoing, active === undefined)}
+        ref={composer}
+        onSend={sendNow}
         uploadFile={(file) => uploadAttachment.mutateAsync(file)}
         sendPending={sendMessage.isPending}
         sendError={sendMessage.error}
@@ -348,6 +396,7 @@ export const DirectThreadSection = () => {
         }
         onStop={active ? () => abortTurn.mutate(active.id) : undefined}
         stopPending={abortTurn.isPending}
+        initialDraft={draft}
         autoFocus
       />
     </>,

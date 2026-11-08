@@ -29,6 +29,7 @@ mod evaluate;
 mod graphql;
 mod inject_select;
 mod loaders;
+mod secret_reads;
 
 // The free direct-user twin, re-exported for ONE consumer: the licensed
 // principal parity test in `ee`, which pins the licensed CTE's direct
@@ -46,3 +47,4 @@ mod enforce_pg_test;
 
 pub use enforce::{evaluate, load_available_apps, load_connect_v2, needs_body_buffer, would_allow};
 pub use inject_select::derive_inject_selection;
+pub use secret_reads::secret_read;

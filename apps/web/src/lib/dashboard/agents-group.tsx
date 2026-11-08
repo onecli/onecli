@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutGrid } from "lucide-react";
 import { AgentAvatar } from "@/lib/agents/_components/agent-avatar";
 import {
   SidebarGroup,
@@ -11,7 +10,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarSeparator,
 } from "@onecli/ui/components/sidebar";
 import {
   Tooltip,
@@ -24,17 +22,26 @@ import { channelProviderUi } from "@/lib/agents/channel-providers/registry";
 import { sidebarMenuButtonActiveStyles } from "@dashboard/nav-main";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
 import { useAgentsForWorkspace } from "@/hooks/use-agents";
+import { sortAgentsOldestFirst } from "@/lib/agents/agent-order";
 import { agentSectionPath, matchAgentPage } from "@/lib/navigation";
+import { NewAgentRow } from "@/lib/dashboard/new-agent-row";
 
 /**
- * The sidebar's Agents group (§3.18, as amended 2026-08-16): a "Manage agents"
- * row (the roster page, which used to sit in the main nav) set apart from the
- * workspace's agents listed below it — EVERY agent, hosted and BYO alike, one
- * click from anywhere to its own page (a hosted agent's thread, a BYO agent's
- * connections). The list is availability-independent: these are the user's
- * agents, and hiding them because no runner exists would read as data loss.
+ * The sidebar's Agents group (§3.18, as amended): the workspace's agents —
+ * EVERY agent, hosted and BYO alike, one click from anywhere to its own page
+ * (a hosted agent's thread, a BYO agent's connections) — and, under the last
+ * one, the "New agent" row. The list is availability-independent: these are
+ * the user's agents, and hiding them because no runner exists would read as
+ * data loss.
  *
- * The Manage agents row is UNCONDITIONAL — it is the former main-nav entry.
+ * There is no "Manage agents" row any more: there is no roster to manage
+ * from (everything a card offered lives on the agent's own page), and the
+ * only thing left at `/agents` is creation, which the New agent row does
+ * in place.
+ *
+ * The group is the sidebar's FIRST section and lists agents OLDEST first: the
+ * top agent is the workspace's front door (`/w/<id>` lands on it — the same
+ * `sortAgentsOldestFirst` order the server-side landing uses).
  */
 export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
   const pathname = usePathname();
@@ -42,63 +49,30 @@ export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
   // chrome and its query can fire while the browser is mid-transition on a
   // non-workspace URL, where a URL-scoped read carries no workspace and is
   // refused (the fresh-install first-open console error).
-  const { data: agents = [], isPending } = useAgentsForWorkspace(
+  const { data: rawAgents, isPending } = useAgentsForWorkspace(
     workspaceId,
     true,
   );
+  const agents = sortAgentsOldestFirst(rawAgents ?? []);
 
-  const allAgentsUrl = `/w/${workspaceId}/agents`;
-
-  // Inside an agent that has no row of its own — deleted from the list, or the
-  // list still empty on error — the roster row is where the user is standing.
-  // Without this, that agent's pages leave ZERO highlighted rows in the whole
-  // sidebar. Decided only once the answer is KNOWN: while the agent list is
-  // still loading, highlight nothing rather than flash the roster row over an
-  // agent's own.
+  // Highlighted anywhere inside an agent — exactly one row, the agent you
+  // are in. An agent with no row (deleted, or the list errored) highlights
+  // nothing; the page's own header still names it.
   const inAgent = matchAgentPage(pathname);
-  const rowsSettled = !isPending;
-  const insideRowlessAgent =
-    rowsSettled &&
-    inAgent !== null &&
-    !agents.some((a) => a.id === inAgent.agentId);
-  const rosterActive = pathname === allAgentsUrl || insideRowlessAgent;
 
   return (
-    <SidebarGroup className="min-h-0 flex-1 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
+    // Sized to its content (not flex-1): it sits ABOVE the workspace nav, so
+    // growing would shove that nav to the sidebar's bottom. `min-h-0` still
+    // lets it shrink so only the agent list scrolls when it is long.
+    <SidebarGroup className="min-h-0 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
       <SidebarGroupLabel className="group-data-[collapsible=icon]:hidden">
         Agents
       </SidebarGroupLabel>
       <SidebarGroupContent className="flex min-h-0 flex-1 flex-col">
-        <SidebarMenu className="shrink-0">
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              // EXACT on the roster itself, never a prefix — plus the
-              // row-less-agent case above. Exactly one row highlights: inside
-              // a row-owning agent it is that agent's row, and two
-              // brand-active rows would read as two places at once.
-              isActive={rosterActive}
-              tooltip="Manage Agents"
-              className={sidebarMenuButtonActiveStyles}
-            >
-              <Link
-                href={allAgentsUrl}
-                aria-current={rosterActive ? "page" : undefined}
-              >
-                {/* The list of agents is a list, not an agent: the robot is
-                    reserved for the agents themselves, one row each. */}
-                <LayoutGrid aria-hidden />
-                <span>Manage Agents</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-        {agents.length > 0 && <SidebarSeparator className="my-2" />}
-        {/* The one scroll region: only the agent list scrolls, so the nav and
-            the Manage agents row stay reachable however many agents exist. A
-            native scroller on purpose (never Radix ScrollArea, which needs a
-            definite-height viewport). Accepted edge: on a viewport too short
-            for even the nav, the group compresses and clips. */}
+        {/* The one scroll region: only the agent list scrolls, so the New
+            agent row and the nav below stay reachable however many agents
+            exist. A native scroller on purpose (never Radix ScrollArea, which
+            needs a definite-height viewport). */}
         <SidebarMenu className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {agents.map((agent) => {
             const href = agentSectionPath(
@@ -133,9 +107,9 @@ export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
                       .map((ui) => (
                         // Reachable on the provider — the real mark, small
                         // and trailing. Decorative visual; the label lives in
-                        // the tooltip and one sr-only sentence (the
-                        // credential-avatars pattern), and icon-collapse hides
-                        // it the way SidebarMenuBadge hides itself.
+                        // the tooltip and one sr-only sentence, and
+                        // icon-collapse hides it the way SidebarMenuBadge
+                        // hides itself.
                         <span key={ui.id} className="contents">
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -164,6 +138,9 @@ export const AgentsGroup = ({ workspaceId }: { workspaceId: string }) => {
               </SidebarMenuItem>
             );
           })}
+        </SidebarMenu>
+        <SidebarMenu className="shrink-0">
+          <NewAgentRow agents={rawAgents} agentsPending={isPending} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>

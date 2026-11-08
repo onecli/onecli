@@ -410,7 +410,10 @@ describe("orgConnect", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true });
+    expect(await res.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
     expect(store.connections).toHaveLength(1);
     expect(store.connections[0]).toMatchObject({
       organizationId: "org-1",
@@ -430,7 +433,7 @@ describe("orgConnect", () => {
       { access_token: "old" },
       { metadata: { email: "bot@example.com" } },
     );
-    await orgConnect(
+    const duplicate = await orgConnect(
       auth,
       "keyapp",
       "org-1",
@@ -438,10 +441,52 @@ describe("orgConnect", () => {
       { metadata: { email: "bot@example.com" } },
     );
 
+    expect(await duplicate.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
+    const reconnect = await orgConnect(
+      auth,
+      "keyapp",
+      "org-1",
+      { access_token: "refreshed" },
+      undefined,
+      store.connections[0]?.id,
+    );
+    expect(await reconnect.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
     expect(store.connections).toHaveLength(1);
     expect(store.connections[0]?.credentials).toBe(
-      'enc:{"access_token":"new"}',
+      'enc:{"access_token":"refreshed"}',
     );
+  });
+
+  it("does not expose or reconnect another organization's connection ID", async () => {
+    store.members.push({
+      organizationId: "org-other",
+      userId: "user-1",
+      role: "owner",
+    });
+    await orgConnect(auth, "keyapp", "org-other", {
+      access_token: "foreign-secret",
+    });
+    const foreignId = store.connections[0]!.id;
+    await expect(
+      orgConnect(
+        auth,
+        "keyapp",
+        "org-1",
+        { access_token: "replacement-secret" },
+        undefined,
+        foreignId,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(store.connections[0]?.credentials).toBe(
+      'enc:{"access_token":"foreign-secret"}',
+    );
+    expect(store.orgFlushes).toEqual(["org-other"]);
   });
 
   it("rejects a caller who is not a member of the organization", async () => {
@@ -482,6 +527,10 @@ describe("tryHandleOrgConnect (compat interceptor)", () => {
       access_token: "sk",
     });
     expect(res?.status).toBe(200);
+    expect(await res?.json()).toEqual({
+      success: true,
+      connectionId: store.connections[0]?.id,
+    });
     expect(store.connections[0]).toMatchObject({
       organizationId: "org-1",
       scope: "organization",

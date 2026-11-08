@@ -75,7 +75,12 @@ export const ApprovalListItem = ({
         >
           Details
         </Button>
-        <ApprovalActions approvalId={approval.id} size="xs" />
+        <ApprovalActions
+          approvalId={approval.id}
+          similar={approval.similar}
+          agentName={approval.agent.name}
+          size="xs"
+        />
       </div>
     </div>
   );

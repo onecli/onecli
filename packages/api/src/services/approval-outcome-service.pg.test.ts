@@ -8,6 +8,8 @@ import { proofDatabaseUrl } from "../testing/pg-proof.js";
  *  - a Slack click reads "approved via slack" with the row's time; a web
  *    click reads `via: web`; the decider's identity never leaves the API;
  *  - a superseded deny reads "replaced";
+ *  - a withdrawn request (the agent stopped waiting) reads "cancelled", and
+ *    a late click on it names no place;
  *  - the first decision wins (a later "already settled" row changes nothing);
  *  - only recent records are read (the indexed window);
  *  - fenced: another workspace's agent is NOT_FOUND, and an approval the
@@ -37,6 +39,7 @@ const ids = {
   sibling: randomUUID(),
   dashboard: randomUUID(),
   expired: randomUUID(),
+  cancelled: randomUUID(),
   siblingRow: randomUUID(),
   stale: randomUUID(),
 };
@@ -216,6 +219,16 @@ beforeAll(async () => {
     decision: "approval_denied",
     approval_reason: "timed out",
   });
+  // The agent went away while it waited. A click that reached the API after
+  // that wrote an audit row, but decided nothing.
+  await gatewayRow(agentId, ids.cancelled, {
+    decision: "approval_cancelled",
+  });
+  await audit(
+    "approve",
+    { approvalId: ids.cancelled, agentId, presenceId, decision: "approve" },
+    T.dashboard,
+  );
   await gatewayRow(siblingAgentId, ids.siblingRow, {
     decision: "approval_approved",
     approval_result: { ok: false, error: "secret sibling result" },
@@ -276,6 +289,14 @@ describe.skipIf(!PROOF_URL)("approval outcomes (pg)", () => {
 
   it("leaves an expiry to the browser (no outcome)", async () => {
     expect(await read(agentId, [ids.expired])).toEqual([]);
+  });
+
+  it("says when no one decided: the agent stopped waiting", async () => {
+    const [out] = await read(agentId, [ids.cancelled]);
+    expect(out).toMatchObject({ outcome: "cancelled" });
+    // A late click on the card is no decision: neither its place nor its time.
+    expect(out?.via).toBeUndefined();
+    expect(out?.decidedAt).not.toBe(T.dashboard);
   });
 
   it("never answers for another agent's approval, even in the same workspace", async () => {

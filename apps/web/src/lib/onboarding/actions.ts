@@ -30,6 +30,8 @@ const resolveOnboardingContext = async () => {
  * merge below must never accept arbitrary unbounded JSON. */
 const progressSchema = z.strictObject({
   discovery: z.array(z.string().max(100)).max(20).optional(),
+  messagingTool: z.enum(["slack", "teams", "other"]).nullish(),
+  messagingToolOther: z.string().trim().max(100).nullish(),
   createdAgentId: z.string().max(100).nullish(),
   agentName: z.string().max(255).nullish(),
 });
@@ -134,6 +136,8 @@ export async function completeOnboarding(data: {
 
 const emptyProgress = (): OnboardingProgress => ({
   discovery: [],
+  messagingTool: null,
+  messagingToolOther: null,
   agentName: null,
   createdAgentId: null,
 });
@@ -166,6 +170,14 @@ export async function getOnboardingProgress(): Promise<OnboardingProgress> {
       discovery: Array.isArray(responses.discovery)
         ? responses.discovery.filter((d): d is string => typeof d === "string")
         : [],
+      messagingTool:
+        typeof responses.messagingTool === "string"
+          ? responses.messagingTool
+          : null,
+      messagingToolOther:
+        typeof responses.messagingToolOther === "string"
+          ? responses.messagingToolOther
+          : null,
       agentName:
         typeof responses.agentName === "string" ? responses.agentName : null,
       createdAgentId:

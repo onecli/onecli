@@ -9,7 +9,8 @@ const OUTCOME_COPY: [GroupedOutcome, string][] = [
   ["approved", "approved"],
   ["denied", "denied"],
   ["expired", "expired"],
-  ["decided", "decided elsewhere"],
+  ["cancelled", "cancelled"],
+  ["unknown", "no longer waiting"],
 ];
 
 /** The quiet record a finished task leaves in the thread: what it was and

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const zoomPermissions: AppPermissionDefinition = {
   provider: "zoom",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

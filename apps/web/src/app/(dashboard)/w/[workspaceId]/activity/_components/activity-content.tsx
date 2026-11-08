@@ -31,6 +31,7 @@ interface ActivityUrl {
   agent?: string;
   view?: Exclude<RunsView, "all">;
   webhook?: string;
+  schedule?: string;
   from?: string;
   to?: string;
 }
@@ -82,6 +83,10 @@ export const ActivityContent = () => {
   const rawWebhook = params.get("webhook");
   const webhookId =
     rawWebhook && /^[\w-]{1,100}$/.test(rawWebhook) ? rawWebhook : undefined;
+  // One schedule's runs (its "History"), the same fence.
+  const rawSchedule = params.get("schedule");
+  const cronId =
+    rawSchedule && /^[\w-]{1,100}$/.test(rawSchedule) ? rawSchedule : undefined;
 
   const go = (next: ActivityUrl, history: "push" | "replace" = "replace") => {
     const q = new URLSearchParams();
@@ -140,6 +145,7 @@ export const ActivityContent = () => {
         <RunsTab
           agentId={scope.agentId}
           webhookId={webhookId}
+          cronId={cronId}
           view={view}
           onViewChange={(next) =>
             go({
@@ -150,6 +156,9 @@ export const ActivityContent = () => {
           }
           onClearWebhook={() =>
             go({ tab: "runs", agent: scope.agentId, view: "webhook" })
+          }
+          onClearSchedule={() =>
+            go({ tab: "runs", agent: scope.agentId, view: "cron" })
           }
           onViewNetwork={viewRunNetwork}
         />

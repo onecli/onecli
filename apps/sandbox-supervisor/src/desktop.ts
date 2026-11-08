@@ -370,6 +370,21 @@ export const startDesktop = async (
   }
 };
 
+/**
+ * The variables a desktop exports into this process's environment
+ * (`bootDesktop` below), in the shape a harness session's children must
+ * receive them when the harness launched BEFORE the desktop came up: the
+ * display, and the session bus when there is one. Empty with no desktop.
+ */
+export const desktopSessionEnv = (
+  env: NodeJS.ProcessEnv,
+): Record<string, string> => ({
+  ...(env.DISPLAY && { DISPLAY: env.DISPLAY }),
+  ...(env.DBUS_SESSION_BUS_ADDRESS && {
+    DBUS_SESSION_BUS_ADDRESS: env.DBUS_SESSION_BUS_ADDRESS,
+  }),
+});
+
 export const publishDisplay = (display: string): void => {
   try {
     // Unlink first, then write a fresh regular file: /tmp is writable by
@@ -386,6 +401,60 @@ export const publishDisplay = (display: string): void => {
       error: String(error),
     });
   }
+};
+
+/**
+ * The boot's whole desktop step, started without blocking the caller: probe,
+ * start, then export `DISPLAY` (and the session bus) into this process's
+ * environment and publish the display file, exactly as the boot used to do
+ * before anything else ran.
+ *
+ * `started` settles once that is done: true with a desktop up, false with
+ * none (absent from the image, or failed: best-effort, logged). It never
+ * rejects. Whoever spawns a child that must inherit the display waits on it.
+ *
+ * `close` is safe at any time: before the start settles it marks the boot
+ * closed, and a desktop that comes up afterwards is taken straight down
+ * instead of exported. `onClose` registers that same close with the signal
+ * path (the caller's hook, so this module imports nothing of the
+ * supervisor's).
+ */
+export const bootDesktop = (
+  layer: DesktopLayer | undefined,
+  onClose: (close: () => void) => void,
+  env: NodeJS.ProcessEnv = process.env,
+  start: typeof startDesktop = startDesktop,
+): { started: Promise<boolean>; close: () => void } => {
+  let desktop: Desktop | undefined;
+  let closed = false;
+  const close = () => {
+    closed = true;
+    desktop?.close();
+  };
+  onClose(close);
+  if (!desktopAvailable(env)) {
+    log("info", "desktop not started: this image has no window manager");
+    return { started: Promise.resolve(false), close };
+  }
+  const started = start(env, layer).then(
+    (up) => {
+      if (closed) {
+        up.close();
+        return false;
+      }
+      desktop = up;
+      env.DISPLAY = up.display;
+      if (up.dbusAddress) env.DBUS_SESSION_BUS_ADDRESS = up.dbusAddress;
+      publishDisplay(up.display);
+      log("info", "desktop ready", { display: up.display });
+      return true;
+    },
+    (error: unknown) => {
+      log("warn", "desktop did not start", { error: String(error) });
+      return false;
+    },
+  );
+  return { started, close };
 };
 
 /**

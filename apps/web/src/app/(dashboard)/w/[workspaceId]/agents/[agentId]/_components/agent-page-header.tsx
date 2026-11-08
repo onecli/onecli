@@ -2,11 +2,8 @@
 
 import { Suspense, useState } from "react";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
 import { AgentAvatarEditor } from "@/lib/agents/_components/agent-avatar-editor";
-import { Button } from "@onecli/ui/components/button";
 import { withWorkspacePrefix } from "@/lib/navigation";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import { useHasDesktop } from "@/hooks/use-has-desktop";
@@ -41,16 +38,8 @@ export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
 
   return (
     <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        asChild
-        aria-label="Back to Agents"
-      >
-        <Link href={withWorkspacePrefix(pathname, "/agents")}>
-          <ArrowLeft className="size-4" />
-        </Link>
-      </Button>
+      {/* No back arrow: there is no agent list to go back to — every agent
+          is a row in the sidebar, one click away. */}
       <AgentAvatarEditor agent={agent} />
       <div className="flex min-w-0 items-center gap-2.5">
         <h1 className="truncate text-base font-semibold tracking-tight">
@@ -84,7 +73,10 @@ export const AgentPageHeader = ({ agent }: AgentPageHeaderProps) => {
             )
           }
           onDeleted={() =>
-            router.push(withWorkspacePrefix(pathname, "/agents"))
+            // The workspace front door: its next (oldest) agent, or creation
+            // when this was the last one. `replace`: the deleted agent's page
+            // must not sit in history for Back to return to.
+            router.replace(withWorkspacePrefix(pathname, ""))
           }
         />
       </div>

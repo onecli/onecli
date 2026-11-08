@@ -9,6 +9,9 @@ export interface SharedGitHubInstallation {
   accountType: string | null;
   avatarUrl: string | null;
   connectedHere: number;
+  /** The connections that already reach this scope (this scope's own first).
+   * Absent on older servers. */
+  connectedHereIds?: string[];
 }
 
 export interface SharedGitHubConnection {

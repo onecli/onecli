@@ -1,0 +1,30 @@
+[package]
+name = "dbproxy"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "The engine-agnostic half of the gateway's database front door: statement classes and policy, connection targets, the guarded upstream dial, approvals and audit."
+
+[dependencies]
+anyhow = { workspace = true }
+approval = { path = "../approval" }
+ca = { path = "../ca" }
+cache = { path = "../cache" }
+context = { path = "../context" }
+ee = { path = "../ee/ee" }
+policy = { path = "../policy" }
+policy-engine = { path = "../policy-engine" }
+proxy = { path = "../proxy" }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+socket2 = { workspace = true }
+sqlx = { workspace = true }
+summary = { path = "../summary" }
+telemetry = { path = "../telemetry" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+webpki-roots = { workspace = true }

@@ -186,12 +186,24 @@ describe("Install moved into Workspace Settings", () => {
     expect(workspaceTitles({ sidebar: true })).not.toContain("Install");
   });
 
-  it("is a workspace settings section, beside General", () => {
+  it("is a workspace settings section, beside General and API Key", () => {
     const items = getWorkspaceSettingsSections("p1").flatMap((s) => s.items);
-    expect(items.map((i) => i.title)).toEqual(["General", "Install"]);
+    expect(items.map((i) => i.title)).toEqual([
+      "General",
+      "Install",
+      "API Key",
+    ]);
     expect(items.map((i) => i.url)).toEqual([
       "/w/p1/settings/general",
       "/w/p1/settings/install",
+      "/w/p1/settings/api-key",
     ]);
+  });
+});
+
+describe("the workspace Overview dashboard is gone", () => {
+  it("has no Overview entry in the sidebar or the breadcrumb table", () => {
+    expect(workspaceTitles()).not.toContain("Overview");
+    expect(workspaceTitles({ sidebar: true })).not.toContain("Overview");
   });
 });

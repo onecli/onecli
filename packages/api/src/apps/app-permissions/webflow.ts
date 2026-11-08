@@ -27,6 +27,7 @@ const tool = (t: Omit<AppTool, "hostPattern">): AppTool => ({
 
 export const webflowPermissions: AppPermissionDefinition = {
   provider: "webflow",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

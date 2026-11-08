@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPatch, apiDelete } from "./client";
+import { apiGet, apiPost, apiPatch } from "./client";
 import { appsPath, type PageScope } from "./scope";
 
 export type { PageScope } from "./scope";
@@ -37,9 +37,3 @@ export const toggle = (
   apiPatch<{ success: true }>(`${basePath(provider, scope)}/${ruleId}`, {
     enabled,
   });
-
-export const remove = (
-  provider: string,
-  ruleId: string,
-  scope: PageScope = "workspace",
-) => apiDelete(`${basePath(provider, scope)}/${ruleId}`);

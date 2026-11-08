@@ -85,8 +85,9 @@ export const MemorySection = () => {
           <div>
             <p className="text-sm font-medium">Nothing remembered yet</p>
             <p className="text-muted-foreground mt-1 text-sm">
-              Teach it in chat (“remember that our staging URL is …”) or add one
-              here yourself.
+              It saves what it learns as you work together. You can also teach
+              it in chat (“remember that our staging URL is …”) or add one here
+              yourself.
             </p>
           </div>
           <Button size="sm" onClick={openCreate}>

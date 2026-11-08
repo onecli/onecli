@@ -1,4 +1,8 @@
 import { db } from "@onecli/db";
+import {
+  SANDBOX_PG_PASS_FILE,
+  SANDBOX_PG_SERVICE_FILE,
+} from "@onecli/agent-protocol";
 import { agentProxyAddress } from "../lib/public-origins";
 import { loadCaCertificate } from "../lib/gateway-ca";
 import {
@@ -296,6 +300,13 @@ export const buildContainerConfig = async ({
         GIT_TERMINAL_PROMPT: "0",
         GIT_HTTP_PROXY_AUTHMETHOD: "basic",
         GIT_SSL_CAINFO: CA_CONTAINER_PATH,
+        // PostgreSQL clients (libpq and the drivers built on it): the
+        // supervisor writes the agent's attached databases as services and
+        // its token as their password, and the gateway's database front
+        // door presents a certificate from the same CA.
+        PGSERVICEFILE: SANDBOX_PG_SERVICE_FILE,
+        PGPASSFILE: SANDBOX_PG_PASS_FILE,
+        PGSSLROOTCERT: CA_CONTAINER_PATH,
         // The clock. A container without TZ reports UTC, which no one's own
         // computer does; `date`, a browser's Intl, and every file timestamp
         // follow it. The locale is the image's to set (it is the image that

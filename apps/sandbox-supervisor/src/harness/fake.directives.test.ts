@@ -119,6 +119,37 @@ describe("directive turns", () => {
     );
   });
 
+  it("a prompt step echoes the delivered prompt's first line: the frame the supervisor put above the caller's message", async () => {
+    const harness = createFakeHarness();
+    const framed = await startTurn(
+      harness,
+      `[delivery-only frame]\n\n${directiveMessage([{ op: "prompt" }])}`,
+    );
+    expect(texts(await collect(framed.events))).toEqual([
+      "[prompt [delivery-only frame]]",
+    ]);
+    const plain = await startTurn(
+      harness,
+      directiveMessage([{ op: "prompt" }]),
+    );
+    expect(texts(await collect(plain.events))[0]).toMatch(
+      /^\[prompt @fake:v1 /,
+    );
+  });
+
+  it("a contextTokens step echoes the size delivered with the turn, or none", async () => {
+    const session = await createFakeHarness().startSession({ homeDir: "" });
+    const sized = session.runTurn({
+      message: directiveMessage([{ op: "contextTokens" }]),
+      contextTokens: 100_000,
+    });
+    expect(texts(await collect(sized))).toEqual(["[contextTokens 100000]"]);
+    const unsized = session.runTurn({
+      message: directiveMessage([{ op: "contextTokens" }]),
+    });
+    expect(texts(await collect(unsized))).toEqual(["[contextTokens none]"]);
+  });
+
   it("surfaces a malformed directive as readable text, never a hang", async () => {
     const harness = createFakeHarness();
     const { events } = await startTurn(harness, "@fake:v1 {broken");

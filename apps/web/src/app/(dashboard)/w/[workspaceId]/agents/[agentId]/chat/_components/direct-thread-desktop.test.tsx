@@ -52,7 +52,8 @@ vi.mock("@/ee/desktop/desktop-dock", async (importOriginal) => {
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/ws-1/agents/agent-1/chat",
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 vi.mock("../../_components/agent-page-frame", () => ({
   useAgentPageAgent: () => ({ id: "agent-1", name: "Agent" }),

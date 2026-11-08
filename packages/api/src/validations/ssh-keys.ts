@@ -25,5 +25,3 @@ export const createSshKeySchema = z.object({
     ),
   publicKey: z.string().trim().min(1, "Public key is required").max(1024),
 });
-
-export type CreateSshKeyInput = z.infer<typeof createSshKeySchema>;

@@ -29,6 +29,7 @@ vi.mock("../lib/logger", () => ({
 }));
 
 const { judgeAnswer } = await import("./eval-judge");
+const { anthropic } = await import("../llm/anthropic");
 
 const INPUT = {
   agent: { id: "ag1", workspaceId: "p1" },
@@ -137,7 +138,7 @@ describe("judgeAnswer", () => {
     }));
     expect(await judgeAnswer(INPUT)).toEqual({
       ok: true,
-      judgement: { ...VERDICT, model: "claude-sonnet-5" },
+      judgement: { ...VERDICT, model: anthropic.defaultModel },
     });
     const [request] = requests;
     expect(request?.path).toBe("/v1/messages");
@@ -159,7 +160,7 @@ describe("judgeAnswer", () => {
       body: jsonOutput(VERDICT),
     }));
     await judgeAnswer({ ...INPUT, model: "gpt-5.4" });
-    expect(requests[0]?.body.model).toBe("claude-sonnet-5");
+    expect(requests[0]?.body.model).toBe(anthropic.defaultModel);
   });
 
   it("falls back to the provider default when the endpoint cannot run the agent's model", async () => {

@@ -15,11 +15,20 @@ import {
 } from "@onecli/api/lib/github-org-access";
 import type { PageScope } from "@/lib/api";
 import { connectionAccessLevelLabel } from "@onecli/api/apps/access-level";
-import { connectionTags } from "@onecli/api/lib/connection-display";
+import {
+  connectionTags,
+  connectsAsSuperuser,
+  displayConnectionLabel,
+} from "@onecli/api/lib/connection-display";
 import { ConnectionAgentRows } from "./connection-agent-rows";
 import { GitHubOrgAccessNotice } from "./github-org-access-notice";
+import { SuperuserNotice } from "./superuser-notice";
 import type { AccountCardConnection } from "./account-card-connection";
 import { accountTypeLabel } from "@/lib/connections/account-type-label";
+import { getApp } from "@onecli/api/apps/registry";
+import { DatabaseConnectionDetails } from "@/lib/connections/database-connection-details";
+import { DatabaseTargetLine } from "@/lib/connections/database-target-line";
+import { InheritedTestConnection } from "@/lib/connections/inherited-test-connection";
 
 interface InheritedConnectionCardProps {
   connection: AccountCardConnection;
@@ -49,7 +58,9 @@ export const InheritedConnectionCard = ({
   pageScope = "workspace",
   highlightedOrg = null,
 }: InheritedConnectionCardProps) => {
-  const displayName = connection.label ?? "Connected account";
+  const displayName =
+    displayConnectionLabel(connection.label, connection.metadata) ??
+    "Connected account";
   const showAgentAccess = pageScope === "workspace";
   const avatarUrl = metaString(connection.metadata, "avatarUrl");
   const accountType = metaString(connection.metadata, "accountType");
@@ -82,6 +93,7 @@ export const InheritedConnectionCard = ({
           )}
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{displayName}</p>
+            <DatabaseTargetLine metadata={connection.metadata} />
             <p className="text-muted-foreground text-xs">
               {connection.reauthRequiredAt ? (
                 <span className="text-destructive">Needs reconnect</span>
@@ -132,7 +144,15 @@ export const InheritedConnectionCard = ({
           highlighted={issue.org === highlightedOrg?.toLowerCase()}
         />
       ))}
-      {tags.length > 0 && (
+      {connectsAsSuperuser(connection.metadata) && <SuperuserNotice />}
+      {getApp(connection.provider)?.database ? (
+        <DatabaseConnectionDetails tags={tags}>
+          <InheritedTestConnection
+            connectionId={connection.id}
+            hasElevatedAccess={connectsAsSuperuser(connection.metadata)}
+          />
+        </DatabaseConnectionDetails>
+      ) : tags.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {tags.map((tag) => (
             <Badge key={tag} variant="secondary" className="text-xs">
@@ -140,7 +160,7 @@ export const InheritedConnectionCard = ({
             </Badge>
           ))}
         </div>
-      )}
+      ) : null}
       {showAgentAccess && <ConnectionAgentRows connection={connection} />}
     </Card>
   );

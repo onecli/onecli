@@ -141,7 +141,7 @@ export const DashboardSidebar = ({
               <SidebarMenuButton
                 asChild
                 size="sm"
-                className="text-muted-foreground hover:text-foreground"
+                className="text-sidebar-foreground/70 hover:text-foreground"
               >
                 <Link href={workspacesUrl}>
                   <ChevronLeft className="size-3.5" />
@@ -151,8 +151,8 @@ export const DashboardSidebar = ({
             </SidebarMenuItem>
           </SidebarMenu>
         )}
-        <NavMain items={items} />
         {workspaceId && <AgentsGroup workspaceId={workspaceId} />}
+        <NavMain items={items} label={workspaceId ? "Workspace" : undefined} />
       </SidebarContent>
       <SidebarFooter
         className="justify-center group-data-[collapsible=icon]:px-0"

@@ -13,7 +13,10 @@ export const metadata: Metadata = {
 export default function AgentChatPage() {
   return (
     <>
-      <DirectThreadSection />
+      {/* Suspense: the section reads `?draft=` (useSearchParams). */}
+      <Suspense>
+        <DirectThreadSection />
+      </Suspense>
       {/* `?attach=<provider>` deep links (the Slack card's Attach button)
           open the attach dialog over the chat. Suspense: useSearchParams. */}
       <Suspense>

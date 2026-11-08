@@ -122,7 +122,7 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
     // matched-rule name recorded (prod byte-compat: only fires when Some,
     // which requires the v2 engine — flag-gated — to have decided).
     let has_matched = event.matched_rule.is_some();
-    if !has_decision && !has_label && !has_matched {
+    if !has_decision && !has_label && !has_matched && event.statement.is_none() {
         return None;
     }
     let mut obj = serde_json::json!({});
@@ -138,10 +138,12 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
         RequestDecision::ApprovalPending {
             ref approval_id,
             ref triggered_at,
+            generic_card,
         } => {
             obj["decision"] = serde_json::json!("approval_pending");
             obj["approval_id"] = serde_json::json!(approval_id);
             obj["triggered_at"] = serde_json::json!(triggered_at);
+            obj["card"] = serde_json::json!(if generic_card { "generic" } else { "dedicated" });
         }
         RequestDecision::ApprovalDenied {
             ref approval_id,
@@ -167,6 +169,16 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
             obj["approval_id"] = serde_json::json!(approval_id);
             obj["triggered_at"] = serde_json::json!(triggered_at);
             obj["resolved_at"] = serde_json::json!(resolved_at);
+            obj["approved_by"] = serde_json::json!(approved_by);
+        }
+        // Its own key, never `approval_id`: that one names the single row a
+        // card settles from, and this request had no card of its own.
+        RequestDecision::ApprovedBySimilar {
+            ref approval_id,
+            ref approved_by,
+        } => {
+            obj["decision"] = serde_json::json!("approval_approved");
+            obj["approved_via_similar"] = serde_json::json!(approval_id);
             obj["approved_by"] = serde_json::json!(approved_by);
         }
         RequestDecision::BlockedByDefaultPolicy => {
@@ -205,6 +217,9 @@ fn serialize_extra_data(event: &RequestEvent) -> Option<String> {
     if let Some(ref matched) = event.matched_rule {
         obj["matched_rule_name"] = serde_json::json!(matched.name);
         obj["matched_rule_scope"] = serde_json::json!(matched.scope);
+    }
+    if let Some(ref statement) = event.statement {
+        obj["statement"] = serde_json::json!(statement);
     }
     Some(obj.to_string())
 }
@@ -567,7 +582,21 @@ mod tests {
             log_id: None,
             budget_charge: None,
             matched_rule: None,
+            statement: None,
         }
+    }
+
+    /// A database row's statement rides in `extra_data` even on a plain
+    /// allow (nothing else would put it there), and never reaches analytics.
+    #[test]
+    fn a_statement_is_logged_but_never_sent_to_analytics() {
+        let mut ev = base_event();
+        ev.statement = Some("SELECT * FROM orders WHERE id = $1".into());
+        let extra: serde_json::Value =
+            serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+        assert_eq!(extra["statement"], "SELECT * FROM orders WHERE id = $1");
+        let batch = build_injection_batch(&[ev], "test", "0.0.0");
+        assert!(!batch[0].to_string().contains("orders"));
     }
 
     // The one edition branch in this module, both arms: injected and
@@ -616,6 +645,41 @@ mod tests {
             serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
         assert_eq!(extra["decision"], "needs_connection");
         assert_eq!(extra["guidance_error"], "connection_host_mismatch");
+    }
+
+    /// A held request's row says which card the approver saw, so the
+    /// fallback rate can be tracked.
+    #[test]
+    fn pending_approvals_record_the_card_kind() {
+        for (generic_card, want) in [(true, "generic"), (false, "dedicated")] {
+            let mut ev = base_event();
+            ev.decision = crate::core::RequestDecision::ApprovalPending {
+                approval_id: "ap1".into(),
+                triggered_at: "t".into(),
+                generic_card,
+            };
+            let extra: serde_json::Value =
+                serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+            assert_eq!(extra["card"], want);
+        }
+    }
+
+    /// A window's request carries the opening approval under its own key,
+    /// never `approval_id` (that one names the row a card settles), and
+    /// still reads as approved, by whom.
+    #[test]
+    fn similar_window_requests_name_the_approval_that_opened_it() {
+        let mut ev = base_event();
+        ev.decision = crate::core::RequestDecision::ApprovedBySimilar {
+            approval_id: "ap1".into(),
+            approved_by: Some("u1".into()),
+        };
+        let extra: serde_json::Value =
+            serde_json::from_str(&serialize_extra_data(&ev).expect("extra data")).unwrap();
+        assert_eq!(extra["decision"], "approval_approved");
+        assert_eq!(extra["approved_via_similar"], "ap1");
+        assert_eq!(extra["approved_by"], "u1");
+        assert!(extra.get("approval_id").is_none());
     }
 
     /// A destination-guard refusal is un-injected (nothing was dialed) and

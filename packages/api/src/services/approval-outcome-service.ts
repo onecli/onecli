@@ -15,9 +15,10 @@ import {
  * approval at once). Two records answer it:
  *
  * - the gateway's request-log row (one per held request) says how it ended
- *   (approved, denied, superseded) and, for an approved one, what the
- *   upstream actually did ("0 of 9 created: BillingCountry: …"), so a person
- *   who approved learns the agent's resend is a FIX, not a mystery;
+ *   (approved, denied, superseded, or cancelled: the agent stopped waiting
+ *   and no one decided it) and, for an approved one, what the upstream
+ *   actually did ("0 of 9 created: BillingCountry: …"), so a person who
+ *   approved learns the agent's resend is a FIX, not a mystery;
  * - the audit log names where a person decided it (a Slack click names its
  *   presence), so the card reads "Approved in Slack".
  *
@@ -71,12 +72,14 @@ const auditRow = z.object({
   reason: lenient(z.string()),
 });
 
-/** The request-log row's decision, as a card's outcome. Expiry and
- * cancellation are left to the browser (it already says "Expired"). */
+/** The request-log row's decision, as a card's outcome. Expiry is left to
+ * the browser (it already says "Expired"). A cancel is the gateway's own
+ * record that the agent went away: the one ending no one decided. */
 const kindOf = (
   row: z.infer<typeof gatewayRow>,
 ): ApprovalOutcomeKind | undefined => {
   if (row.decision === "approval_approved") return "approved";
+  if (row.decision === "approval_cancelled") return "cancelled";
   if (row.decision !== "approval_denied") return undefined;
   if (row.approval_reason === "superseded") return "replaced";
   return row.approval_reason === "denied" ? "denied" : undefined;
@@ -180,12 +183,16 @@ export const listApprovalOutcomes = async (input: {
     if (!outcome) continue;
     const known = outcomes.get(row.approval_id);
     const result = outcome === "approved" ? row.approval_result : undefined;
+    // A click that reached the API after the agent had gone (an "already
+    // settled" one) wrote an audit row, but decided nothing: a cancel never
+    // takes its place or time.
+    const decided = outcome === "cancelled" ? undefined : known;
     outcomes.set(row.approval_id, {
       approvalId: row.approval_id,
       outcome,
-      via: known?.via,
+      via: decided?.via,
       decidedAt:
-        known?.decidedAt ?? row.resolved_at ?? log.createdAt.toISOString(),
+        decided?.decidedAt ?? row.resolved_at ?? log.createdAt.toISOString(),
       ...(result && { result }),
     });
   }

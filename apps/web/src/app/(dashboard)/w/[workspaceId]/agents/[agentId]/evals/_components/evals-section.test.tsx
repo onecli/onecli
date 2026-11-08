@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   isPending: false,
   isError: false,
   start: vi.fn(),
+  stop: vi.fn(),
   startPending: false,
   archive: vi.fn(),
   dialog: vi.fn(),
@@ -22,6 +23,18 @@ const state = vi.hoisted(() => ({
   toastError: vi.fn(),
   saveSchedule: vi.fn(),
   deleteSchedule: vi.fn(),
+  reportChannels: [] as { ref: string; name: string; private: boolean }[],
+  searchParams: new URLSearchParams(),
+}));
+
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => state.searchParams,
+}));
+
+// The shared When field reads plain words with rules first; the model
+// fallback is never reached by these phrasings.
+vi.mock("@/hooks/use-crons", () => ({
+  useParseWords: () => ({ data: undefined, isFetching: false }),
 }));
 
 vi.mock("@/hooks/use-evals", () => ({
@@ -34,6 +47,7 @@ vi.mock("@/hooks/use-evals", () => ({
     mutate: state.start,
     isPending: state.startPending,
   }),
+  useStopEvalRun: () => ({ mutate: state.stop, isPending: false }),
   useArchiveEvalQuestion: () => ({ mutate: state.archive, isPending: false }),
   useSaveEvalSchedule: () => ({
     mutate: state.saveSchedule,
@@ -42,6 +56,10 @@ vi.mock("@/hooks/use-evals", () => ({
   useDeleteEvalSchedule: () => ({
     mutate: state.deleteSchedule,
     isPending: false,
+  }),
+  useEvalReportChannels: () => ({
+    data: state.reportChannels,
+    isSuccess: true,
   }),
 }));
 vi.mock("@/lib/api/policy-visibility", () => ({
@@ -117,11 +135,14 @@ beforeEach(() => {
   state.isError = false;
   state.startPending = false;
   state.start.mockReset();
+  state.stop.mockReset();
   state.archive.mockReset();
   state.dialog.mockReset();
   state.results.mockReset();
   state.saveSchedule.mockReset();
   state.deleteSchedule.mockReset();
+  state.reportChannels = [];
+  state.searchParams = new URLSearchParams();
   // Radix Select measures and captures the pointer; jsdom does neither.
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
@@ -299,26 +320,96 @@ describe("EvalsSection", () => {
     nextFireAt: "2026-10-12T06:00:00Z",
     lastFiredAt: null,
     lastOutcome: null,
+    createdByViewer: true,
+    report: null,
     ...patch,
   });
 
-  it("schedules the tests daily at 09:00 by default, in the browser's zone", async () => {
+  it("schedules the tests with the same When as tasks, in the browser's zone", async () => {
     state.view = view({ questions: [question("q-1")] });
     const user = userEvent.setup();
     render(<EvalsSection />);
 
     await user.click(screen.getByRole("button", { name: "Schedule" }));
-    expect(screen.getByLabelText("At")).toHaveValue("09:00");
-    await user.clear(screen.getByLabelText("At"));
-    await user.type(screen.getByLabelText("At"), "07:30");
-    await user.clear(screen.getByLabelText("Timezone"));
-    await user.type(screen.getByLabelText("Timezone"), "Asia/Jerusalem");
-    await user.click(screen.getByRole("button", { name: "Save schedule" }));
+    expect(screen.getByLabelText("When")).toHaveValue("every day at 9");
+    await user.clear(screen.getByLabelText("When"));
+    await user.type(screen.getByLabelText("When"), "weekdays at 7:30");
+    expect(screen.getByText("✓ Weekdays at 07:30")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Advanced/ }));
+    await user.click(screen.getByLabelText("Timezone"));
+    await user.type(screen.getByLabelText("Search timezones"), "jerusalem");
+    await user.click(screen.getByRole("option", { name: "Asia/Jerusalem" }));
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
 
     expect(state.saveSchedule).toHaveBeenCalledWith(
-      { schedule: "30 7 * * *", timezone: "Asia/Jerusalem", enabled: true },
+      {
+        schedule: "30 7 * * 1-5",
+        timezone: "Asia/Jerusalem",
+        enabled: true,
+        report: null,
+      },
       expect.anything(),
     );
+  });
+
+  it("sends results to a channel the agent is in, only when something changes", async () => {
+    state.view = view({ questions: [question("q-1")] });
+    state.reportChannels = [{ ref: "CQA", name: "#qa", private: false }];
+    const user = userEvent.setup();
+    render(<EvalsSection />);
+
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+    // Nothing to time until there is somewhere to send.
+    expect(screen.queryByRole("combobox", { name: "How often" })).toBeNull();
+    await user.click(screen.getByRole("combobox", { name: "Send results to" }));
+    await user.click(await screen.findByRole("option", { name: "#qa" }));
+    await user.click(screen.getByRole("combobox", { name: "How often" }));
+    await user.click(
+      await screen.findByRole("option", {
+        name: "When results change",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Schedule" }));
+
+    expect(state.saveSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        report: { to: "channel", channelRef: "CQA", when: "changes" },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("stops a running run", async () => {
+    state.view = view({
+      questions: [question("q-1")],
+      runs: [runSummary("r-1", { status: "running" })],
+    });
+    const user = userEvent.setup();
+    render(<EvalsSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    // That run, by id: never whatever is active by the time it lands.
+    expect(state.stop).toHaveBeenCalledWith("r-1", expect.anything());
+  });
+
+  it("shows where results go, and opens a linked run", () => {
+    state.searchParams = new URLSearchParams("run=r-1");
+    state.view = view({
+      questions: [question("q-1")],
+      runs: [runSummary("r-2"), runSummary("r-1")],
+      schedule: savedSchedule({
+        report: {
+          to: "channel",
+          channelRef: "CQA",
+          channelLabel: "#qa",
+          when: "always",
+        },
+      }),
+    });
+    render(<EvalsSection />);
+
+    expect(screen.getByText(/Results to #qa/)).toBeInTheDocument();
+    expect(state.results).toHaveBeenLastCalledWith("r-1");
   });
 
   it("shows the saved schedule, its next run and its last outcome, and edits it", async () => {
@@ -337,8 +428,10 @@ describe("EvalsSection", () => {
     expect(screen.queryByRole("button", { name: "Schedule" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Edit schedule" }));
-    expect(screen.getByLabelText("At")).toHaveValue("09:00");
-    expect(screen.getByLabelText("Timezone")).toHaveValue("Asia/Jerusalem");
+    expect(screen.getByLabelText("When")).toHaveValue("Weekdays at 09:00");
+    expect(screen.getByRole("button", { name: /Advanced/ })).toHaveTextContent(
+      "Asia/Jerusalem",
+    );
     await user.click(screen.getByRole("button", { name: "Remove schedule" }));
     expect(state.deleteSchedule).toHaveBeenCalled();
   });

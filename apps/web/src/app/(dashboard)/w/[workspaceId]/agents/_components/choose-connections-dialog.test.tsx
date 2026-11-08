@@ -9,19 +9,22 @@ vi.mock("@/hooks/use-counts", () => ({
   useCounts: () => ({ data: state.counts }),
 }));
 
-// The rows are the agent page's own sections, with suites of their own; the
-// unit here is that the window hands them THIS agent, unfolded (every row
-// starts off and is the choice), and that Done just closes.
-vi.mock("../[agentId]/_components/apps-section", () => ({
-  AppsSection: ({
+// The tabs are the agent page's own, with suites of their own; the unit here
+// is that the window hands them THIS agent in their chooser shape, and that
+// Done just closes.
+vi.mock("../[agentId]/_components/apps-tab", () => ({
+  AppsTab: ({
     agentId,
-    foldInactive,
+    chooser,
+    onManage,
   }: {
     agentId: string;
-    foldInactive?: boolean;
+    chooser?: boolean;
+    onManage?: unknown;
   }) => (
     <div data-testid="apps">
-      apps for {agentId}, folded={String(foldInactive)}
+      apps for {agentId}, chooser={String(!!chooser)}, manage=
+      {String(!!onManage)}
     </div>
   ),
 }));
@@ -29,14 +32,17 @@ vi.mock("../[agentId]/_components/secret-grants-tab", () => ({
   SecretGrantsTab: ({
     agentId,
     kind,
-    foldInactive,
+    chooser,
+    onEdit,
   }: {
     agentId: string;
     kind: string;
-    foldInactive?: boolean;
+    chooser?: boolean;
+    onEdit?: unknown;
   }) => (
     <div data-testid="custom">
-      {kind} for {agentId}, folded={String(foldInactive)}
+      {kind} for {agentId}, chooser={String(!!chooser)}, edit=
+      {String(!!onEdit)}
     </div>
   ),
 }));
@@ -48,18 +54,19 @@ beforeEach(() => {
 });
 
 describe("ChooseConnectionsDialog", () => {
-  it("offers the new agent's apps, then its custom connections, every row in view", async () => {
+  it("offers the new agent's apps, then its custom connections, as switch-only tiles", async () => {
     render(<ChooseConnectionsDialog agent={agent} onClose={vi.fn()} />);
 
     expect(screen.getByText("Choose Donna's connections")).toBeInTheDocument();
-    // The sections load lazily (they stay out of the agents list's bundle).
+    // The tabs load lazily (they stay out of the agents list's bundle).
+    // Switch-only: no Manage and no edit door is handed in.
     expect(await screen.findByTestId("apps")).toHaveTextContent(
-      "apps for ag-1, folded=false",
+      "apps for ag-1, chooser=true, manage=false",
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Custom" }));
     expect(await screen.findByTestId("custom")).toHaveTextContent(
-      "secret for ag-1, folded=false",
+      "secret for ag-1, chooser=true, edit=false",
     );
     expect(screen.queryByTestId("apps")).toBeNull();
   });

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleMeetPermissions: AppPermissionDefinition = {
   provider: "google-meet",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

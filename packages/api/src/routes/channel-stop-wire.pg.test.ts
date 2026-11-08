@@ -102,8 +102,12 @@ const stopEvent = (input: {
   streaming_message_ts: [],
 });
 
-/** The events transport: a signed webhook, exactly as Slack posts it. */
-const postSignedStop = (
+/** The events arm processes after its ack; resolve once that run settles. */
+let settleInbound: () => Promise<void>;
+
+/** The events transport: a signed webhook, exactly as Slack posts it, then
+ * the inbox run it started (the ack no longer waits for it). */
+const postSignedStop = async (
   input: { user: string; channel: string; threadTs: string },
   eventId = nextEventId(),
 ) => {
@@ -114,11 +118,13 @@ const postSignedStop = (
     event_id: eventId,
     event: stopEvent(input),
   });
-  return app.request("/v1/channels/slack/events", {
+  const res = await app.request("/v1/channels/slack/events", {
     method: "POST",
     headers: signedHeaders(raw),
     body: raw,
   });
+  await settleInbound();
+  return res;
 };
 
 /** The socket transport: the adapter relays the event under its cha_ token. */
@@ -285,6 +291,8 @@ beforeAll(async () => {
   app = createApiApp({ getSession: async () => null }, { selfUrl: SELF_URL });
   settle = (await import("./channel-inbound-slack"))
     .settleDetachedRepliesForTests;
+  settleInbound = (await import("../services/channels/inbound-event-service"))
+    .settleInboundEventsForTests;
   // The events route caches app id → presence for 60s; every test re-seeds
   // the presence under the same app id, so the cache is reset per test.
   resetInboundCache = (

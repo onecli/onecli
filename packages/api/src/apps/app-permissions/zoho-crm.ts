@@ -99,7 +99,26 @@ export const zohoCrmPermissions: AppPermissionDefinition = {
           name: "Get settings",
           description: "View CRM settings",
           hostPattern: "www.zohoapis.com",
-          pathPattern: "/crm/v8/settings/*",
+          // The CRM's metadata (modules, fields, layouts, views, related
+          // lists, roles, profiles), each with its item. Never the whole
+          // `/settings/*` subtree: it includes `/settings/variables`, which
+          // Zoho documents as reusable API authentication parameters.
+          pathPattern: "/crm/v8/settings/modules",
+          aliasPatterns: [
+            "/crm/v8/settings/modules/*/",
+            "/crm/v8/settings/fields",
+            "/crm/v8/settings/fields/*/",
+            "/crm/v8/settings/layouts",
+            "/crm/v8/settings/layouts/*/",
+            "/crm/v8/settings/custom_views",
+            "/crm/v8/settings/custom_views/*/",
+            "/crm/v8/settings/related_lists",
+            "/crm/v8/settings/related_lists/*/",
+            "/crm/v8/settings/roles",
+            "/crm/v8/settings/roles/*/",
+            "/crm/v8/settings/profiles",
+            "/crm/v8/settings/profiles/*/",
+          ],
           method: "GET",
         },
         {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPeer } from "@/lib/api";
@@ -57,6 +57,7 @@ import { PeerRow } from "./peer-row";
 const peer = (over: Partial<AgentPeer> = {}): AgentPeer => ({
   agentId: "ag-ray",
   name: "Ray",
+  imageUrl: null,
   workspaceName: null,
   myPolicy: "ask",
   theirPolicy: "ask",
@@ -73,10 +74,17 @@ const renderRow = (p: AgentPeer) =>
     </QueryClientProvider>,
   );
 
-const openPolicyMenu = () =>
-  userEvent.click(
-    screen.getByRole("button", { name: /Whether Donna and Ray may message/ }),
-  );
+const group = () =>
+  screen.getByRole("group", {
+    name: "Can Donna and Ray message each other",
+  });
+const pressed = () =>
+  within(group())
+    .getAllByRole("button")
+    .filter((b) => b.getAttribute("aria-pressed") === "true")
+    .map((b) => b.getAttribute("aria-label"));
+const click = (name: string) =>
+  userEvent.click(within(group()).getByRole("button", { name }));
 
 beforeEach(() => {
   mocks.mutate.mockReset();
@@ -87,16 +95,29 @@ beforeEach(() => {
 });
 
 describe("PeerRow", () => {
-  it("shows THIS side's policy as the badge, and nothing for a default other side", () => {
+  it("THIS side's setting is the app-permission icons: Always allow, Never; no answer yet presses neither", () => {
     renderRow(peer());
     expect(screen.getByText("Ray")).toBeDefined();
-    expect(screen.getByText("Asks you first")).toBeDefined();
+    expect(
+      within(group())
+        .getAllByRole("button")
+        .map((b) => b.getAttribute("aria-label")),
+    ).toEqual(["Always allow", "Never"]);
+    expect(pressed()).toEqual([]);
     expect(screen.queryByText(/Their side/)).toBeNull();
   });
 
-  it("names the other side's word only when it is not the default", () => {
+  it.each([
+    ["allow", "Always allow"],
+    ["blocked", "Never"],
+  ] as const)("a stored %s presses %s", (myPolicy, label) => {
+    renderRow(peer({ myPolicy }));
+    expect(pressed()).toEqual([label]);
+  });
+
+  it("names the other side only when it says Never", () => {
     renderRow(peer({ theirPolicy: "blocked" }));
-    expect(screen.getByText("Their side: blocked")).toBeDefined();
+    expect(screen.getByText("Their side: never")).toBeDefined();
   });
 
   it("qualifies a peer from another workspace by its workspace", () => {
@@ -104,31 +125,24 @@ describe("PeerRow", () => {
     expect(screen.getByText("Ray · Acme Ops")).toBeDefined();
   });
 
-  it("the menu offers the three words and mutates with THIS peer's id", async () => {
+  it("each icon mutates with THIS peer's id", async () => {
     renderRow(peer());
-    await openPolicyMenu();
-    expect(screen.getByText("Allow")).toBeDefined();
-    expect(screen.getByText("Ask me first")).toBeDefined();
-    expect(screen.getByText("Block")).toBeDefined();
-    await userEvent.click(screen.getByText("Allow"));
-    expect(mocks.mutate).toHaveBeenCalledTimes(1);
+    await click("Always allow");
     expect(mocks.mutate.mock.calls[0]![0]).toEqual({
       peerAgentId: "ag-ray",
       policy: "allow",
     });
+    await click("Never");
+    expect(mocks.mutate.mock.calls[1]![0]).toEqual({
+      peerAgentId: "ag-ray",
+      policy: "blocked",
+    });
   });
 
-  it("choosing the current policy is a no-op", async () => {
+  it("choosing the current setting is a no-op", async () => {
     renderRow(peer({ myPolicy: "allow" }));
-    await openPolicyMenu();
-    await userEvent.click(screen.getByText("Allow"));
+    await click("Always allow");
     expect(mocks.mutate).not.toHaveBeenCalled();
-  });
-
-  it("says when the other owner is asked too, and when they have blocked", async () => {
-    renderRow(peer());
-    await openPolicyMenu();
-    expect(screen.getByText(/Ray’s side must allow too/)).toBeDefined();
   });
 
   it("View conversation is disabled until the pair has talked, and opens the dialog once they have", async () => {
@@ -182,8 +196,8 @@ describe("PeerRow", () => {
     renderRow(
       peer({ myPolicy: "allow", conversationId: "cv-pair", paused: true }),
     );
-    // Consent and the pause are independent: Allowed stays, Paused joins.
-    expect(screen.getByText("Allowed")).toBeDefined();
+    // Consent and the pause are independent: Always allow stays, Paused joins.
+    expect(pressed()).toEqual(["Always allow"]);
     expect(screen.getByText("Paused")).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "More for Ray" }));
     const items = screen.getAllByRole("menuitem").map((el) => el.textContent);

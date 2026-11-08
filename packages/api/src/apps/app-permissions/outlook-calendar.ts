@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const outlookCalendarPermissions: AppPermissionDefinition = {
   provider: "outlook-calendar",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

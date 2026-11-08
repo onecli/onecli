@@ -219,6 +219,63 @@ describe.skipIf(!url)("agent evals on PostgreSQL", () => {
     ).toBe(1);
   });
 
+  it("Stop ends that run and its eval turn, keeping results; a second Stop is a CONFLICT", async () => {
+    const run = await plantActiveRun("running", 0);
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "eval" },
+    });
+    const turn = await db.turn.create({
+      data: {
+        conversationId: conversation.id,
+        message: "still asking",
+        status: "queued",
+        source: "eval",
+        userId,
+      },
+    });
+
+    await service.stopRun(workspaceId, agentId, run.id, userId);
+    expect(
+      await db.agentEvalRun.findUniqueOrThrow({ where: { id: run.id } }),
+    ).toMatchObject({ status: "failed", error: "Stopped" });
+    expect(
+      (await db.turn.findUniqueOrThrow({ where: { id: turn.id } })).status,
+    ).toBe("aborted");
+    await expect(
+      service.stopRun(workspaceId, agentId, run.id, userId),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("Stop never reaches another run: a finished one is a CONFLICT and the active one keeps going", async () => {
+    const finished = await db.agentEvalRun.create({
+      data: { agentId, configVersion: "proof", status: "done", total: 1 },
+    });
+    const active = await plantActiveRun("running", 0);
+    await expect(
+      service.stopRun(workspaceId, agentId, finished.id, userId),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    // Negative controls: another workspace, another agent's path.
+    await expect(
+      service.stopRun(otherWorkspaceId, agentId, active.id, userId),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      service.stopRun(workspaceId, otherAgentId, active.id, userId),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(
+      (await db.agentEvalRun.findUniqueOrThrow({ where: { id: active.id } }))
+        .status,
+    ).toBe("running");
+  });
+
+  it("ends a run that stopped making progress when the run list is read", async () => {
+    const stale = await plantActiveRun(
+      "running",
+      service.STALE_RUN_MS + 60_000,
+    );
+    const [listed] = await service.listRuns(workspaceId, agentId);
+    expect(listed).toMatchObject({ id: stale.id, status: "failed" });
+  });
+
   it("refuses an ambiguous number check before writing", async () => {
     await expect(
       service.saveQuestion(workspaceId, agentId, null, {

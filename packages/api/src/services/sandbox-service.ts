@@ -1,7 +1,13 @@
 import { db } from "@onecli/db";
 import type { RunnerEvent, SandboxStartPayload } from "@onecli/agent-protocol";
+import { getSandboxLifecycleHooks } from "../providers/hooks/sandbox-lifecycle-hooks";
 import { signalWork } from "./due-work";
-import { failStrandedTurns, reviveColdTurns } from "./turn-service";
+import {
+  failStrandedTurns,
+  resumeInterruptedTurns,
+  reviveColdTurns,
+  writeResumeNotices,
+} from "./turn-service";
 import {
   closeRuntimeInterval,
   openRuntimeInterval,
@@ -17,6 +23,7 @@ import {
   AGENT_RESTARTED_MESSAGE,
   AGENT_START_FAILED_MESSAGE,
   AT_CAPACITY_MESSAGE,
+  HOME_READ_ONLY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
@@ -40,8 +47,39 @@ export const SANDBOX_STATUSES = [
   "stopping",
   "stopped",
   "failed",
+  // Held exclusively by a hosted extension's maintenance operation (see
+  // `SandboxLifecycleHooks`): no start, stop or eviction arm claims it.
+  "maintenance",
 ] as const;
 export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
+
+const isSandboxStatus = (value: string): value is SandboxStatus =>
+  SANDBOX_STATUSES.some((status) => status === value);
+
+/**
+ * The one lifecycle fact the dashboard may read about an agent's machine:
+ * its status. `null` for an agent with no sandbox (a BYO agent) and for an
+ * agent this workspace does not hold (not-found-shaped: the read must not
+ * confirm a foreign agent's existence). The column is a free string on the
+ * schema, so an unknown word (a hosted extension's future state) reads as
+ * `null` too rather than leaking a value no caller can act on.
+ *
+ * What reads it: the onboarding boot screen, which opens its door once the
+ * box is `running`. Deliberately no container ref, no home ref, no runner:
+ * those are the runner's and the operator's.
+ */
+export const getAgentSandboxStatus = async (
+  workspaceId: string,
+  agentId: string,
+): Promise<{ status: SandboxStatus | null }> => {
+  const sandbox = await db.sandbox.findFirst({
+    where: { agentId, agent: { workspaceId } },
+    select: { status: true },
+  });
+  return {
+    status: sandbox && isSandboxStatus(sandbox.status) ? sandbox.status : null,
+  };
+};
 
 /**
  * Compose the spawn payload for a sandbox at DISPATCH time, from current
@@ -60,7 +98,9 @@ export type SandboxStatus = (typeof SANDBOX_STATUSES)[number];
  */
 export type SandboxStartDecision =
   | { ok: true; agentId: string; payload: SandboxStartPayload }
-  | { ok: false; reason: "unavailable" | "no_llm_credential" };
+  | { ok: false; reason: "unavailable" | "no_llm_credential" }
+  /** A hosted extension's refusal: lasting, so the claim is parked. */
+  | { ok: false; reason: "unstartable"; code: string; message: string };
 
 export const buildSandboxStartPayload = async (
   sandboxId: string,
@@ -89,6 +129,21 @@ export const buildSandboxStartPayload = async (
 
   const agent = sandbox?.agent;
   if (!agent) return { ok: false, reason: "unavailable" };
+
+  // A hosted extension resolves what the start carries as `resources`;
+  // without one the payload has no such field, as before the seam.
+  const resolveResources = getSandboxLifecycleHooks().resolveStartResources;
+  const resources = resolveResources
+    ? await resolveResources(sandboxId, runnerId)
+    : { ok: true as const };
+  if (!resources.ok) {
+    return {
+      ok: false,
+      reason: "unstartable",
+      code: resources.code,
+      message: resources.message,
+    };
+  }
 
   const result = await buildContainerConfig({
     agent: { id: agent.id, accessToken: agent.accessToken },
@@ -125,7 +180,11 @@ export const buildSandboxStartPayload = async (
   }
 
   const { config } = result;
-  const resolved = resolveAgentModel(agent, result.llmCredential.provider);
+  const resolved = resolveAgentModel(
+    agent,
+    result.llmCredential.provider,
+    result.llmCredential.authMode,
+  );
   // The agent's channel presences, for the supervisor's `channels` section
   // (where it can be reached, which messaging tools exist) — current truth
   // at dispatch, like everything else in this payload.
@@ -150,6 +209,7 @@ export const buildSandboxStartPayload = async (
     ok: true,
     agentId: agent.id,
     payload: {
+      ...(resources.resources && { resources: resources.resources }),
       // The workspace fence for namespaced backends: a namespaced backend
       // creates every sandbox inside its workspace. Composed at dispatch
       // from the same row as everything else.
@@ -275,11 +335,18 @@ export const applyRunnerEvent = async (
     return;
   }
 
+  // A hosted extension may hold a row exclusively (its `maintenance`
+  // operation); every ordinary lifecycle write below spreads its fence in,
+  // so a late report matches nothing there. Empty without a hook.
+  const hooks = getSandboxLifecycleHooks();
+  const heldFence = hooks.lifecycleWriteFence?.() ?? {};
+
   if (event.kind === "supervisor.ready") {
     const { count } = await db.sandbox.updateMany({
       where: {
         id: event.sandboxId,
         runnerId,
+        ...heldFence,
         ...(replicaId !== undefined && { channelReplicaId: replicaId }),
       },
       data: {
@@ -294,6 +361,21 @@ export const applyRunnerEvent = async (
     // now — wake the held poll rather than making it wait out a re-check.
     if (count > 0) signalWork();
     return;
+  }
+
+  // A resource observation is a fact about one CURRENT container, never a
+  // late status or a bare home ref; the extension that asked for it records it.
+  if (event.resourceObservation && hooks.recordResourceObservation) {
+    const observedRef = event.observedContainerRef ?? event.containerRef;
+    if (observedRef) {
+      await hooks.recordResourceObservation({
+        runnerId,
+        sandboxId: event.sandboxId,
+        containerRef: observedRef,
+        observation: event.resourceObservation,
+        replicaId,
+      });
+    }
   }
 
   // Which copy's report this is (see the function doc). Container-observed
@@ -315,7 +397,12 @@ export const applyRunnerEvent = async (
   if (event.containerRef !== undefined || event.homeRef !== undefined) {
     await db.$transaction(async (tx) => {
       const { count } = await tx.sandbox.updateMany({
-        where: { id: event.sandboxId, runnerId, ...reporterFence },
+        where: {
+          id: event.sandboxId,
+          runnerId,
+          ...heldFence,
+          ...reporterFence,
+        },
         data: {
           ...(event.containerRef !== undefined && {
             containerRef: event.containerRef,
@@ -335,11 +422,30 @@ export const applyRunnerEvent = async (
     });
   }
 
+  /** The supervisor saw its home go read-only (forwarded by the runner as a
+   * `stopped` report's reasonCode). Untrusted like any supervisor word, so
+   * it only ever changes THIS sandbox's copy and restart budget. */
+  const homeReadOnly =
+    event.status === "stopped" && event.reasonCode === "home_read_only";
+  if (homeReadOnly) {
+    // The alarm and the operator's first read (stable message, no tenant
+    // data beyond ids): every read-only stop, budgeted or not.
+    log.warn(
+      {
+        runnerId,
+        sandboxId: event.sandboxId,
+        ...(event.node && { node: event.node }),
+      },
+      "sandbox home went read-only",
+    );
+  }
+
   const { count } = await db.$transaction(async (tx) => {
     const updated = await tx.sandbox.updateMany({
       where: {
         id: event.sandboxId,
         runnerId,
+        ...heldFence,
         ...reporterFence,
         // A report about ONE container (reconcile saw it dead, vanished or
         // channelless) applies only while it is still the sandbox's container.
@@ -415,6 +521,32 @@ export const applyRunnerEvent = async (
         await intervalEndReasonFor(tx, event.sandboxId, event.status),
       );
     }
+    // A `starting` progress report that names why (a held wake) is a fact a
+    // hosted extension may want to record beside the row; the status itself
+    // stays `starting` and nothing here parks or fails anything.
+    if (
+      updated.count > 0 &&
+      event.status === "starting" &&
+      event.reasonCode !== undefined &&
+      hooks.onStartProgress
+    ) {
+      await hooks.onStartProgress(tx, {
+        sandboxId: event.sandboxId,
+        runnerId,
+        reasonCode: event.reasonCode,
+      });
+    }
+    // A home that went read-only: the one stop whose automatic restart a
+    // hosted extension budgets (records the event, holds or refuses the
+    // next start). Same transaction as the status, so the budget can never
+    // miss a stop it then lets through. Without a hook: today's restart.
+    if (updated.count > 0 && homeReadOnly && hooks.onHomeReadOnly) {
+      await hooks.onHomeReadOnly(tx, {
+        sandboxId: event.sandboxId,
+        runnerId,
+        ...(event.node && { node: event.node }),
+      });
+    }
     return updated;
   });
 
@@ -422,16 +554,17 @@ export const applyRunnerEvent = async (
    * A sandbox that went down takes its in-flight turns with it.
    *
    * Every start RECREATES the container (the bootstrap token is single-use),
-   * so the harness session behind a `dispatched` or `running` turn is gone
-   * the moment the sandbox stops — the turn can never be resumed, only
-   * re-sent. Left alone it stays non-terminal, and the active-turn index then
-   * blocks its conversation until the turn ceiling an hour later.
+   * so whatever the harness was doing behind a `dispatched` or `running` turn
+   * stopped with it. Left alone the turn stays non-terminal, and the
+   * active-turn index then blocks its conversation until the turn ceiling.
    *
-   * Two arms, one transaction. A dispatched turn the harness never STARTED
-   * (zero observable work) is revived in place and re-sent by the platform
-   * itself — see `reviveColdTurns` for the safety argument — so the terminal
-   * arm only sees turns that must genuinely die: running ones, and ones
-   * whose one revival was already spent.
+   * Three arms, one transaction, each turn recovered at most once. A
+   * dispatched turn the harness never STARTED (zero observable work) is
+   * revived in place and re-sent invisibly (`reviveColdTurns`). A turn that
+   * did start is resumed in place in its own harness session, visibly
+   * (`resumeInterruptedTurns`). The terminal arm then only sees turns that
+   * must genuinely die: ones whose one recovery was already spent, a stop
+   * someone asked for, a platform job's run.
    *
    * `queued` is deliberately excluded from the terminal arm: those were
    * never handed to anything, so they are still perfectly deliverable once
@@ -442,17 +575,36 @@ export const applyRunnerEvent = async (
     const strandFence = {
       conversation: { agent: { sandbox: { id: event.sandboxId, runnerId } } },
     } as const;
-    const { revived, stranded } = await db.$transaction(async (tx) => {
+    const { revived, resumed, stranded } = await db.$transaction(async (tx) => {
+      // A read-only home revives and resumes nothing: a turn re-sent or
+      // resumed into the next boot would land on the home the platform is
+      // about to restart (and hold), and this stop's own words are the
+      // storage sentence, so every in-flight turn closes with it.
+      if (homeReadOnly) {
+        return {
+          revived: 0,
+          resumed: [],
+          stranded: await failStrandedTurns(tx, strandFence, {
+            message: HOME_READ_ONLY_MESSAGE,
+            code: "home_read_only",
+          }),
+        };
+      }
       const revivedCount = await reviveColdTurns(tx, strandFence);
+      const resumedTurns = await resumeInterruptedTurns(tx, strandFence);
       const strandedCount = await failStrandedTurns(tx, strandFence);
-      return { revived: revivedCount, stranded: strandedCount };
+      return {
+        revived: revivedCount,
+        resumed: resumedTurns,
+        stranded: strandedCount,
+      };
     });
 
-    if (revived > 0) {
-      // The revived turn needs a fresh boot NOW, not after the failed-start
+    if (revived > 0 || resumed.length > 0) {
+      // The re-queued turns need a fresh boot NOW, not after the failed-start
       // pacing: flip the dead sandbox straight to `unprovisioned` (claimed
       // unconditionally by the start arm) and wake the held poll. Bounded —
-      // a second death finds `retriedAt` set, revives nothing, and never
+      // a second death finds `retriedAt` set, recovers nothing, and never
       // reaches this wake again.
       await db.sandbox.updateMany({
         where: {
@@ -464,10 +616,16 @@ export const applyRunnerEvent = async (
       });
       signalWork();
       log.info(
-        { runnerId, sandboxId: event.sandboxId, count: revived },
-        "revived cold-dead turns in place; waking a fresh boot",
+        {
+          runnerId,
+          sandboxId: event.sandboxId,
+          revived,
+          resumed: resumed.length,
+        },
+        "re-queued interrupted turns in place; waking a fresh boot",
       );
     }
+    await writeResumeNotices(resumed);
     if (stranded > 0) {
       log.warn(
         { runnerId, sandboxId: event.sandboxId, count: stranded },
@@ -492,7 +650,7 @@ export const applyRunnerEvent = async (
  * How long waiting turns ride out TRANSIENT start failures before the
  * platform stops pretending. ~5 paced attempts (`START_RETRY_SECONDS` = 30):
  * long enough that a capacity blip or a daemon restart heals invisibly,
- * short enough that nobody watches "Waking the agent…" for the whole
+ * short enough that nobody watches a "Thinking…" caption for the whole
  * turn ceiling. Measured on the same clock family as the ceiling
  * (retried → promoted → created), so a just-revived turn's patience restarts
  * with it.
@@ -646,7 +804,7 @@ export const requestSandboxRespawn = async (
   // unfenced would reach across tenants, and "the callers all resolve the
   // agent first" is a property that only holds until the next caller. Both
   // existing ones already have the workspace in hand.
-  const { revived, stranded } = await db.$transaction(async (tx) => {
+  const { revived, resumed, stranded } = await db.$transaction(async (tx) => {
     const { count } = await tx.sandbox.updateMany({
       where: {
         agentId,
@@ -655,7 +813,7 @@ export const requestSandboxRespawn = async (
       },
       data: { status: "unprovisioned" },
     });
-    if (count === 0) return { revived: 0, stranded: 0 };
+    if (count === 0) return { revived: 0, resumed: [], stranded: 0 };
     // The flip IS the end of this run (the runner recreates the container
     // from scratch); close its ledger row here, not on the stop report the
     // old container may or may not manage to send.
@@ -666,12 +824,12 @@ export const requestSandboxRespawn = async (
     if (sandbox) await closeRuntimeInterval(tx, sandbox.id, "respawn");
 
     /**
-     * The respawn destroys the container, and with it every harness session
-     * behind an in-flight turn — the same fact `applyRunnerEvent` handles when
-     * a sandbox goes down, reached by a different door. Same two arms as
-     * there: a dispatched turn that never STARTED is revived in place (the
-     * new container simply runs it — the respawn stays invisible to its
-     * sender), the rest reach a terminal state so the active-turn index
+     * The respawn destroys the container, and with it whatever the harness
+     * was doing behind an in-flight turn: the same fact `applyRunnerEvent`
+     * handles when a sandbox goes down, reached by a different door. Same
+     * three arms as there: a dispatched turn that never STARTED is revived in
+     * place, a started one is resumed in its own session on the new
+     * container, and the rest reach a terminal state so the active-turn index
      * frees their conversations.
      *
      * `queued` is excluded for the same reason as there: it was never handed
@@ -681,19 +839,21 @@ export const requestSandboxRespawn = async (
       conversation: { agent: { id: agentId, workspaceId } },
     } as const;
     const revivedCount = await reviveColdTurns(tx, respawnFence);
+    const resumedTurns = await resumeInterruptedTurns(tx, respawnFence);
     const failed = await failStrandedTurns(tx, respawnFence);
-    return { revived: revivedCount, stranded: failed };
+    return { revived: revivedCount, resumed: resumedTurns, stranded: failed };
   });
 
-  if (revived > 0) {
+  if (revived > 0 || resumed.length > 0) {
     // The sandbox row already reads `unprovisioned` (the flip above), so the
-    // revived turn only needs the held poll woken to start its fresh boot.
+    // re-queued turns only need the held poll woken to start their fresh boot.
     signalWork();
     log.info(
-      { agentId, count: revived },
-      "revived cold-dead turns across a respawn",
+      { agentId, revived, resumed: resumed.length },
+      "re-queued interrupted turns across a respawn",
     );
   }
+  await writeResumeNotices(resumed);
   if (stranded > 0) {
     log.warn(
       { agentId, count: stranded },
@@ -791,6 +951,12 @@ export const requestAgentRestart = async (
         status: { in: ["starting", "running", "stopping"] },
       },
       data: { stopRequestedAt: new Date() },
+    });
+    // A person's restart is the way out of a held self-heal: an extension
+    // that budgets automatic restarts clears this agent's budget with it.
+    await getSandboxLifecycleHooks().onAgentRestart?.(tx, {
+      agentId,
+      workspaceId,
     });
     return failed;
   });

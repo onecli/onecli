@@ -1,5 +1,9 @@
-import { escapeSlackText } from "@onecli/channels/slack";
-import type { AdapterPresence } from "@onecli/agent-protocol";
+import { actionChoiceOf, type AdapterPresence } from "@onecli/agent-protocol";
+import {
+  approvalClickOf,
+  decidedText,
+  escapeSlackText,
+} from "@onecli/channels/slack";
 import type {
   ChannelAdapterProvider,
   GroupApprovalDecision,
@@ -45,41 +49,6 @@ const appTokenOf = (presence: AdapterPresence): string | null => {
   }
 };
 
-/** The approval-card click, parsed out of a raw interactivity payload. Only
- * our two buttons translate — every other block_actions surface is not ours
- * and returns null. The click carries ONLY the opaque approval id in its
- * value (the injection rule); the clicker's id rides along for the control
- * plane's authorization check. */
-const approvalDecisionOf = (
-  payload: Record<string, unknown>,
-): {
-  approvalId: string;
-  decision: "approve" | "deny";
-  clickerExternalUserId: string;
-} | null => {
-  const typed = payload as {
-    type?: string;
-    user?: { id?: string };
-    actions?: { action_id?: string; value?: string }[];
-  };
-  const action = typed.actions?.[0];
-  const clicker = typed.user?.id;
-  if (
-    typed.type !== "block_actions" ||
-    !action?.value ||
-    !clicker ||
-    (action.action_id !== "channel_approve" &&
-      action.action_id !== "channel_deny")
-  ) {
-    return null;
-  }
-  return {
-    approvalId: action.value,
-    decision: action.action_id === "channel_approve" ? "approve" : "deny",
-    clickerExternalUserId: clicker,
-  };
-};
-
 /** A GROUPED approval card's click (shared vocabulary: group-card.ts in
  * @onecli/channels/slack, which the control plane's HTTP arm also reads). */
 const groupApprovalDecisionOf = (
@@ -109,23 +78,24 @@ const groupApprovalDecisionOf = (
 };
 
 /** The reach card's click, same trust shape (see the api-side renderer,
- * reach-card.ts: action ids `reach_approve` / `reach_members` / `reach_block`,
- * value = the opaque grant id). Kept as literals here - the adapter is a
- * separate deployable and the wire vocabulary is pinned by the control
- * plane's route tests. `reach_deny` is the pre-rename id for members_only,
- * still honored so cards posted before the third button settle. */
-const DECISIONS: Record<string, "approved" | "members_only" | "blocked"> = {
+ * reach-card.ts: action ids `reach_approve` / `reach_block`, value = the
+ * opaque grant id). Kept as literals here - the adapter is a separate
+ * deployable and the wire vocabulary is pinned by the control plane's route
+ * tests. `reach_members` / `reach_deny` are retired "OneCLI users only" ids
+ * still on older cards; they settle as `approved`, the same mapping the
+ * data migration applied to stored rows. */
+const DECISIONS: Record<string, "approved" | "blocked"> = {
   reach_approve: "approved",
-  reach_members: "members_only",
   reach_block: "blocked",
-  reach_deny: "members_only",
+  reach_members: "approved",
+  reach_deny: "approved",
 };
 
 const reachDecisionOf = (
   payload: Record<string, unknown>,
 ): {
   grantId: string;
-  decision: "approved" | "members_only" | "blocked";
+  decision: "approved" | "blocked";
   clickerExternalUserId: string;
 } | null => {
   const typed = payload as {
@@ -154,13 +124,12 @@ const reachDecisionOf = (
 /** The ACTION-approval card's click (api-side renderer:
  * action-approval-card.ts — ids `action_approve` / `action_reject`, value =
  * the opaque approval id). Same wire vocabulary rule as the reach pair:
- * literals here because the adapter is a separate deployable. */
-const ACTION_DECISIONS: Record<
-  string,
-  "approve" | "approve_always" | "reject"
-> = {
+ * literals here because the adapter is a separate deployable.
+ * `action_approve_always` is the retired "Approve + always allow" button
+ * still on older cards: it settles as an approve. */
+const ACTION_DECISIONS: Record<string, "approve" | "reject"> = {
   action_approve: "approve",
-  action_approve_always: "approve_always",
+  action_approve_always: "approve",
   action_reject: "reject",
 };
 
@@ -168,8 +137,9 @@ const actionDecisionOf = (
   payload: Record<string, unknown>,
 ): {
   approvalId: string;
-  decision: "approve" | "approve_always" | "reject";
+  decision: "approve" | "reject";
   clickerExternalUserId: string;
+  choice?: string;
 } | null => {
   const typed = payload as {
     type?: string;
@@ -178,7 +148,11 @@ const actionDecisionOf = (
   };
   const action = typed.actions?.[0];
   const clicker = typed.user?.id;
-  const decision = ACTION_DECISIONS[action?.action_id ?? ""];
+  // A choice card's option button is an approve carrying the option.
+  const choice = actionChoiceOf(action?.action_id ?? "");
+  const decision = choice
+    ? "approve"
+    : ACTION_DECISIONS[action?.action_id ?? ""];
   if (
     typed.type !== "block_actions" ||
     !action?.value ||
@@ -191,6 +165,7 @@ const actionDecisionOf = (
     approvalId: action.value,
     decision,
     clickerExternalUserId: clicker,
+    ...(choice && { choice }),
   };
 };
 
@@ -215,7 +190,10 @@ const openTransport = (
           handlers.onGroupApprovalDecision(group);
           return;
         }
-        const decision = approvalDecisionOf(payload);
+        // The single-request card (shared vocabulary: approve-similar.ts in
+        // @onecli/channels/slack, which the control plane's HTTP arm also
+        // reads). Its value is ONLY the opaque approval id.
+        const decision = approvalClickOf(payload);
         if (decision) {
           handlers.onApprovalDecision(decision);
           return;
@@ -339,7 +317,7 @@ const decisionSettledText: ChannelAdapterProvider["decisionSettledText"] = ({
   result,
 }) =>
   result.kind === "decided"
-    ? `${decision === "approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(result.decidedByName)}`
+    ? decidedText(decision, result.decidedByName, result.similar)
     : result.kind === "already_settled"
       ? "This request was already decided."
       : escapeSlackText(result.message);

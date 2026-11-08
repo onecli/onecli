@@ -6,10 +6,11 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import { toast } from "sonner";
-import { grants } from "@/lib/api";
-import type { Connection } from "@/lib/api";
+import { grants, instance } from "@/lib/api";
+import type { Connection, InstanceInfo } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
+import { ChatSendContext } from "@/lib/chat/chat-send";
 
 const pushMock = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -25,6 +26,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
+    instance: {
+      ...actual.instance,
+      get: vi.fn().mockResolvedValue({
+        edition: "onprem",
+        entitled: false,
+        version: "test",
+      } satisfies InstanceInfo),
+    },
     grants: {
       ...actual.grants,
       setConnectionGrant: vi.fn().mockResolvedValue({}),
@@ -43,18 +52,25 @@ const connectedGmail: Connection = {
   connectedAt: "2026-08-01T00:00:00Z",
 };
 
-/** Seeded client so the dialog's data graph never hits the network:
- * connections pool, org app availability, and the agent's detail (the
- * popup's `agent_name`). */
+/** Seed the picker inputs before mount: connections, org app availability,
+ * runtime entitlement and the agent detail (the popup's `agent_name`). */
 const renderPicker = ({
   connections = [] as Connection[],
   availability = { restricted: false, providers: [] as string[] },
   onOpenChange = vi.fn(),
   onConnected = undefined as ((connectionId: string) => void) | undefined,
   open = true,
+  // Present = rendered inside an agent chat (the empty search can hand the
+  // app to the agent); absent = the Connections page.
+  chatSend = undefined as ((message: string) => void) | undefined,
 } = {}) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  queryClient.setQueryData<InstanceInfo>(queryKeys.instance.all(), {
+    edition: "onprem",
+    entitled: false,
+    version: "test",
   });
   queryClient.setQueryData(
     queryKeys.connections.list("workspace"),
@@ -66,7 +82,13 @@ const renderPicker = ({
     name: "Arik",
   });
   const wrapper = ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      {chatSend ? (
+        <ChatSendContext value={chatSend}>{children}</ChatSendContext>
+      ) : (
+        children
+      )}
+    </QueryClientProvider>
   );
   const view = render(
     <ConnectAppPickerDialog
@@ -98,16 +120,20 @@ describe("ConnectAppPickerDialog", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(instance.get).mockClear();
     vi.mocked(grants.setConnectionGrant).mockClear();
     vi.mocked(toast.error).mockClear();
     pushMock.mockClear();
   });
 
-  it("states what a new account gets: the default attach, never full access for a catalogued app", () => {
+  it("shows only the headline and search: no consent paragraph", () => {
     renderPicker();
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent(
-      "Connecting turns the account on for this agent, not for your other agents. Reads are allowed. Writes and anything else need your approval (an app with no tool list gets full access).",
+    expect(dialog).toHaveTextContent("Connect an app");
+    expect(dialog).not.toHaveTextContent(/Only this agent gets access/);
+    expect(dialog).not.toHaveTextContent(/Connecting turns the account on/);
+    expect(screen.getByText("Search for an app to connect.")).toHaveClass(
+      "sr-only",
     );
   });
 
@@ -144,10 +170,13 @@ describe("ConnectAppPickerDialog", () => {
     });
     await userEvent.type(screen.getByLabelText("Search apps"), "sla");
     const row = await screen.findByRole("button", { name: /^Slack/ });
+    // Seed before mount so no in-flight instance read can overwrite this
+    // test's entitlement when it resolves. Keep the API mock as a tripwire.
+    expect(instance.get).not.toHaveBeenCalled();
     expect(row).toHaveTextContent(/Connect your Slack/);
     await userEvent.click(row);
     expect(openSpy).not.toHaveBeenCalled();
-    expect(pushMock).toHaveBeenCalledWith("/w/ws-1/agents/agent-1/channels");
+    expect(pushMock).toHaveBeenCalledWith("/w/ws-1/agents/agent-1/contacts");
   });
 
   it("opens the shared popup with agent name, workspace, and dedupe window name", async () => {
@@ -304,5 +333,69 @@ describe("ConnectAppPickerDialog", () => {
     expect(
       screen.getByTitle("Connect another Gmail account"),
     ).toBeInTheDocument();
+  });
+
+  describe("a search with no match, in a chat, hands the app to the agent", () => {
+    const search = async (text: string) =>
+      userEvent.type(screen.getByRole("textbox"), text);
+
+    it("offers 'Connect X as a custom connection' and sends the agent the request", async () => {
+      const chatSend = vi.fn();
+      const { onOpenChange } = renderPicker({ chatSend });
+      await search("AcmeCRM");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: /Connect “AcmeCRM” as a custom connection/,
+        }),
+      );
+      expect(chatSend).toHaveBeenCalledWith(
+        "I want to connect AcmeCRM as a custom connection with an API key.",
+      );
+      // The dialog closes so the person sees the agent pick it up.
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("sends a clean, clipped name: invisible characters dropped, capped at a connection name's length", async () => {
+      const chatSend = vi.fn();
+      renderPicker({ chatSend });
+      await userEvent.click(screen.getByRole("textbox"));
+      // A zero-width space hidden in the name, and a pasted paragraph.
+      await userEvent.paste(`  Acme\u200bCRM   ${"x".repeat(200)}`);
+      const name = `AcmeCRM ${"x".repeat(72)}`;
+      expect(name).toHaveLength(80);
+      // What the button shows is exactly what is sent.
+      await userEvent.click(
+        screen.getByRole("button", { name: new RegExp(`“${name}”`) }),
+      );
+      expect(chatSend).toHaveBeenCalledWith(
+        `I want to connect ${name} as a custom connection with an API key.`,
+      );
+    });
+
+    it("is not offered when the search finds an app", async () => {
+      renderPicker({ chatSend: vi.fn() });
+      await search("Gmail");
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
+
+    it("is not offered for a built-in app the org hides here: the platform refuses a custom one", async () => {
+      // MUTATION-PROOF: decide on the visible (org-filtered) list and this
+      // offers a custom GitHub the propose step then refuses.
+      renderPicker({
+        chatSend: vi.fn(),
+        availability: { restricted: true, providers: ["gmail"] },
+      });
+      await search("GitHub");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
+
+    it("is not offered outside a chat (the Connections page)", async () => {
+      renderPicker();
+      await search("AcmeCRM");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
   });
 });

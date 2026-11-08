@@ -81,8 +81,9 @@ describe("checkProposalHost", () => {
   it("refuses a host owned by a catalog app and points at the real app", () => {
     const refusal = checkProposalHost({ hostPattern: "api.github.com" });
     expect(refusal).toMatchObject({ kind: "catalog_app", appId: "github" });
+    // The built-in app's own connect door, by id: never a token for it.
     expect(refusal && proposalRefusalMessage(refusal)).toMatch(
-      /built-in OneCLI app/,
+      /built-in OneCLI app.*call request_app_connection with "github"/,
     );
     // Same registrable domain, unlisted host: still GitHub's.
     expect(

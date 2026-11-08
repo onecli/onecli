@@ -9,16 +9,13 @@ import type { ChannelPostTarget } from "../targets";
 // async, so a retried post can never sit inside Slack's 3s ack window; and
 // a 429 is pre-execution, so no double-post is possible.
 import {
+  isSlackUploadDegrade,
   postBlocksMessage,
   postMessage,
   SlackApiError,
   uploadFiles,
 } from "@onecli/channels/slack";
-import { markdownToMrkdwn } from "@onecli/channels/slack";
-
-/** Slack's per-section text cap is 3,000 — cut with headroom, at a newline
- * where one exists in the back half of the window. */
-const SECTION_TEXT_LIMIT = 2900;
+import { markdownToMrkdwn, sectionChunks } from "@onecli/channels/slack";
 
 /** Slack's per-message block ceiling, with headroom — a post past 50 blocks
  * is rejected whole (`invalid_blocks`). */
@@ -71,6 +68,8 @@ const AUTOMATION_ICONS: Record<AutomationSource, string> = {
   watch: ":stopwatch:",
   webhook: ":link:",
   peer_task: ":speech_balloon:",
+  // Never posted (a review delivers nothing); present for exhaustiveness.
+  memory_review: ":brain:",
 };
 
 export const automationCaption = (title: string): string => {
@@ -103,31 +102,6 @@ export const automationCaption = (title: string): string => {
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd();
   return `${clipped}…`;
-};
-
-const sectionChunks = (text: string): string[] => {
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > SECTION_TEXT_LIMIT) {
-    const window = rest.slice(0, SECTION_TEXT_LIMIT);
-    const newline = window.lastIndexOf("\n");
-    let cut = newline > SECTION_TEXT_LIMIT / 2 ? newline : SECTION_TEXT_LIMIT;
-    // Never cut inside a `<url|label>` token — the tail half would render as
-    // literal angle-bracket soup. A still-open `<` before the cut moves the
-    // cut to just before it; a degenerate token longer than half the window
-    // keeps the hard cut. (Newline cuts are safe by construction — the
-    // converter's URLs never contain whitespace — but the check is cheap and
-    // uniform.)
-    const open = rest.lastIndexOf("<", cut - 1);
-    if (open > SECTION_TEXT_LIMIT / 2) {
-      const close = rest.indexOf(">", open);
-      if (close === -1 || close >= cut) cut = open;
-    }
-    chunks.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, "");
-  }
-  if (rest) chunks.push(rest);
-  return chunks;
 };
 
 /**
@@ -221,27 +195,6 @@ const modelKeyCard = async (
     ...targetForm(input),
   });
 };
-
-/**
- * Slack refusals that mean "this workspace/install cannot take the file",
- * today and on retry — the mirror's degrade set. Slack's own codes, verbatim
- * (files.getUploadURLExternal / files.completeUploadExternal docs).
- * `invalid_arguments` is here because the client maps an empty file to it
- * (a zero-byte file cannot be shared; the web still shows the row).
- */
-const UPLOAD_DEGRADE_CODES: ReadonlySet<string> = new Set([
-  "missing_scope",
-  "file_uploads_disabled",
-  "file_uploads_except_images_disabled",
-  "file_type_not_allowed",
-  "file_upload_size_restricted",
-  "storage_limit_reached",
-  "user_is_external_guest",
-  "not_allowed_token_type",
-  "invalid_arguments",
-]);
-const isUploadDegrade = (code: string): boolean =>
-  UPLOAD_DEGRADE_CODES.has(code);
 
 /** The degrade line's tail when the files are LINKED: what the link does. */
 export const FILES_LINKED_LINE = "Click a file to download it from OneCLI.";
@@ -451,6 +404,26 @@ export const slackMirrorPosts: MirrorPosts = {
       button: "Add a model key",
     });
   },
+  async modelKeyNotAttached(input) {
+    // Same card shape; the key already exists in the workspace, so the fix
+    // is attaching it to this agent, not adding a new one.
+    await modelKeyCard(input, {
+      headline: "*This agent doesn't have access to your model key*",
+      context:
+        "A model key is connected in OneCLI but not attached to this agent. Attach it, then send your message again.",
+      button: "Attach the key",
+    });
+  },
+  async modelKeyUnreadable(input) {
+    // Same card shape; the agent already has the key, but its saved value
+    // could not be read, so the fix is re-entering it.
+    await modelKeyCard(input, {
+      headline: "*OneCLI couldn't read this agent's model key*",
+      context:
+        "The key is attached, but its saved value could not be read. Re-enter it, then send your message again.",
+      button: "Re-enter the key",
+    });
+  },
   async files(input) {
     // One share for the turn's files. The FIRST caption is the share text
     // (a share message carries one text); the rest ride as file titles so
@@ -477,7 +450,10 @@ export const slackMirrorPosts: MirrorPosts = {
         // a line per file that names it and points at the web thread, where
         // the file already is. Anything else (transport, 5xx after the
         // cursor advanced) rethrows into the mirror's loud log.
-        if (!(err instanceof SlackApiError) || !isUploadDegrade(err.code)) {
+        if (
+          !(err instanceof SlackApiError) ||
+          !isSlackUploadDegrade(err.code)
+        ) {
           throw err;
         }
         unavailable.unshift(

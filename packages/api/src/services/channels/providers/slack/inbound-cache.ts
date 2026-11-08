@@ -1,7 +1,7 @@
 /**
  * The per-app verification cache behind the Slack inbound routes (events +
- * interactivity): signing secret, bot token, and the presence facts a
- * request needs, keyed by Slack app id. The DB read is cheap; the KMS decrypt
+ * interactivity): the signing secret and the presence it belongs to, keyed
+ * by Slack app id. The DB read is cheap; the KMS decrypt
  * behind `getCrypto()` is not, and an unauthenticated webhook must not turn
  * one request into one KMS call.
  *
@@ -14,10 +14,7 @@
 
 export interface InboundPresenceEntry {
   signingSecret: string;
-  botToken: string | null;
   presenceId: string;
-  identityRef: string | null;
-  iconUrl: string | null;
 }
 
 /** The secret only changes on re-attach, so a short TTL is safe; a wrong or

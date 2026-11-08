@@ -1,0 +1,19 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- HeyReach: a waving hand trailing four speed lines. Redrawn from the
+       brand icon (HeyReach_Icon-Primary-Dark.png) at icon scale.
+
+       The brand draws a WHITE palm inside a heavy dark outline, which is what
+       keeps it legible on its own dark site. At 26px that outline is most of
+       the mark, so the palm is filled white and the stroke carries the shape:
+       the fill is what stops the hand vanishing into a dark tile, and the
+       trail keeps the brand's red/amber/green/blue order. -->
+  <g stroke-linecap="round">
+    <path d="M9 25.5h13" stroke="#F43F5E" stroke-width="4.4"/>
+    <path d="M5 33.5h18" stroke="#FBBF24" stroke-width="4.4"/>
+    <path d="M8 41.5h15" stroke="#6CAF44" stroke-width="4.4"/>
+    <path d="M4 49.5h20" stroke="#3B82F6" stroke-width="4.4"/>
+  </g>
+  <path
+    d="M26.5 40.5V23a3.7 3.7 0 0 1 7.4 0v11.5M33.9 34V18.5a3.7 3.7 0 0 1 7.4 0V34m0-1.5v-11a3.7 3.7 0 0 1 7.4 0v13.8c1.7-3.3 4.1-6.2 6.5-6.8 2.1-.5 3.6 1.1 2.9 3.3-.7 2.7-2.4 6.4-3.7 9.6-1.1 2.7-1.8 4.5-2.3 6.6-1.3 5.4-5.8 9.3-11.6 9.3-7.2 0-13-5-14-11.8"
+    fill="#FFFFFF" stroke="#111827" stroke-width="3.6" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

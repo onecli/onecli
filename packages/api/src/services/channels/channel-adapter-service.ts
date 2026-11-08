@@ -12,6 +12,8 @@ import { publicApiUrl } from "./posture";
 import { sweepStaleSessionReceipts } from "./turn-receipt-service";
 import { agentImageUrlOrNull } from "../agent-image-service";
 import { bumpHomeForAgent } from "../home-sync-service";
+import { listApprovalOutcomes } from "../approval-outcome-service";
+import type { ApprovalOutcome } from "../../validations/approval-outcomes";
 import { logger } from "../../lib/logger";
 
 const log = logger.child({ component: "channel-adapter-service" });
@@ -1180,3 +1182,66 @@ export const listUnsettledToolApprovalCards = async (adapterId: string) =>
       createdAt: true,
     },
   });
+
+/**
+ * How the gateway approvals behind the CALLER'S cards ended, for the
+ * channel-neutral absence arm: a card that merely left the pending set is
+ * labelled from the record ("Cancelled · the agent stopped waiting",
+ * "Approved from the dashboard"), never guessed as "decided".
+ *
+ * Fenced twice: only cards on presences this adapter owns are looked up (an
+ * id of another adapter's card, or no card at all, answers nothing), and
+ * each card's agent is read through `listApprovalOutcomes`, which fences to
+ * that agent's workspace and organization. Ids in; the same record the web
+ * card reads out (outcome, place, time), never the request's content.
+ */
+export const listToolApprovalCardOutcomes = async (
+  adapterId: string,
+  approvalIds: string[],
+): Promise<ApprovalOutcome[]> => {
+  const cards = await db.toolApprovalCard.findMany({
+    where: {
+      approvalId: { in: approvalIds },
+      agentChannel: { ownerAdapterId: adapterId },
+    },
+    select: {
+      approvalId: true,
+      agentChannel: {
+        select: {
+          agent: {
+            select: {
+              id: true,
+              workspaceId: true,
+              workspace: { select: { organizationId: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+  const byAgent = new Map<
+    string,
+    { workspaceId: string; organizationId: string; ids: string[] }
+  >();
+  for (const card of cards) {
+    const { agent } = card.agentChannel;
+    const entry = byAgent.get(agent.id) ?? {
+      workspaceId: agent.workspaceId,
+      organizationId: agent.workspace.organizationId,
+      ids: [],
+    };
+    entry.ids.push(card.approvalId);
+    byAgent.set(agent.id, entry);
+  }
+  const answers = await Promise.all(
+    [...byAgent].map(([agentId, { workspaceId, organizationId, ids }]) =>
+      listApprovalOutcomes({
+        workspaceId,
+        organizationId,
+        agentId,
+        approvalIds: ids,
+      }),
+    ),
+  );
+  return answers.flat();
+};

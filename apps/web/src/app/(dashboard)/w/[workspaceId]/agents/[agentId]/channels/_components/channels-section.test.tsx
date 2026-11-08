@@ -71,6 +71,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/w/p1/agents/ag-1/channels",
 }));
 
+vi.mock("@/hooks/use-instance", () => ({
+  useInstance: () => ({ entitled: true }),
+}));
+
 const { ChannelsSection } = await import("./channels-section");
 
 // The section reads `useQueryClient` for the install-return invalidation.
@@ -385,6 +389,23 @@ describe("no org credential", () => {
       { botToken: "xoxb-same", appId: "A123", appToken: "xapp-same" },
       expect.anything(),
     );
+  });
+});
+
+describe("act-as-you moved to Contacts", () => {
+  it("no longer renders the read card, only a link to Contacts", () => {
+    state.view = view({ presences: [activePresence()] });
+    renderSection();
+
+    expect(screen.queryByText(/can read$/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Connect your Slack" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", {
+        name: /Manage what Support Triage reads and sends as you in Contacts/,
+      }),
+    ).toHaveAttribute("href", "/w/p1/agents/ag-1/contacts");
   });
 });
 

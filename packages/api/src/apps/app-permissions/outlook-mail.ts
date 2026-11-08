@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const outlookMailPermissions: AppPermissionDefinition = {
   provider: "outlook-mail",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

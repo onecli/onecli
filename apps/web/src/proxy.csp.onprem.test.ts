@@ -22,7 +22,7 @@ import { proxy } from "./proxy";
 describe("onprem: no nonce CSP", () => {
   it("serves a page load CSP-free and never forwards a client x-nonce", () => {
     const response = proxy(
-      new NextRequest("http://localhost:10254/w/ws-1/overview", {
+      new NextRequest("http://localhost:10254/w/ws-1/activity", {
         headers: { "x-nonce": "attacker" },
       }),
     );

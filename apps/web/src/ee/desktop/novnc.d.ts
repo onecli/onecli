@@ -14,6 +14,10 @@ declare module "@novnc/novnc" {
     credentials?: { username?: string; password?: string; target?: string };
     shared?: boolean;
     repeaterID?: string;
+    /** Pinned clipboard patch: do not fetch guest data without an action. */
+    clipboardAutoRequest?: boolean;
+    /** Maximum clipboard message and decompressed payload bytes. */
+    clipboardMaxBytes?: number;
   }
 
   export interface RFBDisconnectDetail {
@@ -28,6 +32,7 @@ declare module "@novnc/novnc" {
     credentialsrequired: CustomEvent<{ types: string[] }>;
     securityfailure: CustomEvent<{ status: number; reason?: string }>;
     clipboard: CustomEvent<{ text: string }>;
+    clipboardchange: CustomEvent<Record<string, never>>;
     bell: CustomEvent<Record<string, never>>;
     desktopname: CustomEvent<{ name: string }>;
     capabilities: CustomEvent<{ capabilities: { power: boolean } }>;
@@ -61,7 +66,14 @@ declare module "@novnc/novnc" {
     blur(): void;
     sendKey(keysym: number, code: string | null, down?: boolean): void;
     sendCtrlAltDel(): void;
-    clipboardPasteFrom(text: string): void;
+    /** Resolves after data is sent, before subsequent sendKey calls. */
+    clipboardPaste(text: string): Promise<void>;
+    /** Read explicitly after the next guest copy announcement. */
+    clipboardRead(): Promise<string>;
+    /** Discard owned buffers and reject outstanding clipboard operations. */
+    clearClipboard(): void;
+    /** Release keys and reset noVNC's keyboard bookkeeping together. */
+    releaseKeys(): void;
     addEventListener<K extends keyof RFBEventMap>(
       type: K,
       listener: (ev: RFBEventMap[K]) => void,

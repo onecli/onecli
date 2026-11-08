@@ -22,6 +22,8 @@ export interface RunsFilter {
   source?: string;
   /** One webhook's runs. */
   webhookId?: string;
+  /** One schedule's runs. */
+  cronId?: string;
   failed?: boolean;
   before?: string;
 }
@@ -34,12 +36,14 @@ export const list = ({
   agentId,
   source,
   webhookId,
+  cronId,
   failed,
   before,
 }: RunsFilter = {}) => {
   const q = new URLSearchParams();
   if (source) q.set("source", source);
   if (webhookId) q.set("webhookId", webhookId);
+  if (cronId) q.set("cronId", cronId);
   if (failed) q.set("failed", "true");
   if (before) q.set("before", before);
   const qs = q.toString();

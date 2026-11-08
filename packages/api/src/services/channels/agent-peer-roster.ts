@@ -24,10 +24,10 @@ import {
 export const peerRoster = async (
   agentId: string,
   workspaceId: string,
-): Promise<{ id: string; name: string }[]> =>
+): Promise<{ id: string; name: string; imageKey: string | null }[]> =>
   db.agent.findMany({
     where: { workspaceId, kind: "hosted", NOT: { id: agentId } },
-    select: { id: true, name: true },
+    select: { id: true, name: true, imageKey: true },
     orderBy: { name: "asc" },
   });
 

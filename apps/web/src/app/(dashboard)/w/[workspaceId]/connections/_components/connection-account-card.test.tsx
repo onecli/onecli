@@ -81,3 +81,42 @@ describe("ConnectionAccountCard: missing permissions", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
+
+describe("ConnectionAccountCard: tags", () => {
+  it("offers a connection check only for database providers", () => {
+    renderCard(connection({ provider: "postgres" }));
+    expect(
+      screen.getByRole("button", { name: "Test connection" }),
+    ).toBeInTheDocument();
+  });
+  it("does not offer database checks for other providers", () => {
+    renderCard(connection());
+    expect(
+      screen.queryByRole("button", { name: "Test connection" }),
+    ).toBeNull();
+  });
+  it("drops the account tag a bound host already shows, and keeps the rest", () => {
+    renderCard(
+      connection({
+        provider: "snowflake",
+        label: "acme-prod",
+        metadata: {
+          bound_host: "acme-prod.snowflakecomputing.com",
+          tags: ["acme-prod", "verified"],
+        },
+      }),
+    );
+    expect(
+      screen.getByText("acme-prod.snowflakecomputing.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("verified")).toBeInTheDocument();
+    // The label and the host line say it already; no third copy as a chip.
+    expect(screen.getAllByText("acme-prod")).toHaveLength(1);
+  });
+
+  it("keeps every tag when there is no bound host", () => {
+    renderCard(connection({ metadata: { tags: ["eu", "prod"] } }));
+    expect(screen.getByText("eu")).toBeInTheDocument();
+    expect(screen.getByText("prod")).toBeInTheDocument();
+  });
+});
