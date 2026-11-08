@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_SESSION_REF_CHARS,
   MAX_TOOL_ERROR_CHARS,
   MAX_TOOL_RESULT_CHARS,
+  TURN_FAILURE_CODES,
   type RunnerAttachmentUploadResponse,
   type RunnerEvent,
   type RunnerMemoryWriteResponse,
@@ -104,6 +106,14 @@ export interface SupervisorMessageHandlerDeps {
    */
   containerRefOf: (sandboxId: string) => string | undefined;
   /**
+   * The machine the substrate placed this sandbox on, as the runner last
+   * saw it (the backend's own snapshot). Stamped onto a read-only-home
+   * report so the control plane can tell one bad machine from a fleet-wide
+   * problem; never the supervisor's word. Optional: undefined (a
+   * single-host backend, a sandbox not listed yet) sends no node.
+   */
+  nodeOf?: (sandboxId: string) => string | undefined;
+  /**
    * Sandbox ports (plans/sandbox-ports.md §7): the byte-stream hub. Port
    * frames are routed straight to it on the ws message path (never the lossy
    * report chain — they are a live pipe, not events). Optional so callers
@@ -125,6 +135,8 @@ export interface OutboundFile {
   mimeType: string;
   sha256: string;
   caption?: string;
+  /** "send" = staged for send_message; absent = attach to the reply. */
+  purpose?: "send";
   bytes: Buffer;
 }
 
@@ -156,6 +168,20 @@ const boundedResult = (
   };
 };
 
+/**
+ * A supervisor's session ref, as the runner wire may carry it: only when it
+ * fits `MAX_SESSION_REF_CHARS`. Dropped, never truncated, when it does not
+ * (a cut ref would name a session that does not exist), and dropped HERE,
+ * at the sender: an oversized one would fail the control plane's parse of
+ * the whole event, losing the heartbeat or the terminal report it rides on.
+ */
+const relayableSessionRef = (
+  sessionRef: string | undefined,
+): { sessionRef?: string } =>
+  sessionRef && sessionRef.length <= MAX_SESSION_REF_CHARS
+    ? { sessionRef }
+    : {};
+
 export const createSupervisorMessageHandler = ({
   report,
   collector,
@@ -164,6 +190,7 @@ export const createSupervisorMessageHandler = ({
   uploadAttachment,
   sendToSandbox,
   containerRefOf,
+  nodeOf,
   portHub,
   onReady,
   now = () => Date.now(),
@@ -452,6 +479,7 @@ export const createSupervisorMessageHandler = ({
       mimeType: part.mimeType,
       sha256: part.sha256,
       ...(part.caption !== undefined && { caption: part.caption }),
+      ...(part.purpose !== undefined && { purpose: part.purpose }),
       bytes,
     });
   };
@@ -540,6 +568,9 @@ export const createSupervisorMessageHandler = ({
           sandboxId,
           conversationId: message.conversationId,
           turnId: message.turnId,
+          // The resume handle, forwarded only when it fits the runner wire
+          // (see `relayableSessionRef`).
+          ...relayableSessionRef(message.sessionRef),
         });
         break;
       case "turn.result":
@@ -571,7 +602,7 @@ export const createSupervisorMessageHandler = ({
             errorCode: message.errorCode.slice(0, 64),
           }),
           ...(message.usage && { usage: message.usage }),
-          ...(message.sessionRef && { sessionRef: message.sessionRef }),
+          ...relayableSessionRef(message.sessionRef),
           // Steer outcomes ride the terminal report so the settle and the
           // close arrive (or are lost) together.
           ...(message.followUps && { followUps: message.followUps }),
@@ -597,12 +628,21 @@ export const createSupervisorMessageHandler = ({
         });
         const containerRef = containerRefOf(sandboxId);
         if (!containerRef) break;
+        // A read-only home is the one stop the control plane budgets
+        // (each restart is capped, and a burst of them on one machine holds
+        // them all), so it rides the existing `reasonCode` slot. The code is
+        // the supervisor's (untrusted: it only ever concerns THIS sandbox);
+        // the node is the runner's own, from the substrate.
+        const readOnly = message.code === TURN_FAILURE_CODES.homeReadOnly;
+        const node = readOnly ? nodeOf?.(sandboxId) : undefined;
         report({
           kind: "sandbox.status",
           sandboxId,
           status: "stopped",
           error: message.reason,
           observedContainerRef: containerRef,
+          ...(readOnly && { reasonCode: TURN_FAILURE_CODES.homeReadOnly }),
+          ...(node && { node }),
         });
         break;
       }
@@ -653,6 +693,12 @@ export const createSupervisorMessageHandler = ({
         });
         break;
       }
+      case "heartbeat":
+        // Channel liveness (`CHANNEL_LIVENESS`): the supervisor's probe that
+        // its socket is still attached to a live runner. The answer is the
+        // ack the ws server sends for every sequenced frame, already gone
+        // by the time this runs; nothing to report.
+        break;
       default: {
         const unreachable: never = message;
         throw new Error(

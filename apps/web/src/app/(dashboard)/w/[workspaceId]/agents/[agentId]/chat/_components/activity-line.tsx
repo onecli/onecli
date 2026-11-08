@@ -32,12 +32,17 @@ import { cn } from "@onecli/ui/lib/utils";
 export const ActivityLine = ({
   text,
   visuallyHidden = false,
+  turnStatus,
 }: {
   text: string;
   /** Announce without showing: for when the same words are already on
    *  screen elsewhere (the run header), so sighted readers don't see them
    *  twice while screen-reader users keep the live cue. */
   visuallyHidden?: boolean;
+  /** The turn's lifecycle state behind the caption (`queued`: the machine
+   *  is waking; `running`: the agent is at work). Never copy: the person
+   *  sees one word either way. A DOM attribute for support and tests. */
+  turnStatus?: string;
 }) => (
   <p
     className={cn(
@@ -47,6 +52,7 @@ export const ActivityLine = ({
     // Polite: a caption that changes every few seconds must never interrupt
     // a screen-reader user mid-sentence.
     aria-live="polite"
+    data-turn-status={turnStatus}
   >
     <span
       aria-hidden

@@ -82,7 +82,7 @@ export const SlackReadAgentsDialog = ({
               {rows.map((a) => (
                 <li key={a.agentId}>
                   <Link
-                    href={`${agentSectionPath(pathname, a.agentId, "channels")}`}
+                    href={agentSectionPath(pathname, a.agentId, "contacts")}
                     onClick={() => onOpenChange(false)}
                     className="hover:bg-muted flex items-center gap-3 px-3 py-2.5"
                   >

@@ -42,6 +42,7 @@ const SIGNING_SECRET = "rm-wire-signing";
 const SELF_URL = "https://api.rmwire.test";
 
 let currentSession: { id: string; email: string } | null = null;
+let settleInbound: () => Promise<void>;
 
 const signedHeaders = (rawBody: string, secret = SIGNING_SECRET) => {
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -65,12 +66,17 @@ const envelope = (event: unknown, eventId?: string) =>
     event,
   });
 
-const postSigned = (raw: string, secret?: string) =>
-  app.request("/v1/channels/slack/events", {
+/** A signed webhook, then the inbox run it started (the events arm acks
+ * before processing). */
+const postSigned = async (raw: string, secret?: string) => {
+  const res = await app.request("/v1/channels/slack/events", {
     method: "POST",
     headers: signedHeaders(raw, secret),
     body: raw,
   });
+  await settleInbound();
+  return res;
+};
 
 beforeAll(async () => {
   if (!PROOF_URL) return;
@@ -95,6 +101,8 @@ beforeAll(async () => {
     { getSession: async () => currentSession },
     { selfUrl: SELF_URL },
   );
+  settleInbound = (await import("../services/channels/inbound-event-service"))
+    .settleInboundEventsForTests;
 
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
   await db.runner.deleteMany({ where: { id: RUNNER } });

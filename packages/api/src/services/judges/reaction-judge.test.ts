@@ -27,7 +27,8 @@ vi.mock("../llm-credential-service", () => ({
   readLlmCredentialValue: resolution.value,
 }));
 
-const { chooseReaction, FALLBACK_REACTION } = await import("./reaction-judge");
+const { chooseReaction, FALLBACK_REACTION, REACTION_CHOICES } =
+  await import("./reaction-judge");
 
 const AGENT = {
   agent: { id: "ag1", workspaceId: "p1" },
@@ -99,18 +100,19 @@ describe("chooseReaction", () => {
     resolution.credential.mockResolvedValue(anthropicCredential);
     resolution.value.mockResolvedValue("sk-ant-api-key");
     process.env.ANTHROPIC_API_BASE_URL = await startModelFake(() => ({
-      body: { content: [{ type: "text", text: " :Thumbsup: " }] },
+      body: { content: [{ type: "text", text: " :Thinking_Face: " }] },
     }));
 
-    expect(await chooseReaction(AGENT)).toBe("thumbsup");
+    expect(await chooseReaction(AGENT)).toBe("thinking_face");
     // The credential travelled as x-api-key (api-key mode), never logged.
     expect(requests[0]?.headers["x-api-key"]).toBe("sk-ant-api-key");
     expect(requests[0]?.path).toBe("/v1/messages");
   });
 
   it("falls back on a non-allowlisted answer — the allowlist IS the output boundary", async () => {
-    // MUTATION-PROOF: skip the isAllowlisted check and a prompt-injected
-    // message could name ANY Slack reaction through the model's mouth.
+    // MUTATION-PROOF: skip classify's match against the declared choices and
+    // a prompt-injected message could name ANY Slack reaction through the
+    // model's mouth.
     resolution.credential.mockResolvedValue(anthropicCredential);
     resolution.value.mockResolvedValue("sk-ant-api-key");
     process.env.ANTHROPIC_API_BASE_URL = await startModelFake(() => ({
@@ -118,6 +120,26 @@ describe("chooseReaction", () => {
     }));
 
     expect(await chooseReaction(AGENT)).toBe(FALLBACK_REACTION);
+  });
+
+  it("offers only neutral marks, with the fallback among them", () => {
+    // The sender reads the mark as the agent's first reply, and each of
+    // these reads as a verdict the agent never gave (seen live: a question
+    // mark on a status ask, a thumbs-up on "the deploy failed", a rising
+    // chart on falling sales).
+    const offered = REACTION_CHOICES.map((choice) => choice.value);
+    const verdicts = [
+      "question",
+      "thumbsup",
+      "rocket",
+      "bug",
+      "book",
+      "memo",
+      "gear",
+      "chart_with_upwards_trend",
+    ];
+    for (const verdict of verdicts) expect(offered).not.toContain(verdict);
+    expect(offered).toContain(FALLBACK_REACTION);
   });
 
   it("falls back with ZERO model calls when no key is granted", async () => {

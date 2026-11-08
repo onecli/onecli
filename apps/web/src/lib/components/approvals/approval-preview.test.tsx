@@ -68,4 +68,49 @@ describe("ApprovalPreview", () => {
     );
     expect(screen.getByText("First name:")).toBeTruthy();
   });
+
+  it("drops a one-record update's record bar when the title names it", () => {
+    const bulk = {
+      object: "Project__c",
+      objectLabel: "Project",
+      fields: [{ api: "Name", label: "Name" }],
+      rows: [
+        {
+          id: "a0BAA00000AbCdEFGH",
+          name: "Current project",
+          new: ["Test"],
+          old: ["Current project"],
+        },
+      ],
+      oldValuesRead: true,
+    };
+    const { rerender } = render(
+      <ApprovalPreview kind={undefined} details={[]} bulk={bulk} />,
+    );
+    expect(screen.getAllByText("Current project")).toHaveLength(2);
+    rerender(
+      <ApprovalPreview kind={undefined} details={[]} bulk={bulk} titled />,
+    );
+    expect(screen.getAllByText("Current project")).toHaveLength(1);
+    expect(screen.getByText("Test")).toBeTruthy();
+    rerender(
+      <ApprovalPreview
+        kind={undefined}
+        details={[]}
+        bulk={{ ...bulk, kind: "delete" }}
+        titled
+      />,
+    );
+    expect(screen.getByText("Deletes project")).toBeTruthy();
+    expect(screen.getAllByText("Current project")).toHaveLength(2);
+    rerender(
+      <ApprovalPreview
+        kind={undefined}
+        details={[]}
+        bulk={{ ...bulk, kind: "create" }}
+        titled
+      />,
+    );
+    expect(screen.getByText("New project")).toBeTruthy();
+  });
 });

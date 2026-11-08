@@ -34,6 +34,17 @@ vi.mock("@/hooks/use-app-permissions", () => ({
           },
         ],
       },
+      {
+        provider: "postgres",
+        unlisted: "block",
+        exhaustive: true,
+        groups: [
+          {
+            category: "read",
+            tools: [{ id: "sql_read", name: "Read data", description: "read" }],
+          },
+        ],
+      },
     ],
   }),
 }));
@@ -88,6 +99,11 @@ const toolOption = (tool: string, label: string) => {
   return within(row).getByRole("button", { name: label });
 };
 
+const catchAllOption = (row: string, label: string) =>
+  within(screen.getByRole("group", { name: row })).getByRole("button", {
+    name: label,
+  });
+
 describe("ManagePermissionsDialog: a catalog that blocks unlisted requests", () => {
   beforeEach(() => mutate.mockClear());
 
@@ -102,11 +118,10 @@ describe("ManagePermissionsDialog: a catalog that blocks unlisted requests", () 
       otherWrites: "ask",
     });
     for (const row of ["Other reads", "Other writes"]) {
-      expect(
-        within(screen.getByRole("group", { name: row })).getByRole("button", {
-          name: "Needs approval",
-        }),
-      ).toHaveProperty("ariaPressed", "true");
+      expect(catchAllOption(row, "Needs approval")).toHaveProperty(
+        "ariaPressed",
+        "true",
+      );
     }
     expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
       "disabled",
@@ -117,23 +132,34 @@ describe("ManagePermissionsDialog: a catalog that blocks unlisted requests", () 
   it("returns to full access: every tool and Not listed above on Allow", async () => {
     renderDialog(customGrant);
     // Customized: Always allow isn't offered on the catch-alls.
-    expect(
-      within(screen.getByRole("group", { name: "Other reads" })).getByRole(
-        "button",
-        { name: "Always allow" },
-      ),
-    ).toHaveProperty("disabled", true);
+    expect(catchAllOption("Other reads", "Always allow")).toHaveProperty(
+      "disabled",
+      true,
+    );
 
     await userEvent.click(toolOption("Write S3", "Always allow"));
-    await userEvent.click(
-      within(screen.getByRole("group", { name: "Other reads" })).getByRole(
-        "button",
-        { name: "Always allow" },
-      ),
-    );
+    await userEvent.click(catchAllOption("Other reads", "Always allow"));
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(mutate).toHaveBeenCalledWith(
       expect.objectContaining({ input: { access: "full" } }),
+      expect.anything(),
+    );
+  });
+
+  it("from full access, Never on Other writes leaves Other reads on Needs approval", async () => {
+    renderDialog(undefined);
+    await userEvent.click(catchAllOption("Other writes", "Never"));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: {
+          access: "custom",
+          allow: ["s3_read", "s3_put"],
+          ask: [],
+          otherReads: "ask",
+          otherWrites: "never",
+        },
+      }),
       expect.anything(),
     );
   });
@@ -154,5 +180,26 @@ describe("ManagePermissionsDialog: a catalog that blocks unlisted requests", () 
       }),
       expect.anything(),
     );
+  });
+});
+
+describe("ManagePermissionsDialog: an exhaustive catalog", () => {
+  it("shows no Not listed above rows, since nothing outside the tools exists", () => {
+    render(
+      <TooltipProvider>
+        <ManagePermissionsDialog
+          agentId="agent-1"
+          connection={
+            { id: "pg-1", provider: "postgres", label: "app" } as Connection
+          }
+          grant={undefined}
+          readOnly={false}
+          onClose={() => {}}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText("Read data")).toBeTruthy();
+    expect(screen.queryByText("Not listed above")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Other reads" })).toBeNull();
   });
 });

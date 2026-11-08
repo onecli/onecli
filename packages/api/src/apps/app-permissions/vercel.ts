@@ -19,7 +19,9 @@ export const vercelPermissions: AppPermissionDefinition = {
           name: "Get project",
           description: "Get a specific project",
           hostPattern: "api.vercel.com",
-          pathPattern: "/v9/projects/*",
+          // Trailing slash = exactly one segment: the project itself, never
+          // a sub-resource like `/env` (environment variables).
+          pathPattern: "/v9/projects/*/",
           method: "GET",
         },
         {

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const hubspotPermissions: AppPermissionDefinition = {
   provider: "hubspot",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

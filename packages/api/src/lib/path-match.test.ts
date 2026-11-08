@@ -124,3 +124,24 @@ describe("isLlmHost", () => {
     expect(isLlmHost("CHATGPT.COM")).toBe(true);
   });
 });
+
+describe("LLM provider suffix boundaries", () => {
+  it.each([
+    "anthropic.com",
+    "openai.com",
+    "chatgpt.com",
+    "deepseek.com",
+    "groq.com",
+    "openrouter.ai",
+    "moonshot.cn",
+    "generativelanguage.googleapis.com",
+  ])("keeps %s inside the provider domain", (domain) => {
+    expect(isLlmHost(domain.toUpperCase())).toBe(true);
+    expect(isLlmHost(`sub.api.${domain}:443`)).toBe(true);
+    expect(isLlmHost(`evil-${domain}:443`)).toBe(false);
+    expect(isLlmHost(`${domain}.evil.test`)).toBe(false);
+    expect(isLlmHost(`\u00e9${domain}`)).toBe(false);
+    expect(isLlmHost(`\u00e9.${domain}`)).toBe(true);
+    expect(isLlmHost(`\u3002${domain}`)).toBe(false);
+  });
+});

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
+import { orgNameFromEmail } from "../lib/email-org-name";
 
 /**
  * `ensureUserOrganization` on REAL PostgreSQL — the first-registration
@@ -359,12 +360,13 @@ describe.skipIf(!PROOF_URL)(
       const user = await makeUser("collide");
       // A foreign org already holds this user's deterministic slug — the shape
       // an unlocked writer (EE create, a pre-fix install) can leave behind.
-      const localPart = user.email.split("@")[0];
+      // The slug comes from the org name, which comes from the email.
+      const orgName = orgNameFromEmail(user.email) ?? "personal";
       await db.organization.create({
         data: {
           id: `${P}collide-org`,
           name: "squatter",
-          slug: `${localPart}-${user.id.slice(0, 8)}`,
+          slug: `${svc.slugify(orgName)}-${user.id.slice(0, 8)}`,
         },
       });
 

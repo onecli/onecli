@@ -1,7 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { db } from "@onecli/db";
 import {
-  runnerAdvertises,
+  LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
   runnerCapabilitiesSchema,
   type RunnerCapabilities,
 } from "@onecli/agent-protocol";
@@ -113,21 +114,39 @@ export const registerRunner = async ({
   };
 };
 
+/** What one runner can take of a message's attachments. */
+export interface RunnerAttachmentSupport {
+  /** It pulls attachment bytes, so a turn may carry a manifest and note. */
+  supported: boolean;
+  /** The most files one manifest may carry to it (its wire's bound). */
+  maxFiles: number;
+}
+
 /**
- * Whether one runner advertised the `attachments` capability — read at
- * dispatch time (the steerMessages precedent gates in SQL; this arm gates in
- * the composer because the turn CLAIM itself is capability-independent: the
- * turn always delivers, only the manifest + note are withheld from a runner
- * that could not pull the bytes).
+ * What one runner can take of a message's attachments, read at dispatch time
+ * (the steerMessages precedent gates in SQL; this arm gates in the composer
+ * because the turn CLAIM itself is capability-independent: the turn always
+ * delivers, only the manifest + note are withheld from a runner that could
+ * not pull the bytes). `maxFiles` is the runner's advertised manifest bound,
+ * never above the control plane's own cap: a runner that predates the field
+ * parses `LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE`, and a longer manifest
+ * would fail its whole poll batch.
  */
-export const runnerSupportsAttachments = async (
+export const runnerAttachmentSupport = async (
   runnerId: string,
-): Promise<boolean> => {
+): Promise<RunnerAttachmentSupport> => {
   const runner = await db.runner.findUnique({
     where: { id: runnerId },
     select: { capabilities: true },
   });
-  return runnerAdvertises(runner?.capabilities, "attachments");
+  const caps = runnerCapabilitiesSchema.safeParse(runner?.capabilities).data;
+  return {
+    supported: caps?.attachments === true,
+    maxFiles: Math.min(
+      caps?.maxAttachmentsPerMessage ?? LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    ),
+  };
 };
 
 export const heartbeatRunner = async (

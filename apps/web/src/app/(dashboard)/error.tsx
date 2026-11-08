@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import {
+  clearChunkErrorReload,
+  useChunkErrorReload,
+} from "@/hooks/use-chunk-error-reload";
 
 /**
  * Dashboard error boundary — catches chunk load errors from lazy-loaded
@@ -13,23 +16,7 @@ export default function DashboardError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
-  useEffect(() => {
-    if (
-      error.name === "ChunkLoadError" ||
-      error.message?.includes("ChunkLoadError")
-    ) {
-      const key = "chunk-error-reloaded";
-      const alreadyReloaded = sessionStorage.getItem(key);
-
-      if (!alreadyReloaded) {
-        sessionStorage.setItem(key, "1");
-        window.location.reload();
-        return;
-      }
-
-      sessionStorage.removeItem(key);
-    }
-  }, [error]);
+  useChunkErrorReload(error);
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
@@ -39,7 +26,7 @@ export default function DashboardError({
       </p>
       <button
         onClick={() => {
-          sessionStorage.removeItem("chunk-error-reloaded");
+          clearChunkErrorReload();
           reset();
         }}
         className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted"

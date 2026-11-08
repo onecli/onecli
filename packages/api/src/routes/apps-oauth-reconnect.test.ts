@@ -55,22 +55,31 @@ vi.mock("../services/workspace-access-check", () => ({
 
 vi.mock("../apps/registry", () => ({
   getApp: (id: string) =>
-    id === "mail"
+    id === "keyapp"
       ? {
           id,
-          name: "Mail",
+          name: "Key app",
           connectionMethod: {
-            type: "oauth",
-            defaultScopes: ["read"],
-            buildAuthUrl: async () => "https://provider.example/auth",
-            exchangeCode: async () => ({
-              credentials: { access_token: "tok" },
-              scopes: ["read"],
-              metadata: { email: "Alex@Example.com" },
-            }),
+            type: "api_key",
+            fields: [{ name: "apiKey", label: "API Key" }],
           },
         }
-      : undefined,
+      : id === "mail"
+        ? {
+            id,
+            name: "Mail",
+            connectionMethod: {
+              type: "oauth",
+              defaultScopes: ["read"],
+              buildAuthUrl: async () => "https://provider.example/auth",
+              exchangeCode: async () => ({
+                credentials: { access_token: "tok" },
+                scopes: ["read"],
+                metadata: { email: "Alex@Example.com" },
+              }),
+            },
+          }
+        : undefined,
   getApps: () => [],
 }));
 
@@ -98,7 +107,7 @@ vi.mock("../services/connection-service", () => ({
   listConnectionsByProvider: async () => calls.existing,
   createConnection: async () => {
     calls.created += 1;
-    return { id: "conn-new" };
+    return { id: "conn-new", label: null };
   },
   reconnectConnection: async (_scope: unknown, id: string) => {
     calls.reconnected.push(id);
@@ -169,6 +178,37 @@ describe("OAuth callback onto an existing connection", () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toContain("status=success");
   };
+
+  it.each([
+    { name: "fresh", existing: false, reconnect: false },
+    { name: "duplicate", existing: true, reconnect: false },
+    { name: "reconnect", existing: true, reconnect: true },
+  ])(
+    "direct $name returns only the authoritative ID and fresh marker",
+    async ({ existing, reconnect }) => {
+      calls.existing = existing ? [{ id: "conn-old", label: "API Key" }] : [];
+      const res = await app.request("/v1/apps/keyapp/connect", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${WORKSPACE_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          fields: { apiKey: "secret-never-returned" },
+          ...(reconnect ? { connectionId: "conn-old" } : {}),
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        success: true,
+        connectionId: existing ? "conn-old" : "conn-new",
+        ...(!existing ? { connection: { id: "conn-new", label: null } } : {}),
+      });
+      expect(calls.created).toBe(existing ? 0 : 1);
+      expect(calls.reconnected).toEqual(existing ? ["conn-old"] : []);
+      if (reconnect) expect(calls.granted).toEqual([]);
+    },
+  );
 
   it("a workspace connect creates the account and grants nobody", async () => {
     calls.existing = [{ id: "conn-other", label: "sam@example.com" }];

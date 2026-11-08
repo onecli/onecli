@@ -31,38 +31,42 @@ type SandboxDesktopEvent = Extract<RunnerEvent, { kind: "sandbox.desktop" }>;
  * holds NOW, so a frame off a dead container (a re-send in flight across a
  * respawn) never overwrites the live one. A miss is silently inert. The
  * supervisor re-sends on a slow clock, so a dropped frame heals itself.
+ *
+ * Raw SQL, like every other write a live container makes on its own slow
+ * clock (runner-channel-service): Prisma's `update` would bump
+ * `updated_at`, the start/stop arms' stale-claim clock in due-work. A
+ * ~30 s re-send that kept that clock fresh left a `stopping` row whose
+ * stop the runner could not report stuck forever, with every turn against
+ * it dying at the never-started ceiling. Clocks stay single-purpose.
  */
 export const applySandboxPorts = async (
   runnerId: string,
   event: SandboxPortsEvent,
 ): Promise<void> => {
-  await db.sandbox.updateMany({
-    where: {
-      id: event.sandboxId,
-      runnerId,
-      containerRef: event.containerRef,
-    },
-    data: { listeningPorts: event.ports },
-  });
+  await db.$executeRaw`
+    UPDATE sandboxes SET listening_ports = ${event.ports}::int[]
+    WHERE id = ${event.sandboxId}
+      AND runner_id = ${runnerId}
+      AND container_ref = ${event.containerRef}
+  `;
 };
 
 /**
  * Whether the sandbox's screen can be watched, mirrored onto its row under
  * exactly the fences of `applySandboxPorts` (this runner's sandbox, the
- * container the row holds NOW).
+ * container the row holds NOW), and the same clock law: raw SQL, so the
+ * re-send never refreshes the stale-claim clock.
  */
 export const applySandboxDesktop = async (
   runnerId: string,
   event: SandboxDesktopEvent,
 ): Promise<void> => {
-  await db.sandbox.updateMany({
-    where: {
-      id: event.sandboxId,
-      runnerId,
-      containerRef: event.containerRef,
-    },
-    data: { desktopViewable: event.viewable },
-  });
+  await db.$executeRaw`
+    UPDATE sandboxes SET desktop_viewable = ${event.viewable}
+    WHERE id = ${event.sandboxId}
+      AND runner_id = ${runnerId}
+      AND container_ref = ${event.containerRef}
+  `;
 };
 
 /** Terminal process states never transition again; a late frame is inert. */

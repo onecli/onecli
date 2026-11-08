@@ -9,24 +9,31 @@ import { defineJudge } from "./judge";
  * path that calls it.
  */
 
-/** Slack reaction names the model may pick from: the output boundary. */
-export const REACTION_ALLOWLIST = [
-  "eyes",
-  "wave",
-  "thumbsup",
-  "thinking_face",
-  "mag",
-  "memo",
-  "rocket",
-  "bulb",
-  "question",
-  "bug",
-  "book",
-  "gear",
-  "calendar",
-  "chart_with_upwards_trend",
+/**
+ * The Slack reactions the model may pick from, each with when it fits: the
+ * output boundary, and what the model reads. Neutral "seen" marks only. The
+ * sender reads the mark as the agent's first reply, so one that passes a
+ * verdict on the message (a question mark: "I didn't understand"; a
+ * thumbs-up on "the deploy failed"; a rising chart on falling sales) says
+ * something the agent never said. `eyes` is offered as the default, so the
+ * model is never pushed into a topical pick that does not fit.
+ */
+export const REACTION_CHOICES = [
+  {
+    value: "eyes",
+    description: "The default: seen, when no other choice clearly fits.",
+  },
+  { value: "wave", description: "A greeting or a sign-off." },
+  {
+    value: "thinking_face",
+    description: "A question to answer or a problem to think through.",
+  },
+  { value: "mag", description: "Something to look up, check or investigate." },
+  { value: "bulb", description: "An idea or a suggestion." },
+  { value: "calendar", description: "Dates, scheduling or a meeting." },
+  { value: "bar_chart", description: "Numbers, metrics or a report." },
 ] as const;
-export type Reaction = (typeof REACTION_ALLOWLIST)[number];
+export type Reaction = (typeof REACTION_CHOICES)[number]["value"];
 
 export const FALLBACK_REACTION: Reaction = "eyes";
 
@@ -40,10 +47,7 @@ const QUESTIONS = [
     name: "emoji",
     instructions:
       "Pick the single most fitting acknowledgment emoji for this chat message.",
-    choices: REACTION_ALLOWLIST.map((value) => ({
-      value,
-      description: value.replaceAll("_", " "),
-    })),
+    choices: REACTION_CHOICES,
   },
 ] as const;
 

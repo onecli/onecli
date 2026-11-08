@@ -20,11 +20,11 @@ import { useCounts } from "@/hooks/use-counts";
 
 type Tab = "apps" | "custom";
 
-// Lazy: the rows are the agent page's whole connection editor (its Manage
-// sheet included), needed only in the moment right after a create, so the
-// agents list never ships it up front.
-const AppsSection = dynamic(() =>
-  import("../[agentId]/_components/apps-section").then((m) => m.AppsSection),
+// Lazy: the tabs are the agent page's own (as switch-only tiles here), needed
+// only in the moment right after a create, so the agents list never ships
+// them up front.
+const AppsTab = dynamic(() =>
+  import("../[agentId]/_components/apps-tab").then((m) => m.AppsTab),
 );
 const SecretGrantsTab = dynamic(() =>
   import("../[agentId]/_components/secret-grants-tab").then(
@@ -42,10 +42,10 @@ export interface ChooseConnectionsDialogProps {
 /**
  * The step right after an agent is created: it starts with no connection and
  * no custom connection (only the LLM key it runs on), so this is where the
- * user picks what it gets. The rows ARE the agent page's own (its Apps
- * section, Manage sheet included, and its Custom tab), unfolded because every
- * row starts off here and IS the choice. Each switch applies at once, so
- * there is nothing to submit: Done (or Esc) just closes.
+ * user picks what it gets. The tabs ARE the agent page's own Apps and Custom
+ * tabs, in their chooser shape: every connection in view, A to Z, as a tile
+ * whose switch is its only control. Each switch applies at once, so there is
+ * nothing to submit: Done (or Esc) just closes.
  */
 export const ChooseConnectionsDialog = ({
   agent,
@@ -73,7 +73,11 @@ export const ChooseConnectionsDialog = ({
         if (!open) close();
       }}
     >
-      <DialogContent className="gap-0 p-0 sm:max-w-2xl">
+      {/* Wider than the default dialog, for three-wide tiles. A wider
+          `sm:`/`lg:` max-width replaces the dialog's own 1rem-per-side
+          cap, so the width keeps that margin instead (else the window
+          touches the screen edges just above each breakpoint). */}
+      <DialogContent className="w-[calc(100%-2rem)] gap-0 p-0 sm:max-w-3xl lg:max-w-5xl">
         <DialogHeader className="min-w-0 p-6 pb-2">
           <DialogTitle className="break-words">
             Choose {agent?.name ?? "this agent"}&apos;s connections
@@ -99,17 +103,14 @@ export const ChooseConnectionsDialog = ({
                 <AnimatedTabTrigger value="custom">Custom</AnimatedTabTrigger>
               </AnimatedTabList>
             </AnimatedTabs>
-            {/* Native max-height scroller so a long list keeps the footer in
-                reach. */}
-            <div className="max-h-[min(26rem,55vh)] overflow-y-auto overscroll-contain py-2">
+            {/* One fixed height for both tabs, so switching Apps and Custom
+                never resizes the window. A bigger pool scrolls here while
+                the title, tabs and Done stay put. */}
+            <div className="h-[min(18rem,55vh)] overflow-y-auto overscroll-contain py-3">
               {tab === "apps" ? (
-                <AppsSection agentId={agent.id} foldInactive={false} />
+                <AppsTab agentId={agent.id} chooser />
               ) : (
-                <SecretGrantsTab
-                  agentId={agent.id}
-                  kind="secret"
-                  foldInactive={false}
-                />
+                <SecretGrantsTab agentId={agent.id} kind="secret" chooser />
               )}
             </div>
           </div>

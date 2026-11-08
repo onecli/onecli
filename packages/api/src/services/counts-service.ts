@@ -1,5 +1,4 @@
 import { db } from "@onecli/db";
-import { agentIdsWithLiveBackgroundWork } from "./due-work";
 
 export const getResourceCounts = async (
   workspaceId: string,
@@ -28,20 +27,12 @@ export const getResourceCounts = async (
       }
     : { workspaceId, status: "connected" };
 
-  const [agents, apps, llms, secrets, backgroundBusy] = await Promise.all([
+  const [agents, apps, llms, secrets] = await Promise.all([
     db.agent.count({ where: { workspaceId } }),
     db.appConnection.count({ where: appWhere }),
     db.secret.count({ where: secretWhere("non-generic") }),
     db.secret.count({ where: secretWhere("generic") }),
-    // The workspace-level held-awake signal (step 13), in agent vocabulary.
-    agentIdsWithLiveBackgroundWork(workspaceId),
   ]);
 
-  return {
-    agents,
-    apps,
-    llms,
-    secrets,
-    agentsWorkingInBackground: backgroundBusy.size,
-  };
+  return { agents, apps, llms, secrets };
 };

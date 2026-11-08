@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiGet = vi.fn();
 const apiPatch = vi.fn();
-vi.mock("./client", () => ({
+vi.mock("./client", async (importOriginal) => ({
+  // The pure helpers (`workspaceScope`) stay real; only the transport is
+  // replaced.
+  ...(await importOriginal<typeof import("./client")>()),
   apiGet: (...args: unknown[]) => apiGet(...args),
   apiPatch: (...args: unknown[]) => apiPatch(...args),
   apiPost: vi.fn(),
@@ -33,5 +36,15 @@ describe("agents client paths", () => {
     await update("a b", { instructions: null });
     expect(apiPatch.mock.calls[0]?.[0]).toBe("/v1/agents/a%20b");
     expect(apiPatch.mock.calls[0]?.[1]).toEqual({ instructions: null });
+    // No workspace named: no scope header rides along.
+    expect(apiPatch.mock.calls[0]?.[2]).toBeUndefined();
+  });
+
+  it("scopes an update to a named workspace (the onboarding rename)", async () => {
+    apiPatch.mockResolvedValueOnce({ success: true });
+    await update("ag-1", { name: "Max" }, { workspaceId: "ws-1" });
+    expect(apiPatch.mock.calls[0]?.[2]).toEqual({
+      headers: { "X-Workspace-Id": "ws-1" },
+    });
   });
 });

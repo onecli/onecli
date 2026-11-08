@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 interface OrgCreateArgs {
   data: {
     name: string;
+    slug: string;
     workspaces: { create: { name: string; slug: string } };
   };
 }
@@ -145,5 +146,22 @@ describe("bootstrapOrganization workspace naming", () => {
       name: "john@x.com",
       slug: "john-x-com",
     });
+  });
+});
+
+describe("bootstrapOrganization org naming", () => {
+  it("names the org after the email's company, never the person", async () => {
+    state.ownerName = "John Smith";
+    await bootstrapOrganization("user-1", "john@eu.acme.co.uk");
+    expect(state.orgCreates[0]?.data).toMatchObject({
+      name: "acme",
+      slug: "acme-user-1",
+    });
+  });
+
+  it("names a shared mailbox's org after the address's local part", async () => {
+    state.ownerName = "John Smith";
+    await bootstrapOrganization("user-1", "john.smith@gmail.com");
+    expect(state.orgCreates[0]?.data.name).toBe("john.smith");
   });
 });

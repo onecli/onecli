@@ -498,4 +498,25 @@ mod tests {
         assert!(is_llm_host("sub.api.deepseek.com"));
         assert!(is_llm_host("CHATGPT.COM"));
     }
+    #[test]
+    fn llm_provider_suffix_boundaries() {
+        for domain in [
+            "anthropic.com",
+            "openai.com",
+            "chatgpt.com",
+            "deepseek.com",
+            "groq.com",
+            "openrouter.ai",
+            "moonshot.cn",
+            "generativelanguage.googleapis.com",
+        ] {
+            assert!(is_llm_host(&domain.to_ascii_uppercase()));
+            assert!(is_llm_host(&format!("sub.api.{domain}:443")));
+            assert!(!is_llm_host(&format!("evil-{domain}:443")));
+            assert!(!is_llm_host(&format!("{domain}.evil.test")));
+            assert!(!is_llm_host(&format!("\u{00e9}{domain}")));
+            assert!(is_llm_host(&format!("\u{00e9}.{domain}")));
+            assert!(!is_llm_host(&format!("\u{3002}{domain}")));
+        }
+    }
 }

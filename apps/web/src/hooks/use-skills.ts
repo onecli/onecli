@@ -46,6 +46,16 @@ export const useSkill = (skillId: string | null) =>
     enabled: skillId !== null,
   });
 
+/** Import a skill zip into one agent (agentId) or the organization. */
+export const useImportSkillZip = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ file, agentId }: { file: File; agentId?: string }) =>
+      skills.importZip(file, agentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.skills.all() }),
+  });
+};
+
 export const useCreateSkill = () => {
   const qc = useQueryClient();
   return useMutation({

@@ -22,9 +22,12 @@ type Op = ShownOp;
  */
 export const ApprovalRecordPreview = ({
   bulk,
+  titled = false,
   className,
 }: {
   bulk: ApprovalBulkChange;
+  /** The card's title already names and links this record. */
+  titled?: boolean;
   className?: string;
 }) => {
   const row = bulk.rows[0];
@@ -59,35 +62,39 @@ export const ApprovalRecordPreview = ({
 
   return (
     <div className={cn("space-y-2 text-sm", className)}>
-      <div
-        data-op={recordOp ?? undefined}
-        className={cn(
-          "flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 font-semibold",
-          recordOp ? CHANGE_COLORS[recordOp].cell : "bg-muted/60",
-        )}
-      >
-        {recordOp && (
-          <span
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              CHANGE_COLORS[recordOp].dot,
-            )}
-            aria-hidden
-          />
-        )}
-        <span className="text-muted-foreground shrink-0 font-normal">
-          {kind === "delete"
-            ? `Deletes ${noun}`
-            : kind === "create"
-              ? `New ${noun}`
-              : bulk.objectLabel}
-        </span>
-        <span className="min-w-0 truncate">
-          <ApprovalLink href={row.url}>
-            {row.name ?? (kind === "create" ? `New ${noun}` : row.id)}
-          </ApprovalLink>
-        </span>
-      </div>
+      {/* An update's record bar would repeat a title that names it; a
+          create or delete keeps it for its color. */}
+      {!(titled && kind === "update") && (
+        <div
+          data-op={recordOp ?? undefined}
+          className={cn(
+            "flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 font-semibold",
+            recordOp ? CHANGE_COLORS[recordOp].cell : "bg-muted/60",
+          )}
+        >
+          {recordOp && (
+            <span
+              className={cn(
+                "size-2 shrink-0 rounded-full",
+                CHANGE_COLORS[recordOp].dot,
+              )}
+              aria-hidden
+            />
+          )}
+          <span className="text-muted-foreground shrink-0 font-normal">
+            {kind === "delete"
+              ? `Deletes ${noun}`
+              : kind === "create"
+                ? `New ${noun}`
+                : bulk.objectLabel}
+          </span>
+          <span className="min-w-0 truncate">
+            <ApprovalLink href={row.url}>
+              {row.name ?? (kind === "create" ? `New ${noun}` : row.id)}
+            </ApprovalLink>
+          </span>
+        </div>
+      )}
 
       {kind === "update" && !read && (
         <p className="text-muted-foreground text-xs" role="status">

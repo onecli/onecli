@@ -18,6 +18,7 @@ import {
   workItemSchema,
 } from "./transport";
 import { MAX_SYNC_PARTS } from "./sync-budget";
+import { runnerWorkItemSchema } from "./runner-wire";
 import { MAX_HOSTNAME_CHARS } from "./text";
 import {
   ATTACHMENT_CHUNK_BASE64_CHARS,
@@ -161,6 +162,58 @@ describe("turn.deliver context", () => {
       someFutureField: "ignored",
     });
     expect(parsed).not.toHaveProperty("someFutureField");
+  });
+});
+
+/**
+ * The conversation's context size on the supervisor wire: a ladder size
+ * passes, and anything that is not a sane whole token count is refused, so
+ * a corrupt value can never ask the harness for an absurd budget. On the
+ * runner wire it is the same schema, forwarded verbatim.
+ */
+describe("turn.deliver contextTokens", () => {
+  const base = {
+    kind: "turn.deliver",
+    turnId: "t-1",
+    conversationId: "conv-1",
+    message: "hello",
+  };
+
+  it("carries a size, and is absent when the platform chose none", () => {
+    for (const contextTokens of [100_000, 200_000, 1_000_000]) {
+      const parsed = workItemSchema.parse({ ...base, contextTokens });
+      expect(parsed).toMatchObject({ contextTokens });
+    }
+    expect(workItemSchema.parse(base)).not.toHaveProperty("contextTokens");
+  });
+
+  it("refuses a size outside the sane bounds or not a whole number", () => {
+    for (const contextTokens of [9_999, 10_000_001, 150_000.5, -1, "1000000"]) {
+      expect(workItemSchema.safeParse({ ...base, contextTokens }).success).toBe(
+        false,
+      );
+      expect(
+        runnerWorkItemSchema.safeParse({
+          ...base,
+          sandboxId: "sb-1",
+          contextTokens,
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      workItemSchema.safeParse({ ...base, contextTokens: 10_000 }).success,
+    ).toBe(true);
+    expect(
+      workItemSchema.safeParse({ ...base, contextTokens: 10_000_000 }).success,
+    ).toBe(true);
+    // The runner refusals above are the size's, not a malformed item's.
+    expect(
+      runnerWorkItemSchema.safeParse({
+        ...base,
+        sandboxId: "sb-1",
+        contextTokens: 1_000_000,
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -416,6 +469,19 @@ describe("file.part + file.result (send_file wire)", () => {
     expect(
       supervisorMessageSchema.safeParse({ ...part, part: 0 }).success,
     ).toBe(false);
+  });
+
+  it("carries an optional purpose (send = staged), and refuses any other", () => {
+    expect(
+      supervisorMessageSchema.parse({ ...part, purpose: "send" }),
+    ).toMatchObject({
+      purpose: "send",
+    });
+    for (const purpose of ["reply", "elsewhere"]) {
+      expect(
+        supervisorMessageSchema.safeParse({ ...part, purpose }).success,
+      ).toBe(false);
+    }
   });
 
   it("a legal chunk frame stays under the runner WS's 256KB ceiling", () => {

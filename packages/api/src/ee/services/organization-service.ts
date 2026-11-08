@@ -8,7 +8,10 @@ import { ServiceError } from "../../services/errors";
 import { isEntitled } from "../../lib/entitlements";
 import { enterpriseLicenseMessage } from "../../lib/entitlements-guard";
 import { getStripe } from "../billing/stripe";
-import { findOrgLiveSubscriptions } from "../billing/plan-switch";
+import {
+  findOrgLiveSubscriptions,
+  isLiveSubscription,
+} from "../billing/plan-switch";
 import { deleteWorkspace } from "./workspace-service";
 import { assertCanCreateOrganization } from "./quota-service";
 import { logger } from "../../lib/logger";
@@ -147,7 +150,7 @@ export const deleteOrganization = async (
       // echo a just-canceled sub as active, and canceling a canceled sub
       // throws — re-read before the destructive act.
       const fresh = await stripe.subscriptions.retrieve(subscription.id);
-      if (fresh.status === "active" || fresh.status === "trialing") {
+      if (isLiveSubscription(fresh)) {
         await stripe.subscriptions.cancel(subscription.id);
       }
     }

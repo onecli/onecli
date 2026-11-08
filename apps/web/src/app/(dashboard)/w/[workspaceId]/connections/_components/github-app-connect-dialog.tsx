@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
 import {
@@ -28,6 +28,7 @@ import {
   useShareGitHubInstallation,
   useSharedGitHubInstallations,
 } from "@/hooks/use-github-app-share";
+import { useAgentGrants, useSetConnectionGrant } from "@/hooks/use-grants";
 
 export interface GitHubAppConnectDialogProps {
   open: boolean;
@@ -62,10 +63,36 @@ export const GitHubAppConnectDialog = ({
   const { data: installations = [], isPending: loadingInstallations } =
     useSharedGitHubInstallations(pageScope, open);
   const share = useShareGitHubInstallation(pageScope);
+  // An agent page can switch on a connection that already reaches this
+  // workspace (its own, or the org level's) instead of a dead "already here".
+  const { data: agentGrants } = useAgentGrants(
+    agentId ?? "",
+    !!agentId && open,
+  );
+  const turnOn = useSetConnectionGrant();
+  const grantedIds = useMemo(
+    () => new Set(agentGrants?.connections.map((c) => c.connectionId) ?? []),
+    [agentGrants],
+  );
 
   const handleOpenChange = (next: boolean) => {
     if (!next) setSelected(null);
     onOpenChange(next);
+  };
+
+  const turnOnForAgent = (inst: SharedGitHubInstallation) => {
+    const connectionId = inst.connectedHereIds?.[0];
+    if (!agentId || !connectionId) return;
+    turnOn.mutate(
+      { agentId, connectionId, input: { access: "default" } },
+      {
+        onSuccess: () => {
+          toast.success(`${inst.account ?? "GitHub"} turned on for this agent`);
+          handleOpenChange(false);
+          onConnected(connectionId);
+        },
+      },
+    );
   };
 
   const handleShare = () => {
@@ -135,15 +162,29 @@ export const GitHubAppConnectDialog = ({
                   // Already reaches this scope (its own, or the org level's):
                   // turned on per agent, never connected twice.
                   const here = inst.connectedHere > 0;
+                  const hereIds = inst.connectedHereIds ?? [];
+                  const canTurnOn = here && !!agentId && hereIds.length > 0;
+                  const alreadyOn =
+                    canTurnOn && hereIds.some((id) => grantedIds.has(id));
+                  const turningOn =
+                    turnOn.isPending &&
+                    hereIds.includes(turnOn.variables?.connectionId ?? "");
+                  const clickable = !here || (canTurnOn && !alreadyOn);
                   return (
                     <button
                       key={inst.sourceConnectionId}
                       type="button"
-                      disabled={here}
-                      onClick={() => setSelected(inst)}
+                      disabled={!clickable || turnOn.isPending}
+                      onClick={() => {
+                        if (canTurnOn) {
+                          turnOnForAgent(inst);
+                          return;
+                        }
+                        setSelected(inst);
+                      }}
                       className={cn(
                         "focus-visible:ring-ring flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none",
-                        here
+                        !clickable
                           ? "cursor-default bg-muted/30"
                           : "hover:bg-muted/50",
                       )}
@@ -171,16 +212,28 @@ export const GitHubAppConnectDialog = ({
                           {inst.account ?? "GitHub account"}
                         </p>
                         <p className="text-muted-foreground truncate text-xs">
-                          {here
-                            ? pageScope === "workspace"
-                              ? "Already available here · turn it on per agent"
-                              : "Already connected for the organization"
-                            : "Connected in another workspace · share it with the organization"}
+                          {alreadyOn
+                            ? "Already on for this agent"
+                            : canTurnOn
+                              ? "Already available here · turn it on for this agent"
+                              : here
+                                ? pageScope === "workspace"
+                                  ? "Already available here · turn it on per agent"
+                                  : "Already connected for the organization"
+                                : "Connected in another workspace · share it with the organization"}
                         </p>
                       </div>
-                      {!here && (
+                      {turningOn ? (
+                        <Loader2 className="text-muted-foreground size-4 shrink-0 animate-spin" />
+                      ) : canTurnOn && !alreadyOn ? (
+                        // Looks like a button on purpose: the whole row is
+                        // the click target, this says what the click does.
+                        <span className="border-brand/40 text-brand inline-flex h-6 shrink-0 items-center rounded-md border px-2 text-xs font-medium">
+                          Turn on
+                        </span>
+                      ) : !here ? (
                         <ChevronRight className="text-muted-foreground size-4 shrink-0" />
-                      )}
+                      ) : null}
                     </button>
                   );
                 })}

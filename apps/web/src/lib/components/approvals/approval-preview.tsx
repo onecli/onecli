@@ -18,15 +18,24 @@ export const ApprovalPreview = ({
   kind,
   details,
   bulk,
+  titled = false,
   className,
 }: {
   kind: ApprovalSummary["kind"];
   details: ApprovalDetail[];
   bulk?: ApprovalSummary["bulk"];
+  /** The card's title names the record (`summary.subject`). */
+  titled?: boolean;
   className?: string;
 }) => {
   if (bulk?.rows.length === 1) {
-    return <ApprovalRecordPreview bulk={bulk} className={className} />;
+    return (
+      <ApprovalRecordPreview
+        bulk={bulk}
+        titled={titled}
+        className={className}
+      />
+    );
   }
   if (bulk) return <ApprovalBulkPreview bulk={bulk} className={className} />;
   switch (kind) {

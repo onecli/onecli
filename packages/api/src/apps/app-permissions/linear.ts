@@ -8,6 +8,7 @@ import type { AppPermissionDefinition } from "./types";
 // allows all reads) - per-field granularity is not modeled.
 export const linearPermissions: AppPermissionDefinition = {
   provider: "linear",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

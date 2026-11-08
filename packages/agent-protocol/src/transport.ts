@@ -39,16 +39,49 @@ export const MAX_TOOL_ERROR_CHARS = 2_000;
  */
 export const MAX_TURN_CONTEXT_CHARS = 16_000;
 
+/**
+ * Bound for a harness session handle where it leaves the sandbox's trust
+ * zone (the runner wire, and back on dispatch). Opaque to everything above
+ * the adapter; bounded because it lands on the conversation row. The
+ * supervisor wire does not enforce it (an oversized ref must not sink the
+ * frame it rides on, a heartbeat or a terminal report): the runner forwards
+ * a ref only when it fits, and drops it otherwise.
+ */
+export const MAX_SESSION_REF_CHARS = 500;
+
+/** Bound for a scheduled task's gate command (one shell line or a script
+ * path, not a program). Shared by the control plane's zod and the wire. */
+export const MAX_CRON_GATE_CHARS = 2_000;
+
+/** Bound for the gate's plain-words description (what a person reads).
+ * Shared by the control plane's zod and the agent's tool schema. */
+export const MAX_CRON_GATE_DESCRIPTION_CHARS = 200;
+
+/**
+ * A conversation's context size on the wire: the tokens the harness keeps in
+ * the model's view. Bounded so a corrupt value can never ask for an absurd
+ * budget; the platform only ever sends one of its ladder sizes.
+ */
+export const contextTokensSchema = z.number().int().min(10_000).max(10_000_000);
+
 // The sync byte budget lives in sync-budget.ts (a leaf module — memory-file
 // needs it too, and transport imports memory-file's caps; see its header).
 // Imported for local use (the memory.write byte belt below) AND re-exported
 // so every existing import path keeps working.
 import {
+  MAX_SYNC_FILE_CHUNKS,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
+  SYNC_FILE_CHUNK_RAW_BYTES,
   syncFrameByteLength,
 } from "./sync-budget";
-export { MAX_SYNC_PART_BYTES, MAX_SYNC_PARTS, syncFrameByteLength };
+export {
+  MAX_SYNC_FILE_CHUNKS,
+  MAX_SYNC_PART_BYTES,
+  MAX_SYNC_PARTS,
+  SYNC_FILE_CHUNK_RAW_BYTES,
+  syncFrameByteLength,
+};
 
 import {
   ATTACHMENT_CHUNK_BASE64_CHARS,
@@ -103,6 +136,12 @@ export const MAX_LISTENING_PORTS_WIRE = 64;
  */
 export const DESKTOP_VIEW_PORT = 5900;
 export const DESKTOP_CONTROL_PORT = 5901;
+/** Maximum UTF-8 text bytes in one desktop clipboard transfer. */
+export const DESKTOP_CLIPBOARD_MAX_BYTES = 64 * 1024;
+/** Bounded protocol allowance for CRLF expansion, a terminator, and
+ * compression/framing overhead. Not a larger user-visible text limit. */
+export const DESKTOP_CLIPBOARD_MAX_WIRE_BYTES =
+  2 * DESKTOP_CLIPBOARD_MAX_BYTES + 1024;
 /** The person's name shown to the agent, bounded like every wire string. */
 export const MAX_DESKTOP_CONTROLLER_NAME_CHARS = 120;
 
@@ -217,8 +256,39 @@ export const homeRelativePathSchema = z
 export const homeSyncFileSchema = z.object({
   path: homeRelativePathSchema,
   content: z.string(),
+  /** Write it runnable (0555) instead of read-only (0444). An older
+   * supervisor ignores the flag and the file still lands, read-only. */
+  executable: z.literal(true).optional(),
 });
 export type HomeSyncFile = z.infer<typeof homeSyncFileSchema>;
+
+/**
+ * A skill file that is binary or too big for one frame, as raw bytes in
+ * base64. These ride their OWN `blobs` list, never `files`: an older runner
+ * or supervisor strips the unknown key and the file is simply absent there,
+ * never written scrambled. A big file arrives as `chunk.of` pieces, in
+ * order, each with the whole file's sha256; the writer joins them and
+ * checks the hash before landing the file.
+ */
+export const homeSyncBlobSchema = z.object({
+  path: homeRelativePathSchema,
+  dataBase64: z
+    .string()
+    .max(Math.ceil(SYNC_FILE_CHUNK_RAW_BYTES / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/),
+  executable: z.literal(true).optional(),
+  chunk: z
+    .object({
+      index: z.number().int().min(1),
+      of: z.number().int().min(2).max(MAX_SYNC_FILE_CHUNKS),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .refine((chunk) => chunk.index <= chunk.of, {
+      message: "chunk index past its count",
+    })
+    .optional(),
+});
+export type HomeSyncBlob = z.infer<typeof homeSyncBlobSchema>;
 
 /** Presence statuses the renderer distinguishes. `pending_setup` rows are
  * never sent: a half-finished attach is not a place the agent can be reached. */
@@ -255,8 +325,11 @@ export const agentChannelPresenceSchema = z.object({
    * unknown. */
   workspaceName: z.string().max(120).nullable(),
   /** How many conversations people granted this agent to read through
-   * "Connect your Slack" (a count only: no names, no ids). Drives whether
-   * the read tool is listed. Optional: older control planes omit it. */
+   * "Connect your Slack" (a count only: no names, no ids). Informational:
+   * the read tool no longer depends on it (it is listed with any live
+   * presence, and a read with nothing shared answers with an access card).
+   * Kept on the wire for older supervisor images. Optional: older control
+   * planes omit it. */
   readableConversations: z.number().int().min(0).max(10_000).optional(),
 });
 export type AgentChannelPresenceWire = z.infer<
@@ -300,6 +373,20 @@ export const MAX_AGENT_CONNECTION_API_HOST_CHARS = 100;
 export const MAX_AGENT_CONNECTION_ENDPOINTS = 3;
 export const MAX_AGENT_CONNECTION_ENDPOINT_CHARS = 80;
 export const MAX_AGENT_CONNECTION_DOCS_URL_CHARS = 160;
+/** A connection id: a UUID today; the cap leaves room, never meaning. */
+export const MAX_AGENT_CONNECTION_ID_CHARS = 64;
+
+/** The database engines the gateway's database front door speaks. */
+export const AGENT_DATABASE_ENGINES = ["postgres"] as const;
+
+/**
+ * Where a sandbox's libpq finds the agent's attached databases: the
+ * supervisor writes one service per connection and the agent's token as
+ * their password; the container-config payload points `PGSERVICEFILE` and
+ * `PGPASSFILE` here. One definition, so the two ends cannot drift.
+ */
+export const SANDBOX_PG_SERVICE_FILE = "/tmp/onecli-pg_service.conf";
+export const SANDBOX_PG_PASS_FILE = "/tmp/onecli-pgpass";
 
 /**
  * One app connection attached to this agent, for the supervisor's
@@ -369,6 +456,22 @@ export const agentConnectionSchema = z.object({
     .max(MAX_AGENT_CONNECTION_DOCS_URL_CHARS)
     .nullable()
     .optional(),
+  /**
+   * For a database connection: how a database client logs in through the
+   * gateway's database front door. The user name is this connection's id
+   * and the password is the agent's own OneCLI token, so nothing here is a
+   * secret. Absent for every other app, and from an older control plane.
+   */
+  database: z
+    .object({
+      engine: z.enum(AGENT_DATABASE_ENGINES),
+      connectionId: z
+        .string()
+        .min(1)
+        .max(MAX_AGENT_CONNECTION_ID_CHARS)
+        .regex(/^[A-Za-z0-9_-]+$/, "expected a connection id"),
+    })
+    .optional(),
 });
 export type AgentConnectionWire = z.infer<typeof agentConnectionSchema>;
 
@@ -436,6 +539,27 @@ export const SESSION_RESUME_GRACE_MS =
   SESSION_RESUME_BUDGET.maxAttempts * SESSION_RESUME_BUDGET.maxBackoffMs +
   30_000;
 
+/**
+ * The supervisor's own liveness check on its channel. A half-open socket
+ * (the runner process went away without a FIN reaching the sandbox: a
+ * host restart, a kill, a load balancer that dropped the flow) delivers no
+ * `close` and no `error`, ever; the WHATWG client exposes no ping event
+ * either. So the supervisor sends a sequenced `heartbeat` every
+ * `intervalMs` while connected and expects the runner's ack for SOME frame
+ * within `timeoutMs` of the last one it heard; past that it closes the
+ * socket itself, which puts it on the ordinary reconnect path. Seen live:
+ * a runner restart closed every channel; all but one supervisor saw the
+ * close and were back within a minute, the last one never saw anything,
+ * kept running happily, and was reported dead by the fresh runner's 3 min
+ * inherited grace as "channelless" while healthy and idle. The timeout is
+ * under that grace by design, so a supervisor notices its dead socket and
+ * redials before the runner gives up on it.
+ */
+export const CHANNEL_LIVENESS = {
+  intervalMs: 20_000,
+  timeoutMs: 75_000,
+} as const;
+
 export const workItemSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("turn.deliver"),
@@ -453,6 +577,17 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * restarted (`startSession({ resumeSessionRef })`).
      */
     resumeSessionRef: z.string().optional(),
+    /**
+     * Run this turn on a FRESH harness session and end that session with the
+     * turn: no resume, and nothing reused or kept live for the
+     * conversation's next turn. For a background turn whose conversation is
+     * a series of unrelated runs (a memory review), where carrying the last
+     * run's transcript into the next would only replay old work at full
+     * price. Absent = the ordinary per-conversation session. An OLD
+     * supervisor image strips the unknown field (non-strict parse) and runs
+     * the turn on the ordinary session: the cost, never the outcome, regresses.
+     */
+    ephemeralSession: z.literal(true).optional(),
     message: z.string(),
     /**
      * Delivery-only prompt context (step 8: the memory index + snippets),
@@ -462,6 +597,22 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      * non-strict parse silently drops it: the desired degrade.
      */
     context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+    /**
+     * A scheduled task's gate command, run before the harness (gate.ts). An
+     * OLD supervisor image strips it (non-strict parse) and runs the agent
+     * every fire: the cost, never the outcome, regresses.
+     */
+    gate: z.string().max(MAX_CRON_GATE_CHARS).optional(),
+    /**
+     * The context size this conversation runs at, chosen by the platform
+     * (context fit) and already clamped to what its credential allows. The
+     * supervisor applies it to the conversation's session before the turn.
+     * Absent = the session keeps the size it has (the harness's configured
+     * default for a session never sized). An OLD supervisor image strips it
+     * (non-strict parse) and the turn runs at the default: the fit, never
+     * the outcome, regresses.
+     */
+    contextTokens: contextTokensSchema.optional(),
     /**
      * The turn's user attachments, metadata only — the bytes arrived ahead
      * of this frame as `attachment.part`s on the same ordered socket. The
@@ -583,6 +734,8 @@ export const workItemSchema = z.discriminatedUnion("kind", [
     part: z.number().int().positive(),
     of: z.number().int().positive(),
     files: z.array(homeSyncFileSchema),
+    /** Binary or big skill files (see homeSyncBlobSchema). */
+    blobs: z.array(homeSyncBlobSchema).optional(),
     /** FINAL part only: the complete desired manifest under the managed
      * roots; everything else found there is pruned. */
     prune: z.array(homeRelativePathSchema).optional(),
@@ -792,6 +945,15 @@ export const supervisorMessageSchema = z
       kind: z.literal("progress"),
       turnId: z.string().min(1),
       conversationId: z.string().min(1),
+      /**
+       * The harness session this turn is running in, once it has one. The
+       * same handle `turn.result` carries at the end, sent early so the
+       * control plane holds it while the turn is still running: a sandbox
+       * that dies mid-turn never sends its `turn.result`, and without the
+       * ref the turn could not resume where it stopped. Additive-optional:
+       * an old runner strips it and an old supervisor never sends it.
+       */
+      sessionRef: z.string().optional(),
     }),
     z.object({
       kind: z.literal("turn.result"),
@@ -936,6 +1098,15 @@ export const supervisorMessageSchema = z
       sizeBytes: z.number().int().positive().max(MAX_OUTBOUND_ATTACHMENT_BYTES),
       sha256: z.string().regex(/^[0-9a-f]{64}$/),
       caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+      /**
+       * What the file is for. Absent = attach it to the calling turn's reply
+       * (send_file). "send" = STAGE it: stored under the same fence and caps
+       * but never shown under the reply, waiting for a send_message that
+       * names it (files to another conversation). Only sent to a runner
+       * advertising `stagedAttachments`: an older one strips the key and
+       * would attach the file to the reply instead.
+       */
+      purpose: z.literal("send").optional(),
       part: z.number().int().positive(),
       of: z.number().int().positive(),
       dataBase64: z
@@ -944,6 +1115,16 @@ export const supervisorMessageSchema = z
         .max(ATTACHMENT_CHUNK_BASE64_CHARS)
         .regex(/^[A-Za-z0-9+/]+={0,2}$/),
     }),
+    /**
+     * Channel liveness (`CHANNEL_LIVENESS`): sent on a timer while
+     * connected, carrying nothing. Its only value is the ack the runner
+     * answers every sequenced frame with: a supervisor that hears no ack
+     * for `timeoutMs` knows its socket is dead and redials. An old runner
+     * (no sessions) never sees one: a supervisor only sends it while it
+     * holds a session, and a bare `heartbeat` would fail its parse and be
+     * dropped, harmlessly.
+     */
+    z.object({ kind: z.literal("heartbeat") }),
     z.object({
       kind: z.literal("unhealthy"),
       /**
@@ -958,6 +1139,15 @@ export const supervisorMessageSchema = z
        * a fresh container.
        */
       reason: z.string().max(MAX_UNHEALTHY_REASON_CHARS),
+      /**
+       * Why, as a machine code (`failure-codes.ts`), when the supervisor
+       * knows one: `home_read_only` today. Open bounded string, never an
+       * enum, like every code on these wires; additive-optional, so an old
+       * runner strips it and the report degrades to today's plain stop.
+       * Untrusted like everything a supervisor says: the control plane
+       * only ever uses it to pick copy and to budget THIS sandbox.
+       */
+      code: z.string().max(64).optional(),
     }),
     /** The dial succeeded; bytes may flow both ways. */
     z.object({

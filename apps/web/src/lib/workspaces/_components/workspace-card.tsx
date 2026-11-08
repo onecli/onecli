@@ -30,16 +30,6 @@ import {
   DialogTitle,
 } from "@onecli/ui/components/dialog";
 import { UpgradeDialogShell } from "@/lib/components/upgrade-dialog-shell";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@onecli/ui/components/alert-dialog";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { UpgradeToTeamButton } from "@/ee/billing/_components/upgrade-to-team-button";
@@ -47,10 +37,10 @@ import { switchWorkspaceAction } from "../actions";
 import { getInitials } from "@/lib/user-display";
 import { isPlanAtLeast, type Plan } from "@onecli/api/ee/billing/plans";
 import type { WorkspaceOwner } from "@onecli/api/ee/services/workspace-service";
-import { useRenameWorkspace, useDeleteWorkspace } from "@/hooks/use-workspaces";
-import { setDefaultOrgCookie } from "@/lib/auth/set-active-scope";
+import { useRenameWorkspace } from "@/hooks/use-workspaces";
 import { usePlanGate } from "@/lib/plan-gate";
 import { WorkspaceAccessDialog } from "@/ee/workspaces/_components/workspace-access-dialog";
+import { useDeleteWorkspaceDialog } from "./delete-workspace-dialog";
 
 interface Props {
   id: string;
@@ -83,12 +73,11 @@ export const WorkspaceCard = ({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState(name ?? "");
   const renameWorkspace = useRenameWorkspace();
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
-  const deleteWorkspace = useDeleteWorkspace();
-
-  const canConfirmDelete =
-    confirmText.trim() === id && !deleteWorkspace.isPending;
+  const deleteDialog = useDeleteWorkspaceDialog({
+    workspaceId: id,
+    workspaceName: name,
+    organizationId,
+  });
 
   const handleRename = async () => {
     if (renameWorkspace.isPending) return;
@@ -97,23 +86,6 @@ export const WorkspaceCard = ({
     try {
       await renameWorkspace.mutateAsync({ id, name: trimmed });
       setRenameOpen(false);
-      router.refresh();
-    } catch {
-      // the hook already toasts the server reason
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!canConfirmDelete) return;
-    try {
-      await deleteWorkspace.mutateAsync(id);
-      // Close the confirm dialog at once so a second click during the async
-      // cookie write + redirect below can't fire a duplicate delete.
-      setDeleteOpen(false);
-      // Deleting the active workspace leaves its cookie dangling; pin the org and
-      // go to its workspace list.
-      await setDefaultOrgCookie(organizationId);
-      router.push(`/org/${organizationId}/workspaces`);
       router.refresh();
     } catch {
       // the hook already toasts the server reason
@@ -212,8 +184,7 @@ export const WorkspaceCard = ({
                     disabled={isLastWorkspace}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setConfirmText("");
-                      setDeleteOpen(true);
+                      deleteDialog.open();
                     }}
                     className="text-destructive focus:text-destructive"
                   >
@@ -291,53 +262,7 @@ export const WorkspaceCard = ({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog
-        open={deleteOpen}
-        onOpenChange={(o) => {
-          setDeleteOpen(o);
-          if (!o) setConfirmText("");
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this workspace?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This permanently deletes <b>{name ?? "this workspace"}</b> and all
-              data in it. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="grid gap-2 py-2">
-            <p className="text-sm font-medium">
-              Type{" "}
-              <code className="bg-muted cursor-text select-text rounded px-1.5 py-0.5 font-mono">
-                {id}
-              </code>{" "}
-              to confirm
-            </p>
-            <Input
-              placeholder="Enter the workspace ID"
-              value={confirmText}
-              onChange={(e) => setConfirmText(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteWorkspace.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                handleDelete();
-              }}
-              disabled={!canConfirmDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {deleteWorkspace.isPending ? "Deleting..." : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {deleteDialog.dialog}
     </>
   );
 };

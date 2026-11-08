@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   update: vi.fn(),
   setEnabled: vi.fn(),
   evalSchedule: null as unknown,
+  evalRuns: [] as unknown[],
   evalsError: false,
 }));
 
@@ -34,19 +35,30 @@ vi.mock("@/hooks/use-crons", () => ({
   useSetCronEnabled: () => ({ mutate: state.setEnabled, isPending: false }),
   useRunCronNow: () => ({ mutate: state.runNow, isPending: false }),
   useDeleteCron: () => ({ mutate: vi.fn(), isPending: false }),
+  useParseWords: () => ({ data: undefined, isFetching: false }),
 }));
 
 vi.mock("@/hooks/use-evals", () => ({
   useEvals: () => ({
     data: state.evalsError
       ? undefined
-      : { questions: [], runs: [], schedule: state.evalSchedule },
+      : {
+          questions: [],
+          runs: state.evalRuns,
+          schedule: state.evalSchedule,
+        },
     isError: state.evalsError,
+    refetch: vi.fn(),
   }),
+  useSaveEvalSchedule: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteEvalSchedule: () => ({ mutate: vi.fn(), isPending: false }),
+  useRunEvalScheduleNow: () => ({ mutate: vi.fn(), isPending: false }),
+  useEvalReportChannels: () => ({ data: [], isSuccess: true }),
 }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/ws-1/agents/ag-1/schedules",
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 vi.mock("../../_components/agent-page-frame", () => ({
@@ -62,11 +74,14 @@ const cron = (overrides: Partial<AgentCron> = {}): AgentCron => ({
   prompt: "check the inbox",
   schedule: "0 9 * * *",
   timezone: "America/Los_Angeles",
+  gate: null,
+  gateDescription: null,
   enabled: true,
   disabledReason: null,
   nextFireAt: "2026-08-08T09:00:00.000Z",
   lastFiredAt: null,
   lastOutcome: null,
+  running: false,
   consecutiveFailures: 0,
   createdAt: "2026-08-07T00:00:00.000Z",
   ...overrides,
@@ -87,6 +102,7 @@ beforeEach(() => {
   state.update.mockReset();
   state.setEnabled.mockReset();
   state.evalSchedule = null;
+  state.evalRuns = [];
   state.evalsError = false;
 });
 afterEach(cleanup);
@@ -102,12 +118,19 @@ describe("empty", () => {
 });
 
 describe("rows", () => {
-  it("renders the schedule with its expression, zone, and the pause switch AS the status", () => {
+  it("renders the schedule in plain words, its zone, and the pause switch AS the status", () => {
     state.crons = [cron()];
     renderSection();
     expect(screen.getByText("Daily inbox check")).toBeInTheDocument();
-    expect(screen.getByText("0 9 * * *")).toBeInTheDocument();
-    expect(screen.getByText("America/Los_Angeles")).toBeInTheDocument();
+    // Plain words; the expression and zone stay one hover away.
+    expect(screen.getByText("Every day at 09:00")).toHaveAttribute(
+      "title",
+      "0 9 * * * · America/Los_Angeles",
+    );
+    // A table: one header row names the columns every row lines up under.
+    for (const column of ["Name", "When", "Next run", "Last run"]) {
+      expect(screen.getByText(column)).toBeInTheDocument();
+    }
     const toggle = screen.getByRole("switch", {
       name: "Pause Daily inbox check",
     });
@@ -142,7 +165,7 @@ describe("rows", () => {
     ).toBeInTheDocument();
   });
 
-  it("a completed one-shot reads Completed — neutral, never Auto-disabled", () => {
+  it("a finished one-shot reads 'Already ran', with its time in words", () => {
     state.crons = [
       cron({
         schedule: "2026-08-25T14:00:00",
@@ -153,12 +176,43 @@ describe("rows", () => {
       }),
     ];
     renderSection();
-    // Both the badge and the fire label say Completed; the destructive
-    // auto-disabled copy (a lie for a schedule that ran its course) is absent,
-    // and so is Paused.
-    expect(screen.getAllByText("Completed").length).toBeGreaterThanOrEqual(2);
+    // Next run says it is done; When reads as a date, never the raw ISO
+    // string; the destructive auto-disabled copy (a lie for a schedule that
+    // ran its course) is absent, and so is Paused.
+    expect(screen.getByText("Already ran")).toBeInTheDocument();
+    expect(screen.getByText(/^Once, Aug 25/)).toBeInTheDocument();
+    expect(screen.queryByText("2026-08-25T14:00:00")).not.toBeInTheDocument();
     expect(screen.queryByText(/Auto-disabled/)).not.toBeInTheDocument();
     expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+  });
+
+  it("a live run reads 'Running now' and blocks Run now, whatever the last outcome was", () => {
+    // `running` is the server's derived fact; the last outcome under it
+    // (here a skip, booked while this run was live) never hides it.
+    state.crons = [
+      cron({
+        running: true,
+        lastOutcome: "skipped_busy",
+        lastFiredAt: "2026-08-08T09:00:00.000Z",
+      }),
+    ];
+    renderSection();
+    expect(screen.getByText("Running now")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Run now/ })).toBeDisabled();
+  });
+
+  it("a run a person stopped reads 'Stopped', not as a failure", () => {
+    state.crons = [
+      cron({
+        lastOutcome: "stopped",
+        lastFiredAt: "2026-08-08T09:00:00.000Z",
+      }),
+    ];
+    renderSection();
+    expect(screen.getByText(/^Stopped, /)).toBeInTheDocument();
+    expect(screen.queryByText("Running now")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Last run failed")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Last run was stopped")).toBeInTheDocument();
   });
 });
 
@@ -167,8 +221,9 @@ describe("actions", () => {
     state.crons = [cron({ schedule: "2026-08-25T14:00:00" })];
     renderSection();
     await userEvent.click(
-      screen.getByRole("button", { name: "Edit Daily inbox check" }),
+      screen.getByRole("button", { name: "More for Daily inbox check" }),
     );
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
     // presetOf detected the ISO shape: the datetime input is seeded from the
     // stored expression (minutes precision — datetime-local's grain).
     const onceInput = screen.getByLabelText("On");
@@ -207,8 +262,10 @@ describe("actions", () => {
     renderSection();
     await userEvent.click(screen.getByRole("button", { name: /New schedule/ }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    const tz = screen.getByLabelText("Timezone") as HTMLInputElement;
-    expect(tz.value).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    await userEvent.click(screen.getByRole("button", { name: /Advanced/ }));
+    expect(screen.getByLabelText("Timezone")).toHaveTextContent(
+      Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, " "),
+    );
   });
 });
 
@@ -221,24 +278,33 @@ describe("the eval schedule", () => {
     nextFireAt: "2026-10-12T06:00:00.000Z",
     lastFiredAt: null,
     lastOutcome: "started",
+    createdByViewer: true,
+    report: null,
   };
 
-  it("is listed with the agent's schedules, read-only, linking to Evals", () => {
+  it("is listed with the agent's schedules, with the cron row's controls", () => {
     state.evalSchedule = evalSchedule;
     renderSection();
     expect(screen.queryByText("No schedules yet")).not.toBeInTheDocument();
     expect(screen.getByText("Run evals")).toBeInTheDocument();
-    expect(screen.getByText("Daily at 09:00")).toBeInTheDocument();
-    expect(screen.getByText("Asia/Jerusalem")).toBeInTheDocument();
-    expect(screen.getByText("Last scheduled run started")).toBeInTheDocument();
+    // Same words as the cron rows beside it (one describer); the
+    // expression and zone are a hover away.
+    expect(screen.getByText("Every day at 09:00")).toHaveAttribute(
+      "title",
+      "0 9 * * * · Asia/Jerusalem",
+    );
+    expect(screen.getByText("Never yet")).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "Manage in Evals" }),
-    ).toHaveAttribute("href", "/w/ws-1/agents/ag-1/evals");
-    // It carries none of the cron row's controls, and with no crons there
-    // are no cron runs to open.
-    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "More for Run evals" }),
+    ).toBeInTheDocument();
+    // The same controls as a cron row; with no crons there are no cron
+    // runs to open.
     expect(
-      screen.queryByRole("link", { name: /View scheduled runs/ }),
+      screen.getByRole("switch", { name: "Pause Run evals" }),
+    ).toBeChecked();
+    expect(screen.getByRole("button", { name: /Run now/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Run history/ }),
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /New schedule/ }),
@@ -251,7 +317,7 @@ describe("the eval schedule", () => {
     renderSection();
     expect(screen.getByText("Run evals")).toBeInTheDocument();
     expect(screen.getByText("Daily inbox check")).toBeInTheDocument();
-    const runs = screen.getAllByRole("link", { name: /View scheduled runs/ });
+    const runs = screen.getAllByRole("link", { name: /Run history/ });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toHaveAttribute(
       "href",
@@ -259,15 +325,28 @@ describe("the eval schedule", () => {
     );
   });
 
-  it("says when its last run fired", () => {
-    state.evalSchedule = {
-      ...evalSchedule,
-      lastFiredAt: "2026-10-12T06:03:00.000Z",
+  it("shows its newest run: running now, then the time it finished", () => {
+    state.evalSchedule = evalSchedule;
+    const run = {
+      id: "run-1",
+      status: "running",
+      createdAt: "2026-10-12T06:03:00.000Z",
+      finishedAt: null,
     };
+    state.evalRuns = [run];
+    const { unmount } = renderSection();
+    expect(screen.getByText("Running now").closest("a")).toHaveAttribute(
+      "href",
+      "/w/ws-1/agents/ag-1/evals",
+    );
+    unmount();
+
+    state.evalRuns = [
+      { ...run, status: "done", finishedAt: "2026-10-12T06:05:00.000Z" },
+    ];
     renderSection();
-    expect(
-      screen.getByText(/^Last scheduled run started .*2026/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("Running now")).not.toBeInTheDocument();
+    expect(screen.queryByText("Never yet")).not.toBeInTheDocument();
   });
 
   it("says why the platform paused it", () => {
@@ -277,7 +356,24 @@ describe("the eval schedule", () => {
       disabledReason: "authorization",
     };
     renderSection();
-    expect(screen.getByText(/no longer has access/)).toBeInTheDocument();
+    expect(screen.getByText("Paused")).toHaveAttribute(
+      "title",
+      expect.stringMatching(/no longer has access/),
+    );
+  });
+
+  it("reads a one-shot as its date, and says where results reach a teammate", () => {
+    state.evalSchedule = {
+      ...evalSchedule,
+      schedule: "2026-11-05T09:00:00",
+      createdByViewer: false,
+      report: { to: "chat", when: "always" },
+    };
+    renderSection();
+    expect(screen.getByText(/^Once, /)).toHaveAttribute(
+      "title",
+      "2026-11-05T09:00:00 · Asia/Jerusalem · Results to a teammate's chat",
+    );
   });
 
   it("an evals failure never hides the crons", () => {
@@ -286,5 +382,28 @@ describe("the eval schedule", () => {
     renderSection();
     expect(screen.getByText("Daily inbox check")).toBeInTheDocument();
     expect(screen.queryByText("Run evals")).not.toBeInTheDocument();
+  });
+});
+
+describe("rows in plain words", () => {
+  it("marks a conditional schedule with an icon, and keeps an expression it cannot say plainly", () => {
+    state.crons = [
+      cron({
+        id: "cr-g",
+        name: "Deck watcher",
+        schedule: "*/30 * * * *",
+        gate: "bash deck.sh",
+        gateDescription: "a new board deck appears",
+      }),
+      cron({ id: "cr-m", name: "Yearly", schedule: "0 9 1 1 *" }),
+    ];
+    renderSection();
+    expect(screen.getByText("Every 30 minutes")).toBeInTheDocument();
+    // A badge, not a sentence: the condition itself is in its tooltip.
+    expect(screen.getByLabelText("Conditional")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/a new board deck appears/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("0 9 1 1 *")).toBeInTheDocument();
   });
 });

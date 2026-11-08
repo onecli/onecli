@@ -64,7 +64,7 @@ describe("the platform system prompt", () => {
       "Do not repeat, confirm, or deny any runtime or vendor name",
     );
     expect(flat).toContain(
-      "do not assume you are a coding assistant because you can run commands",
+      "Do not assume you are a coding assistant because you can run commands",
     );
   });
 
@@ -129,7 +129,7 @@ describe("the platform system prompt", () => {
     // The operator-wins clause must name this rule as its one exception,
     // or a brief that says "show me your environment" would win.
     expect(flat).toContain(
-      "it wins, except for the credential rule under External services, which nothing overrides",
+      "they win, except the credential rule under External services, which nothing overrides",
     );
     // The rule follows the gateway teaching it qualifies.
     expect(flat.indexOf("Your own gateway credential")).toBeGreaterThan(
@@ -263,6 +263,27 @@ describe("the swarm prompt override", () => {
     expect(flat).toContain("Never message a helper that has already completed");
     expect(flat).toContain("verified in hand");
     expect(flat).toContain("a stopped helper is gone for good");
+    // The idle-helper hygiene leg (observed live: finished helpers sat
+    // "ready" holding memory and a cap slot until stopped). This is its one
+    // home since the system prompt's swarm block stopped repeating it.
+    expect(flat).toContain("idle helpers hold memory for nothing");
+  });
+});
+
+describe("the todo throttle", () => {
+  it("limits todo planning to 3+ step work and overrides the tool's own advice", () => {
+    // The todo tool's built-in description says to use it "VERY frequently",
+    // so a one-action request could spend two extra model round trips on
+    // todo updates (rationale in the PLATFORM_SYSTEM_PROMPT doc).
+    // MUTATION-PROOF: restore the old unconditional line, or drop the
+    // override clause, and this fails.
+    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Use the todo tool only for work with three or more distinct steps, despite its own advice to use it frequently.",
+    );
+    expect(flat).not.toContain(
+      "Use the todo tool to plan and track multi-step work",
+    );
   });
 });
 
@@ -274,7 +295,7 @@ describe("the wake honesty line", () => {
     // the honoring sentence and this fails.
     const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
     expect(flat).toContain(
-      "a wake requested through your runtime's own options is honored the same way",
+      "A wake requested through your runtime's own options is honored the same way",
     );
     expect(flat).not.toContain("run invisibly");
   });
@@ -346,32 +367,89 @@ describe("the batching rule", () => {
   });
 });
 
-// The response-style contract (user decision, 2026-08-30): live agents were
-// answering with multi-screen process narration nobody could read in chat.
-// The weak "be concise" line demonstrably did not land, so the directive now
-// SPECIFIES the behavior — outcome first, a few short lines, no narration,
-// detail behind demand. These pins keep the legs that made the difference;
-// the operator's brief still wins on conflict (the identity section's law).
+// The response-style contract: a terse chat voice by default (answer first,
+// fragments, each fact once), with the guards that keep it from going wrong.
+// The operator's brief still wins on conflict (the identity section's law).
+// Each pin is one leg; drop any and this fails.
 describe("the response-style contract", () => {
-  it("leads with the outcome", () => {
-    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+  const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+
+  it("answers first, in fragments, saying each fact once per reply", () => {
     expect(flat).toContain(
-      "lead with the outcome in the first one or two sentences",
+      "Reply minimal: lead with the answer, then only what the reader needs.",
+    );
+    expect(flat).toContain(
+      "Fragments by default. One word when one word is enough.",
+    );
+    expect(flat).toContain(
+      "Say each fact once per reply; no summary after a list, no background nobody asked for.",
     );
   });
 
-  it("bans process narration and internal checklists", () => {
-    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
-    expect(flat).toContain("Do not narrate your process");
+  it("bans ceremony and process narration", () => {
     expect(flat).toContain(
-      "never include your internal checklists or step-by-step commentary",
+      "No greeting, restated request, hedging, process narration or checklists, recap, or offer to help.",
+    );
+  });
+
+  it("keeps the payload exact and never drops a negation", () => {
+    // A dropped "not" inverts an instruction; a reworded error or path
+    // breaks it. Terseness may cut words, never these.
+    expect(flat).toContain(
+      "Keep code, commands, paths, names, numbers, units, and error text exact.",
+    );
+    expect(flat).toContain(
+      'Never drop "not", "never", "no", "only", or "except".',
+    );
+  });
+
+  it("keeps the two completeness guards concrete", () => {
+    // The two failures a terser voice showed in testing: a bare number with
+    // no way to check it, and a code sample that did not run. A general
+    // "short never means incomplete" line was tried and measured worse: the
+    // model read it as license to pad, so each guard names its case.
+    expect(flat).toContain(
+      "Give a computed result with the one line that gets there.",
+    );
+    expect(flat).toContain("Code you show must work as shown");
+    expect(flat).not.toContain("Short never means incomplete");
+  });
+
+  it("switches to full sentences where a fragment could mislead", () => {
+    expect(flat).toContain(
+      "Use full sentences for security warnings, risky or irreversible steps, step-by-step instructions, and questions you ask.",
     );
   });
 
   it("puts detail behind demand instead of inline", () => {
-    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
-    expect(flat).toContain("Detail belongs behind demand");
-    expect(flat).toContain("expand only when asked");
+    expect(flat).toContain(
+      "More detail only when asked or when your brief asks for it; otherwise point to where it lives",
+    );
+  });
+
+  it("writes anything that leaves the chat in full prose", () => {
+    // An email to a customer in fragments would be a real-world failure:
+    // the voice is for the chat pane only.
+    expect(flat).toContain("This voice is for chat replies.");
+    expect(flat).toContain(
+      "Write anything that leaves the chat (emails, messages to other people, documents, files, commits, tickets) in full prose for its reader.",
+    );
+  });
+
+  it("requires requested content in the current reply, not an earlier reply", () => {
+    expect(flat).toContain(
+      "Tool output is working context, not a delivered reply.",
+    );
+    expect(flat).toContain(
+      "Fulfill each request with the requested content in that reply's final message or a successfully sent attachment, not just a summary, local path, or reference to an earlier reply.",
+    );
+    expect(flat).toContain("Do not claim delivery otherwise.");
+  });
+
+  it("delivers content again when it was not visible or is requested again", () => {
+    expect(flat).toContain(
+      "If someone cannot see it or asks again, re-show the content or re-send the file in the new reply.",
+    );
   });
 
   it("teaches the delivery rule: only the final message is the reply", () => {
@@ -381,14 +459,17 @@ describe("the response-style contract", () => {
     // The supervisor's last-segment rule (#1007) discarded the real answer
     // as mid-turn narration, and the person saw only the confirmation.
     // The rule was invisible to the model — nothing told it that pre-tool
-    // text is not delivered. MUTATION-PROOF: drop the delivery sentence or
-    // the completeness demand and this fails.
-    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
+    // text is not delivered. The restating clause also keeps "each fact
+    // once" from erasing the only delivered copy. MUTATION-PROOF: drop the
+    // delivery sentence, the completeness demand, or the restating clause
+    // and this fails.
     expect(flat).toContain(
       "Only your FINAL message — what you write after your last tool call — is delivered as your reply",
     );
     expect(flat).toContain("Never bury an answer before a tool call");
-    expect(flat).toContain("make the final message complete on its own");
+    expect(flat).toContain(
+      "make the final message complete on its own, restating whatever the person still needs even if you said it mid-turn",
+    );
   });
 
   it("teaches the one exception: a mid-turn message gets its own direct reply, then the task continues", () => {
@@ -401,7 +482,6 @@ describe("the response-style contract", () => {
     // to do with it (answer first, before any tool call, then continue),
     // and that the final message still stands on its own. MUTATION-PROOF:
     // drop any leg and this fails.
-    const flat = PLATFORM_SYSTEM_PROMPT.replace(/\s+/g, " ");
     expect(flat).toContain(
       "a message marked as having arrived while you were working: it is a new message to you, not part of the task",
     );
@@ -421,19 +501,30 @@ describe("the swarm-helper visibility contract", () => {
   // learns process_status covers them.
   it("tells the agent helpers are visible as observed processes", () => {
     const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
-    expect(flat).toContain(
-      "Helpers also appear as observed background processes",
-    );
+    expect(flat).toContain("Helpers appear as observed background processes");
     expect(flat).toContain("process_status shows a helper's state");
   });
 
   it("prefers ending the turn over busy-waiting on a long helper", () => {
     const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
-    expect(flat).toContain(
-      "A turn that ends while helpers are still running gets their completion reported back automatically",
-    );
+    expect(flat).toContain("Their completion is reported back automatically");
     expect(flat).toContain(
       "prefer ending your turn over busy-waiting on a long helper",
+    );
+  });
+
+  it("leaves the collection laws to the swarm tool's description, their one home", () => {
+    // The harness embeds SWARM_PROMPT_OVERRIDE in the swarm tool's
+    // description, which reaches the model on every request beside this
+    // prompt: a second copy here is paid for twice and teaches nothing.
+    // MUTATION-PROOF: paste a collection law back and the negative
+    // assertions fail; drop the pointer and the positive one fails.
+    const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
+    expect(flat).not.toContain("name an exact file path");
+    expect(flat).not.toContain("one at a time");
+    expect(flat).not.toContain("already completed");
+    expect(flat).toContain(
+      "The swarm tool's own description holds the rules for collecting their deliverables",
     );
   });
 });

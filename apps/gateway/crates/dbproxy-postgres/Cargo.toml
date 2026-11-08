@@ -1,0 +1,29 @@
+[package]
+name = "dbproxy-postgres"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "The PostgreSQL adapter of the gateway's database front door: the wire protocol, startup and upstream authentication, and the statement classifier."
+
+[dependencies]
+anyhow = { workspace = true }
+approval = { path = "../approval" }
+apps = { path = "../apps" }
+bytes = { workspace = true }
+ca = { path = "../ca" }
+cache = { path = "../cache" }
+context = { path = "../context" }
+db = { path = "../db" }
+dbproxy = { path = "../dbproxy" }
+pg_query = { workspace = true }
+postgres-protocol = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+shutdown = { path = "../shutdown" }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }

@@ -17,6 +17,7 @@ import {
 import {
   decideApprovalAtGateway,
   type GatewayDecisionResult,
+  type OpenedSimilarWindow,
 } from "./gateway-approvals";
 import { channelProvider } from "./registry";
 import type { ChannelProviderId } from "./types";
@@ -33,7 +34,11 @@ import { followApprovedResults } from "../approval-result-followup";
  */
 
 export type ChannelDecisionResult =
-  | { kind: "decided"; decidedByName: string }
+  | {
+      kind: "decided";
+      decidedByName: string;
+      similar?: OpenedSimilarWindow;
+    }
   | { kind: "already_settled" }
   | { kind: "refused"; message: string }
   | { kind: "unavailable"; message: string };
@@ -286,6 +291,8 @@ export const decideApprovalFromChannel = async (input: {
   presenceId: string;
   approvalId: string;
   decision: "approve" | "deny";
+  /** `similar`: the card's "Approve similar" button (approve only). */
+  scope?: "similar";
   clickerExternalUserId: string;
 }): Promise<ChannelDecisionResult> => {
   const resolved = await resolveClicker(
@@ -308,6 +315,7 @@ export const decideApprovalFromChannel = async (input: {
     serviceKey,
     approvalId: input.approvalId,
     decision: input.decision,
+    ...(input.scope && { scope: input.scope }),
   });
 
   if (result.outcome === "unauthorized") {
@@ -348,6 +356,8 @@ export const decideApprovalFromChannel = async (input: {
       agentId: presence.agent.id,
       presenceId: presence.id,
       decision: input.decision,
+      ...(input.scope && { scope: input.scope }),
+      ...(result.similar && { similarUntil: result.similar.until }),
     },
   });
 
@@ -361,5 +371,9 @@ export const decideApprovalFromChannel = async (input: {
       decidedByName,
     });
   }
-  return { kind: "decided", decidedByName };
+  return {
+    kind: "decided",
+    decidedByName,
+    ...(result.similar && { similar: result.similar }),
+  };
 };

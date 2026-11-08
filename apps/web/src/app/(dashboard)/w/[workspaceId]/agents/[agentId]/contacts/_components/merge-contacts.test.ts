@@ -1,17 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { AgentChannelPresence, AgentContact } from "@/lib/api";
-import { mergeChannels, mergePeople, namesOf } from "./merge-contacts";
+import type { AgentChannelPresence } from "@/lib/api";
+import { mergeChannels, mergePeople, nameOf } from "./merge-contacts";
 
 /**
- * The merge is the fix: the same human used to render twice ("@akim" from
- * the inbound reach row, "Alex Kim" from the outbound address book). Both
- * records carry the provider id, so they must land on ONE entry; anything
- * present on only one side still gets its own entry with the other half
- * null; and kinds never cross (a channel contact is not a person).
+ * One entry per provider id: a person or channel carried by several live
+ * presences shows once, and people and channels never cross.
  */
 
 const presence = (
-  people: { ref: string; label: string | null }[],
+  people: { ref: string; label: string | null; isOwner?: boolean }[],
   spaces: { ref: string; label: string | null }[] = [],
 ): AgentChannelPresence =>
   ({
@@ -22,6 +19,7 @@ const presence = (
       label: p.label,
       state: "approved",
       decidedAt: null,
+      isOwner: p.isOwner ?? false,
     })),
     spaces: spaces.map((s) => ({
       externalRef: s.ref,
@@ -31,84 +29,50 @@ const presence = (
     })),
   }) as unknown as AgentChannelPresence;
 
-const contact = (
-  kind: AgentContact["kind"],
-  ref: string,
-  displayName: string,
-): AgentContact => ({
-  id: `c-${ref}`,
-  kind,
-  externalRef: ref,
-  displayName,
-  policy: "allow",
-  updatedAt: "2026-10-01T00:00:00Z",
-});
-
 describe("mergePeople", () => {
-  it("one entry per Slack user: the reach row and the contact merge on the id", () => {
-    const merged = mergePeople(
-      [presence([{ ref: "U1", label: "@akim" }])],
-      [contact("person", "U1", "Alex Kim")],
-    );
-    expect(merged).toHaveLength(1);
-    expect(merged[0]!.reach?.value.externalRef).toBe("U1");
-    expect(merged[0]!.contact?.id).toBe("c-U1");
-  });
-
-  it("a one-sided record still gets its own entry, the other half null", () => {
-    const merged = mergePeople(
-      [presence([{ ref: "U1", label: "@dana" }])],
-      [contact("person", "U2", "Ray")],
-    );
+  it("one entry per Slack user, even across presences", () => {
+    const merged = mergePeople([
+      presence([{ ref: "U1", label: "dana" }]),
+      presence([
+        { ref: "U1", label: "dana" },
+        { ref: "U2", label: "ray" },
+      ]),
+    ]);
     expect(merged.map((e) => e.key)).toEqual(["U1", "U2"]);
-    expect(merged[0]!.contact).toBeNull();
-    expect(merged[1]!.reach).toBeNull();
   });
 
-  it("kinds never cross: channel and app contacts are not people", () => {
-    const merged = mergePeople(
-      [presence([])],
-      [contact("channel", "C1", "#ops"), contact("app", "B1", "Jira")],
+  it("workspace owners are always first, whichever presence carries them", () => {
+    const merged = mergePeople([
+      presence([{ ref: "U1", label: "dana" }]),
+      presence([
+        { ref: "U2", label: "ray" },
+        { ref: "U-OWNER", label: "olive", isOwner: true },
+      ]),
+    ]);
+    expect(merged.map((e) => e.key)).toEqual(["U-OWNER", "U1", "U2"]);
+  });
+
+  it("channels are not people", () => {
+    expect(mergePeople([presence([], [{ ref: "C1", label: "#ops" }])])).toEqual(
+      [],
     );
-    expect(merged).toEqual([]);
   });
 });
 
 describe("mergeChannels", () => {
-  it("merges the channel reach row with the channel contact on the id", () => {
-    const merged = mergeChannels(
-      [presence([], [{ ref: "C1", label: "#team" }])],
-      [contact("channel", "C1", "#team"), contact("person", "U1", "Alex Kim")],
-    );
-    expect(merged).toHaveLength(1);
-    expect(merged[0]!.contact?.id).toBe("c-C1");
+  it("one entry per channel; people are not channels", () => {
+    const merged = mergeChannels([
+      presence([{ ref: "U1", label: "dana" }], [{ ref: "C1", label: "#team" }]),
+    ]);
+    expect(merged.map((e) => e.key)).toEqual(["C1"]);
   });
 });
 
-describe("namesOf", () => {
-  it("the real name is the title and the handle the subtitle", () => {
-    const [entry] = mergePeople(
-      [presence([{ ref: "U1", label: "@alexk" }])],
-      [contact("person", "U1", "Alex Kim")],
-    );
-    expect(namesOf(entry!)).toEqual({ title: "Alex Kim", subtitle: "@alexk" });
-  });
-
-  it("drops the subtitle when it only repeats the title", () => {
-    const [entry] = mergePeople(
-      [presence([{ ref: "U1", label: "@alex" }])],
-      [contact("person", "U1", "Alex")],
-    );
-    expect(namesOf(entry!)).toEqual({ title: "Alex", subtitle: null });
-  });
-
-  it("falls back to the handle, then the raw id", () => {
-    const [handleOnly] = mergePeople(
-      [presence([{ ref: "U1", label: "@dana" }])],
-      [],
-    );
-    expect(namesOf(handleOnly!).title).toBe("@dana");
-    const [idOnly] = mergePeople([presence([{ ref: "U9", label: null }])], []);
-    expect(namesOf(idOnly!).title).toBe("U9");
+describe("nameOf", () => {
+  it("the label is the name, falling back to the raw id", () => {
+    const [labelled] = mergePeople([presence([{ ref: "U1", label: "dana" }])]);
+    expect(nameOf(labelled!)).toBe("dana");
+    const [idOnly] = mergePeople([presence([{ ref: "U9", label: null }])]);
+    expect(nameOf(idOnly!)).toBe("U9");
   });
 });

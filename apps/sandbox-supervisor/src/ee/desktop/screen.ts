@@ -2,6 +2,7 @@ import { connect } from "node:net";
 import type { ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
+  DESKTOP_CLIPBOARD_MAX_WIRE_BYTES,
   DESKTOP_CONTROL_PORT,
   DESKTOP_VIEW_PORT,
 } from "@onecli/agent-protocol";
@@ -81,6 +82,10 @@ const serverArgs = (display: string, port: number, input: boolean) => {
     `-AcceptKeyEvents=${accept}`,
     `-AcceptCutText=${accept}`,
     `-SendCutText=${accept}`,
+    // Clipboard only: selecting text must neither send nor overwrite PRIMARY.
+    "-SendPrimary=0",
+    "-SetPrimary=0",
+    `-MaxCutText=${DESKTOP_CLIPBOARD_MAX_WIRE_BYTES}`,
     "-AcceptSetDesktopSize=0",
     "-FrameRate",
     "60",

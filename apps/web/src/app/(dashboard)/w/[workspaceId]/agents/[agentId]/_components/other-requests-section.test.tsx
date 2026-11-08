@@ -83,10 +83,10 @@ describe("OtherRequestsSection", () => {
     expect(screen.getByTestId("state").textContent).toBe("ask/never");
   });
 
-  it("moves both rows together through Always allow when the app blocks unlisted requests", async () => {
+  it("sets Always allow on both rows at once when the app blocks unlisted requests", async () => {
     render(
       <Harness
-        initial={{ otherReads: "ask", otherWrites: "ask" }}
+        initial={{ otherReads: "ask", otherWrites: "never" }}
         unlisted="block"
         allToolsAllowed
       />,
@@ -94,11 +94,24 @@ describe("OtherRequestsSection", () => {
     // Always allow there IS full access, which covers both rows at once.
     await userEvent.click(option("Other reads", "Always allow"));
     expect(screen.getByTestId("state").textContent).toBe("allow/allow");
-    // And leaving it on one row leaves it on both.
+  });
+
+  it("never copies one row's pick onto the other when the app blocks unlisted requests", async () => {
+    render(
+      <Harness
+        initial={{ otherReads: "allow", otherWrites: "allow" }}
+        unlisted="block"
+        allToolsAllowed
+      />,
+    );
+    // Leaving Always allow on one row takes the other off it (a customized
+    // grant can't allow either), down to Needs approval, not to Never.
     await userEvent.click(option("Other writes", "Never"));
-    expect(screen.getByTestId("state").textContent).toBe("never/never");
-    // Below Always allow the rows stay independent.
-    await userEvent.click(option("Other reads", "Needs approval"));
     expect(screen.getByTestId("state").textContent).toBe("ask/never");
+    // Below Always allow the rows are independent.
+    await userEvent.click(option("Other reads", "Never"));
+    expect(screen.getByTestId("state").textContent).toBe("never/never");
+    await userEvent.click(option("Other writes", "Needs approval"));
+    expect(screen.getByTestId("state").textContent).toBe("never/ask");
   });
 });

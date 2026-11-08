@@ -64,10 +64,9 @@ export const AttachParamDialog = () => {
       if (!connected || !claimed.current.has(connected)) return;
       claimed.current.delete(connected);
       // The pool changed even without a fresh id, and the account arrives
-      // switched on (reads allowed, writes and anything else needing
-      // approval) for this agent (the API's connecting-agent grant): refresh
-      // the list, the grant views and the count badges, like the in-chat card
-      // does.
+      // switched on with the default attach for this agent (the API's
+      // connecting-agent grant): refresh the list, the grant views and the
+      // count badges, like the in-chat card does.
       invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
     },

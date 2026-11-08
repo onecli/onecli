@@ -1,4 +1,4 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import { toolFactory, type AppPermissionDefinition } from "./types";
 
 // Onyx Cloud API (docs.onyx.app/developers), paths from the OpenAPI the
 // server publishes at cloud.onyx.app/api/openapi.json. The API answers under
@@ -13,22 +13,7 @@ import type { AppPermissionDefinition, AppTool } from "./types";
 // side effect of a REST grant.
 const HOST = "cloud.onyx.app";
 
-const tool = (
-  id: string,
-  name: string,
-  description: string,
-  pathPattern: string,
-  methods: string[],
-  aliasPatterns?: string[],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+const tool = toolFactory(HOST);
 
 export const onyxPermissions: AppPermissionDefinition = {
   provider: "onyx",

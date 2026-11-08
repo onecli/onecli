@@ -6,6 +6,8 @@ use hyper::header::HeaderValue;
 use hyper::{Response, StatusCode};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
+use approval::hold::Rejection;
+
 use crate::connect::{InactiveApp, SecretKind};
 
 /// 407 Proxy Authentication Required — agent token is missing or invalid.
@@ -61,6 +63,12 @@ pub const ERROR_ACCESS_RESTRICTED: &str = "access_restricted";
 pub const ERROR_CREDENTIAL_NOT_FOUND: &str = "credential_not_found";
 /// A host-bound connection exists, but the request went to another host.
 pub const ERROR_CONNECTION_HOST_MISMATCH: &str = "connection_host_mismatch";
+/// The agent holds a credential for this host, but its value could not be
+/// produced, so nothing was injected.
+pub const ERROR_CREDENTIAL_UNAVAILABLE: &str = "credential_unavailable";
+/// The connection's provider refused its stored credential for good: only
+/// the user reconnecting the account fixes it.
+pub const ERROR_CONNECTION_NEEDS_RECONNECT: &str = "connection_needs_reconnect";
 
 // The dashboard-URL resolution lives in `crate::context` (shared with `main`'s
 // startup warnings and the ee agent-facing responses); re-exported so existing
@@ -224,14 +232,30 @@ pub fn app_not_connected_unknown_provider<S>(
     ))
 }
 
+/// The page a secret of `kind` is managed on for this agent, and the noun the
+/// message calls it. Without an agent id, each kind falls back to its
+/// workspace list.
+fn secret_page(kind: SecretKind, agent_id: Option<&str>) -> (String, &'static str) {
+    let agent_page = |section: &str, workspace_list: &str| match agent_id {
+        Some(agent) => format!("/agents/{agent}{section}"),
+        None => workspace_list.to_string(),
+    };
+    match kind {
+        SecretKind::Custom => (
+            agent_page("/connections?tab=custom", "/connections/custom"),
+            "secret",
+        ),
+        SecretKind::LlmKey => (agent_page("/models", "/connections/llms"), "key"),
+    }
+}
+
 /// JSON error response when a secret exists for a host but this agent was not
 /// granted it.
 ///
 /// `kind` alone decides the link, because each kind is attached to an agent on
 /// a different page. The host never does: a custom secret on a host a
 /// registered app also serves (`app.posthog.com`) has no account on that app's
-/// page to attach. Without an agent id, each kind falls back to its workspace
-/// list.
+/// page to attach.
 pub fn secret_access_restricted<S>(
     status: StatusCode,
     kind: SecretKind,
@@ -242,23 +266,42 @@ pub fn secret_access_restricted<S>(
 ) -> Response<ForwardBody<S>> {
     let (provider, display_name) =
         apps::guidance_provider_for(hostname, path).unwrap_or((hostname, hostname));
-    let agent_page = |section: &str, workspace_list: &str| match agent_id {
-        Some(agent) => format!("/agents/{agent}{section}"),
-        None => workspace_list.to_string(),
-    };
-    let (page, noun) = match kind {
-        SecretKind::Custom => (
-            agent_page("/connections?tab=custom", "/connections/custom"),
-            "secret",
-        ),
-        SecretKind::LlmKey => (agent_page("/models", "/connections/llms"), "key"),
-    };
+    let (page, noun) = secret_page(kind, agent_id);
     let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": ERROR_ACCESS_RESTRICTED,
             "message": format!("{display_name} credentials exist in OneCLI but this agent does not have access. Ask the user to attach the {noun} to this agent: {manage_url}"),
+            "provider": provider,
+            "manage_url": manage_url,
+        }),
+    ))
+}
+
+/// JSON error response when the agent WAS granted a secret for this host but
+/// its value could not be produced (a decrypt failure, an unresolved
+/// 1Password reference), so the request went out without it. Never
+/// `access_restricted`: telling the user to attach a key the agent already
+/// holds sends them to the wrong fix. Keeps the upstream status and links the
+/// same page `secret_access_restricted` would, where the value is re-entered.
+pub fn credential_unavailable<S>(
+    status: StatusCode,
+    kind: SecretKind,
+    hostname: &str,
+    path: &str,
+    workspace_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> Response<ForwardBody<S>> {
+    let (provider, display_name) =
+        apps::guidance_provider_for(hostname, path).unwrap_or((hostname, hostname));
+    let (page, noun) = secret_page(kind, agent_id);
+    let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
+    with_no_retry(json_error(
+        status,
+        serde_json::json!({
+            "error": ERROR_CREDENTIAL_UNAVAILABLE,
+            "message": format!("This agent has a {display_name} {noun} in OneCLI, but its stored value could not be read, so the request was sent without it. Ask the user to re-enter the {noun}: {manage_url}"),
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -570,7 +613,7 @@ fn connection_needs_reconnect_json(
         .map(|l| format!(" ({l})"))
         .unwrap_or_default();
     serde_json::json!({
-        "error": "connection_needs_reconnect",
+        "error": ERROR_CONNECTION_NEEDS_RECONNECT,
         "message": format!(
             "The {display} connection{account} has expired and must be reconnected: \
              {display} rejected its saved login, so OneCLI did not send this request. \
@@ -710,29 +753,18 @@ pub fn upstream_timeout<S>() -> Response<ForwardBody<S>> {
     ))
 }
 
-/// The outcome applies only to the held request, not future user-directed requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalRejection {
-    Declined,
-    Expired,
-    /// The person's newer message changed what they want: the agent reads it
-    /// and sends a revised request.
-    Superseded,
-}
-
 /// 403 Forbidden with automatic retries disabled; a new user request needs fresh approval.
+/// The outcome applies only to the held request, not future user-directed requests.
 pub fn manual_approval_denied<S>(
     approval_id: &str,
-    outcome: ApprovalRejection,
+    outcome: Rejection,
 ) -> Response<ForwardBody<S>> {
     let (reason, description) = match outcome {
-        ApprovalRejection::Declined => ("declined", "The reviewer declined this approval request."),
-        ApprovalRejection::Expired => {
-            ("expired", "This approval request expired without approval.")
-        }
+        Rejection::Declined => ("declined", "The reviewer declined this approval request."),
+        Rejection::Expired => ("expired", "This approval request expired without approval."),
         // The person changed what they want: the agent must read that and
         // revise, so the generic "ask before retrying" advice does not apply.
-        ApprovalRejection::Superseded => {
+        Rejection::Superseded => {
             return with_no_retry(json_error(
                 StatusCode::FORBIDDEN,
                 serde_json::json!({
@@ -819,18 +851,31 @@ pub fn method_override_refused<S>(
     ))
 }
 
+/// The dashboard page where this agent's access is reviewed: its own
+/// Connections section (grants are changed there), or the workspace's agents
+/// page when no agent is known. A policy block is the agent's, so the link
+/// names it instead of landing on whichever agent the workspace opens first.
+fn agent_access_url(agent_id: Option<&str>, workspace_id: Option<&str>) -> String {
+    let page = match agent_id {
+        Some(agent) => format!("/agents/{agent}/connections"),
+        None => "/agents".to_string(),
+    };
+    scoped_url(dashboard_url(), &page, workspace_id)
+}
+
 /// 403 Forbidden — request blocked by a policy rule.
 pub fn blocked_by_policy<S>(
     method: &str,
     path: &str,
     rule_name: &str,
+    agent_id: Option<&str>,
     workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    // The agents page: a workspace-scope block now comes from the agent's own
-    // grants (changeable there) or from an organization guardrail (which a
-    // workspace member cannot change at all) — so the link informs rather than
+    // A workspace-scope block comes from the agent's own grants (changeable
+    // on its page) or from an organization guardrail (which a workspace
+    // member cannot change at all) — so the link informs rather than
     // promising an edit.
-    let agents_url = scoped_url(dashboard_url(), "/agents", workspace_id);
+    let access_url = agent_access_url(agent_id, workspace_id);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
         serde_json::json!({
@@ -843,7 +888,7 @@ pub fn blocked_by_policy<S>(
             "rule_name": rule_name,
             "method": method,
             "path": path,
-            "dashboard_url": agents_url,
+            "dashboard_url": access_url,
         }),
     ))
 }
@@ -853,9 +898,10 @@ pub fn blocked_by_default_policy<S>(
     method: &str,
     path: &str,
     host: &str,
+    agent_id: Option<&str>,
     workspace_id: Option<&str>,
 ) -> Response<ForwardBody<S>> {
-    let agents_url = scoped_url(dashboard_url(), "/agents", workspace_id);
+    let access_url = agent_access_url(agent_id, workspace_id);
     let hostname = host.split(':').next().unwrap_or(host);
     with_no_retry(json_error(
         StatusCode::FORBIDDEN,
@@ -870,7 +916,7 @@ pub fn blocked_by_default_policy<S>(
             "method": method,
             "host": hostname,
             "path": path,
-            "dashboard_url": agents_url,
+            "dashboard_url": access_url,
         }),
     ))
 }
@@ -1351,6 +1397,34 @@ mod tests {
         );
     }
 
+    /// A granted key that could not be read: its own code (never
+    /// `access_restricted`), the upstream status kept, non-retryable, and the
+    /// same page `secret_access_restricted` links for that kind, where the key
+    /// is re-entered.
+    #[tokio::test]
+    async fn credential_unavailable_says_reenter_and_links_the_same_page() {
+        let resp: Response<TestBody> = credential_unavailable(
+            StatusCode::UNAUTHORIZED,
+            SecretKind::LlmKey,
+            "api.anthropic.com",
+            "/v1/messages",
+            Some("ws1"),
+            Some("ag-1"),
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], ERROR_CREDENTIAL_UNAVAILABLE);
+        let manage_url = json["manage_url"].as_str().unwrap();
+        assert_eq!(
+            manage_url,
+            format!("{}/w/ws1/agents/ag-1/models", dashboard_url())
+        );
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("re-enter the key"), "{message}");
+        assert!(!message.contains("does not have access"), "{message}");
+    }
+
     #[tokio::test]
     async fn credential_not_found_includes_host_and_secret_url() {
         let resp: Response<TestBody> = credential_not_found(
@@ -1533,8 +1607,7 @@ mod tests {
 
     #[test]
     fn manual_approval_denied_has_correct_status_and_headers() {
-        let resp: Response<TestBody> =
-            manual_approval_denied("approval-123", ApprovalRejection::Declined);
+        let resp: Response<TestBody> = manual_approval_denied("approval-123", Rejection::Declined);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
@@ -1546,8 +1619,7 @@ mod tests {
     #[tokio::test]
     async fn superseded_rejection_tells_the_agent_to_revise() {
         use http_body_util::BodyExt;
-        let resp: Response<TestBody> =
-            manual_approval_denied("approval-9", ApprovalRejection::Superseded);
+        let resp: Response<TestBody> = manual_approval_denied("approval-9", Rejection::Superseded);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
         let bytes = match resp.into_body() {
@@ -1574,12 +1646,12 @@ mod tests {
         use http_body_util::BodyExt;
         for (outcome, reason, description) in [
             (
-                ApprovalRejection::Declined,
+                Rejection::Declined,
                 "declined",
                 "The reviewer declined this approval request.",
             ),
             (
-                ApprovalRejection::Expired,
+                Rejection::Expired,
                 "expired",
                 "This approval request expired without approval.",
             ),
@@ -1644,13 +1716,44 @@ mod tests {
     #[test]
     fn blocked_by_policy_has_correct_status_and_headers() {
         let resp: Response<TestBody> =
-            blocked_by_policy("POST", "/api/v1/send", "Block sending", None);
+            blocked_by_policy("POST", "/api/v1/send", "Block sending", None, None);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
         assert_eq!(resp.headers().get("x-should-retry").unwrap(), "false");
+    }
+
+    /// A policy block links to the BLOCKED agent's Connections page: the
+    /// workspace's agents page forwards to its oldest agent, which may be
+    /// another one. Without an agent id it falls back to the agents page.
+    #[tokio::test]
+    async fn policy_blocks_link_to_the_blocked_agents_access() {
+        let base = dashboard_url();
+        let rule: Response<TestBody> =
+            blocked_by_policy("POST", "/send", "Block sending", Some("ag-1"), Some("ws1"));
+        assert_eq!(
+            body_json(rule).await["dashboard_url"],
+            format!("{base}/w/ws1/agents/ag-1/connections")
+        );
+        let deny: Response<TestBody> = blocked_by_default_policy(
+            "GET",
+            "/v1/x",
+            "api.example.com:443",
+            Some("ag-1"),
+            Some("ws1"),
+        );
+        assert_eq!(
+            body_json(deny).await["dashboard_url"],
+            format!("{base}/w/ws1/agents/ag-1/connections")
+        );
+        let unknown: Response<TestBody> =
+            blocked_by_policy("POST", "/send", "Block sending", None, Some("ws1"));
+        assert_eq!(
+            body_json(unknown).await["dashboard_url"],
+            format!("{base}/w/ws1/agents")
+        );
     }
 
     #[tokio::test]

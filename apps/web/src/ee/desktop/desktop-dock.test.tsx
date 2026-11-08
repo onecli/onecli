@@ -50,6 +50,7 @@ vi.mock("./desktop-view", () => ({
       () => ({
         focus: () => canvas.current?.focus(),
         openKeyboard: () => undefined,
+        cancelClipboard: () => undefined,
       }),
       [],
     );

@@ -25,9 +25,8 @@ const log = logger.child({ component: "agent-reach" });
  * v1 ships SPACE grants ("may the agent answer everyone in this channel"),
  * created pending on invite (and lazily on the first refused stranger),
  * decided from the owner-DM card or the dashboard. `external_user` rows
- * (the person knock) are the designed follow-up on this same table, with
- * the precedence law reserved: a person-level denied beats a space-level
- * approved.
+ * (the person knock) govern DIRECT messages only: a channel answers by its
+ * own space row, never by a person row (one setting per surface).
  *
  * The owner-DM card is PLATFORM-composed and rides the presence's own bot
  * token - the agent's model never sees a grant request, and the bot-authored
@@ -44,16 +43,8 @@ export const REACH_STATES = [
   "pending",
   // "Allow anyone here": everyone in the channel (same provider tenant).
   "approved",
-  // "OneCLI users only": the identity lane alone - today's historical
-  // default, now an explicit decision.
-  "members_only",
   // "Don't allow": the agent stays silent in this channel entirely.
   "blocked",
-  // Legacy decisions, read-compatible: both meant "identity lane only",
-  // which is exactly `members_only`. Normalized on read (normalizeState)
-  // so no backfill is needed and old rows keep behaving.
-  "denied",
-  "revoked",
   // The bot was removed from the channel: the row is parked (hidden from
   // the view, inert in the guest lane) with its decision history kept. A
   // re-invite re-knocks - the room's population may have changed since the
@@ -68,25 +59,23 @@ export const REACH_STATES = [
 ] as const;
 export type ReachState = (typeof REACH_STATES)[number];
 
-/** The states a channel can be SETTLED into by a human decision. */
-export const REACH_DECISIONS = ["approved", "members_only", "blocked"] as const;
+/** The states a channel (or person) can be SETTLED into by a human
+ * decision: answer, or stay silent. */
+export const REACH_DECISIONS = ["approved", "blocked"] as const;
 export type ReachDecision = (typeof REACH_DECISIONS)[number];
 
-/**
- * Read-normalization for the legacy vocabulary: `denied` and `revoked` both
- * meant "identity lane only", which is `members_only` in the settled model.
- * Applied at every read so old rows behave and no backfill is needed.
- */
-export const normalizeState = (raw: string): ReachState =>
-  raw === "denied" || raw === "revoked" ? "members_only" : (raw as ReachState);
+/** A stored state as the typed union, parsed rather than cast: the column
+ * is a free string, and a value this build does not know (a retired
+ * spelling an older release still writes mid-deploy, a typo in a hand fix)
+ * reads as `blocked`. Unknown fails CLOSED: silence, never an open door,
+ * and Contacts shows it as Never so the owner can change it. */
+const isReachState = (raw: string): raw is ReachState =>
+  (REACH_STATES as readonly string[]).includes(raw);
+export const parseState = (raw: string): ReachState =>
+  isReachState(raw) ? raw : "blocked";
 
 /** Does this settlement let the agent speak to anyone at all here? */
-export const isSettled = (state: ReachState): boolean =>
-  state === "approved" || state === "members_only";
-
-/** The STORED states `isSettled` accepts (legacy spellings included), for a
- * guard that has to run inside the query. */
-const SETTLED_STATES = ["approved", "members_only", "denied", "revoked"];
+export const isSettled = (state: ReachState): boolean => state === "approved";
 
 /** What the agent hears in a space (`LISTEN_MODES`); anything unknown reads
  * as the default, `mentions`. */
@@ -139,7 +128,7 @@ export const resolveReach = async (input: {
     },
     select: { state: true },
   });
-  return grant ? normalizeState(grant.state) : null;
+  return grant ? parseState(grant.state) : null;
 };
 
 /** The space-shaped read (a channel's settlement). */
@@ -154,8 +143,9 @@ export const resolveSpaceReach = (input: {
  * The person-shaped read (one provider user's standing with this agent).
  *
  * Its own name rather than a bare `subjectKind` argument at the call sites,
- * because the two kinds answer different questions and mixing them up is
- * exactly the bug this ledger's precedence law exists to prevent.
+ * because the two kinds answer different questions (a person row decides
+ * direct messages, a space row decides its channel) and mixing them up is
+ * exactly the bug the two names exist to prevent.
  */
 export const resolvePersonReach = (input: {
   agentId: string;
@@ -175,6 +165,9 @@ export const resolvePersonReach = (input: {
  */
 export const pendingReachMessage = async (
   workspaceId: string,
+  /** "person": a DM knock, told it will hear back here. "space": a
+   * channel, where the approval is about the room, not one reader. */
+  kind: "person" | "space",
 ): Promise<string> => {
   const owner = await db.workspaceAccess.findFirst({
     where: {
@@ -191,13 +184,16 @@ export const pendingReachMessage = async (
     orderBy: { createdAt: "asc" },
   });
   const ownerName = owner?.user?.name?.trim();
-  return `I can't reply here yet. I've asked ${ownerName || "the workspace owner"} to approve me.`;
+  const who = ownerName || "the workspace owner";
+  return kind === "person"
+    ? `I can't reply to you yet. I've asked ${who} to let us talk, and I'll message you here once they approve.`
+    : `I can't reply in this channel yet. I've asked ${who} to let me answer here.`;
 };
 
 /**
  * Get-or-create the pending space grant - the invite hook and the lazy
  * re-offer both land here, so a channel only ever asks once. Idempotent:
- * an existing row in ANY live state is returned untouched (a denied channel
+ * an existing row in ANY live state is returned untouched (a blocked channel
  * must not re-knock on every stranger message). The ONE exception: a `left`
  * row - the bot was removed and is now back (a re-invite, or the dashboard
  * acting on it); the row re-arms to `pending` and the cards go out fresh.
@@ -254,7 +250,7 @@ export const ensureGrant = async (input: {
         if (!current) return ensureGrant(input);
         return {
           id: current.id,
-          state: normalizeState(current.state),
+          state: parseState(current.state),
           created: false,
         };
       }
@@ -268,7 +264,7 @@ export const ensureGrant = async (input: {
     }
     return {
       id: existing.id,
-      state: normalizeState(existing.state),
+      state: parseState(existing.state),
       created: false,
     };
   }
@@ -289,7 +285,7 @@ export const ensureGrant = async (input: {
     });
     return {
       id: created.id,
-      state: normalizeState(created.state),
+      state: parseState(created.state),
       created: true,
     };
   } catch (err) {
@@ -301,7 +297,7 @@ export const ensureGrant = async (input: {
     if (winner) {
       return {
         id: winner.id,
-        state: normalizeState(winner.state),
+        state: parseState(winner.state),
         created: false,
       };
     }
@@ -621,7 +617,7 @@ const decisionAfterRevisionLoss = async (
   if (!current) {
     return { kind: "refused", message: "This request no longer exists." };
   }
-  if (normalizeState(current.state) === "pending") {
+  if (parseState(current.state) === "pending") {
     return {
       kind: "refused",
       message: "This request changed while being checked. Please try again.",
@@ -639,16 +635,20 @@ const decisionAfterRevisionLoss = async (
  */
 export const decideReachGrant = async (input: {
   grantId: string;
-  /** The settlement chosen: open to the channel, identity lane only, or
-   * silent here. Three options because a channel's question has three
-   * honest answers - "not everyone" is not the same as "not at all". */
+  /** The settlement chosen: answer everyone here, or stay silent here. */
   decision: ReachDecision;
   deciderUserId: string;
   /** The DASHBOARD door's explicit management override: it may flip any
-   * settled state (re-open a denied channel, re-close an approved one).
+   * settled state (re-open a blocked channel, re-close an approved one).
    * Card clicks leave this unset - a second click on a settled card must
    * answer already_settled, never re-flip. */
   force?: boolean;
+  /** Tell the PERSON, in their DM with the agent, that they may talk to it
+   * now. Opt-in: only the doors deciding a real knock (someone messaged the
+   * agent and was told to wait) set it. Every other approval (the agent
+   * messaging someone first, the dashboard adding a person who never
+   * wrote) stays silent, so a forgotten flag can never DM a stranger. */
+  announce?: boolean;
 }): Promise<ReachDecisionResult> => {
   const grant = await db.agentReachGrant.findUnique({
     where: { id: input.grantId },
@@ -663,7 +663,7 @@ export const decideReachGrant = async (input: {
       externalRef: true,
       cardRefs: true,
       integration: { select: { externalId: true } },
-      agent: { select: { id: true, workspaceId: true } },
+      agent: { select: { id: true, workspaceId: true, name: true } },
     },
   });
   if (!grant) {
@@ -671,7 +671,7 @@ export const decideReachGrant = async (input: {
   }
 
   const nextState: ReachState = input.decision;
-  const currentState = normalizeState(grant.state);
+  const currentState = parseState(grant.state);
 
   // Idempotent on the same outcome; a real decision beats a pending row
   // only once (two owners racing: first click wins, the second reads
@@ -687,7 +687,7 @@ export const decideReachGrant = async (input: {
   // may sit for days, and a click that OPENS something must re-verify the
   // subject still exists as asked — a deactivated guest or a channel the
   // bot left must not be recorded as a settlement. Scoped exactly:
-  //  - only decisions that open (`approved`/`members_only`); blocking a
+  //  - only a decision that opens (`approved`); blocking a
   //    ghost is harmless and must never be blocked itself;
   //  - never on `force` — the dashboard override is the management escape
   //    hatch and may flip anything;
@@ -824,11 +824,105 @@ export const decideReachGrant = async (input: {
     }
   }
 
+  // Tell an approved PERSON who knocked that they're in: the first approval
+  // of their pending ask only (a dashboard re-flip from blocked stays
+  // silent, so nobody is told twice), never a space, never a refusal.
+  // Detached: a card click must be acked within the provider's window, and
+  // the decision is already durable.
+  if (
+    input.announce &&
+    nextState === "approved" &&
+    grant.subjectKind === "external_user" &&
+    currentState === "pending"
+  ) {
+    void notifyApprovedPerson({
+      grantId: grant.id,
+      provider: grant.provider as ChannelProviderId,
+      agentId: grant.agent.id,
+      agentName: grant.agent.name,
+      integrationId: grant.integrationId,
+      externalRef: grant.externalRef,
+      // NAME ONLY, never the email: the person reading it is, by
+      // definition, not a teammate (the `pendingReachMessage` rule).
+      decidedByName: decider.name?.trim() || null,
+    });
+  }
+
   return {
     kind: "decided",
     decidedByName: decider.name || decider.email,
     state: nextState,
   };
+};
+
+/** The approved person's notice, best-effort: never throws. */
+const notifyApprovedPerson = async (input: {
+  grantId: string;
+  provider: ChannelProviderId;
+  agentId: string;
+  agentName: string;
+  integrationId: string;
+  externalRef: string;
+  decidedByName: string | null;
+}): Promise<void> => {
+  try {
+    const notify = channelProvider(input.provider).reach?.notifyApproved;
+    if (!notify) return;
+    const presence = await db.agentChannel.findFirst({
+      where: { agentId: input.agentId, integrationId: input.integrationId },
+      select: { credentials: true },
+    });
+    if (!presence?.credentials) return;
+    await notify({
+      credentialsJson: await getCrypto().decrypt(presence.credentials),
+      recipientExternalUserId: input.externalRef,
+      agentName: input.agentName,
+      decidedByName: input.decidedByName,
+    });
+  } catch (err) {
+    log.warn(
+      { grantId: input.grantId, err: String(err) },
+      "reach approval notice failed",
+    );
+  }
+};
+
+/**
+ * The workspace OWNERS' provider ids on this integration: the users holding
+ * the workspace's `owner` access who linked their account here (the same
+ * people who get every owner card, `dmReachableOwners`). An owner can always
+ * DM the agent and be messaged by it, and that is not a setting: Contacts
+ * shows them as a fixed Always allow and refuses to change or remove them.
+ * Empty when no owner has a linked provider account.
+ */
+export const workspaceOwnerRefs = async (
+  workspaceId: string,
+  integrationId: string,
+): Promise<Set<string>> =>
+  new Set(
+    (await dmReachableOwners(workspaceId, integrationId)).map(
+      (o) => o.externalUserId,
+    ),
+  );
+
+const OWNER_FIXED =
+  "A workspace owner can always message this agent; that cannot be changed.";
+
+/** Refuse a dashboard change to a workspace owner's fixed person row. */
+const assertNotOwner = async (input: {
+  workspaceId: string;
+  integrationId: string;
+  subjectKind: ReachSubjectKind;
+  externalRef: string;
+}): Promise<void> => {
+  if (input.subjectKind !== "external_user") return;
+  const owners = await workspaceOwnerRefs(
+    input.workspaceId,
+    input.integrationId,
+  );
+  if (owners.has(input.externalRef)) {
+    throw new ServiceError("UNPROCESSABLE", OWNER_FIXED);
+  }
 };
 
 /**
@@ -858,6 +952,12 @@ export const setReachState = async (input: {
   if (!presence) {
     throw new ServiceError("NOT_FOUND", "No channel presence for this agent");
   }
+  await assertNotOwner({
+    workspaceId: input.workspaceId,
+    integrationId: presence.integrationId,
+    subjectKind: input.subjectKind,
+    externalRef: input.externalRef,
+  });
 
   const grant = await ensureGrant({
     agentId: input.agentId,
@@ -872,6 +972,10 @@ export const setReachState = async (input: {
     decision: input.state,
     deciderUserId: input.deciderUserId,
     force: true,
+    // Answering an ask that was already waiting (a person who knocked) is
+    // told; a row this call just created is the owner adding someone who
+    // never wrote, who is not.
+    announce: !grant.created,
   });
 };
 
@@ -997,6 +1101,8 @@ export const decideReachFromChannelWithUser = async (input: {
     grantId: input.grantId,
     decision: input.decision,
     deciderUserId: input.clickerUserId,
+    // A card only ever asks about someone who knocked.
+    announce: true,
   });
 };
 
@@ -1124,18 +1230,13 @@ export const setSpaceReachState = (input: {
 }): Promise<ReachDecisionResult> =>
   setReachState({ ...input, subjectKind: "space" });
 
-/**
- * The dashboard's per-PERSON settlement. `members_only` is refused rather
- * than silently stored: it is not a coherent answer about one individual,
- * and letting it through would put a state on the row that the person card
- * can never render.
- */
+/** The dashboard's per-PERSON settlement (direct messages). */
 export const setPersonReachState = (input: {
   workspaceId: string;
   agentId: string;
   provider: ChannelProviderId;
   externalRef: string;
-  state: Extract<ReachDecision, "approved" | "blocked">;
+  state: ReachDecision;
   deciderUserId: string;
 }): Promise<ReachDecisionResult> =>
   setReachState({ ...input, subjectKind: "external_user" });
@@ -1180,6 +1281,13 @@ export const dismissReachRow = async (input: {
     if (!presence) {
       throw new ServiceError("NOT_FOUND", "No channel presence for this agent");
     }
+
+    await assertNotOwner({
+      workspaceId: input.workspaceId,
+      integrationId: presence.integrationId,
+      subjectKind,
+      externalRef: input.externalRef,
+    });
 
     const removed = await tx.agentReachGrant.deleteMany({
       where: {
@@ -1253,7 +1361,7 @@ export const listGrants = async (
   });
   return rows.map((r) => ({
     ...r,
-    state: normalizeState(r.state),
+    state: parseState(r.state),
     listen: normalizeListen(r.listen),
   }));
 };
@@ -1275,7 +1383,7 @@ export const listPersonGrants = (
 // threads it already joined, exactly as before. `all`: every message in the
 // channel - the agent is the channel's point of contact and decides on its
 // own when to answer. Listening never widens WHO is answered: the space
-// settlement, the identity lane and person blocks all still apply.
+// settlement and the identity lane still apply.
 
 /**
  * Answers one promoted channel may get per rolling hour without an
@@ -1304,7 +1412,7 @@ export const resolveSpaceListen = async (input: {
   });
   return grant
     ? {
-        state: normalizeState(grant.state),
+        state: parseState(grant.state),
         listen: normalizeListen(grant.listen),
       }
     : null;
@@ -1346,12 +1454,12 @@ export const setSpaceListen = async (input: {
       id: grant.id,
       revision: grant.revision,
       listen: { not: input.listen },
-      ...(promote && { state: { in: SETTLED_STATES } }),
+      ...(promote && { state: "approved" }),
     },
     data: { listen: input.listen, revision: { increment: 1 } },
   });
   if (flipped.count === 0) {
-    if (promote && !isSettled(normalizeState(grant.state))) {
+    if (promote && !isSettled(parseState(grant.state))) {
       throw new ServiceError(
         "UNPROCESSABLE",
         "Choose who the agent answers in this channel first.",

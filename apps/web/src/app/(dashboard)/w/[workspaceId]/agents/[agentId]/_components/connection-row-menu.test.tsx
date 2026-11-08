@@ -7,10 +7,11 @@ import type { Connection } from "@/lib/api";
 import { ConnectionRowMenu } from "./connection-row-menu";
 
 /**
- * The agent row's ⋮ menu. Workspace connections: Reconnect, Rename and
- * Turn on/off. Organization connections are managed on the organization's
- * page, so here they only turn on or off. A reconnect it opened refreshes
- * the grant views when the popup reports back.
+ * The agent row's ⋮ menu. Every row opens the app's page in the workspace's
+ * Connections; workspace connections also Reconnect and Rename. Organization
+ * connections are managed on the organization's page, so they only open the
+ * app's page here. Turning on or off is the row's switch. A reconnect it
+ * opened refreshes the grant views when the popup reports back.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -42,24 +43,15 @@ const connection = (over: Partial<Connection> = {}): Connection => ({
   ...over,
 });
 
-const renderMenu = (props: {
-  connection?: Connection;
-  active?: boolean;
-  toggleDisabled?: boolean;
-}) => {
-  const onToggle = vi.fn();
+const renderMenu = (props: { connection?: Connection; active?: boolean }) =>
   render(
     <QueryClientProvider client={new QueryClient()}>
       <ConnectionRowMenu
         connection={props.connection ?? connection()}
         active={props.active ?? true}
-        toggleDisabled={props.toggleDisabled ?? false}
-        onToggle={onToggle}
       />
     </QueryClientProvider>,
   );
-  return { onToggle };
-};
 
 const openMenu = async () =>
   userEvent.click(screen.getByRole("button", { name: /More actions for/ }));
@@ -67,29 +59,53 @@ const openMenu = async () =>
 afterEach(() => vi.clearAllMocks());
 
 describe("ConnectionRowMenu", () => {
-  it("offers Reconnect, Rename and Turn off on an active workspace row", async () => {
-    const { onToggle } = renderMenu({});
+  it("offers Reconnect, Rename and Open in Connections on an active workspace row", async () => {
+    renderMenu({});
     await openMenu();
-    expect(screen.getByRole("menuitem", { name: /Reconnect/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /Rename/ })).toBeTruthy();
-    await userEvent.click(
-      screen.getByRole("menuitem", { name: /Turn off for this agent/ }),
-    );
-    expect(onToggle).toHaveBeenCalledWith(false);
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ).toEqual(["Reconnect", "Rename", "Open in Connections"]);
   });
 
-  it("an organization connection only turns on or off here", async () => {
-    const { onToggle } = renderMenu({
-      connection: connection({ scope: "organization" }),
-      active: false,
-    });
+  it("opens the app's page in the workspace's Connections", async () => {
+    renderMenu({ connection: connection({ provider: "salesforce" }) });
     await openMenu();
-    expect(screen.queryByRole("menuitem", { name: /Reconnect/ })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: /Rename/ })).toBeNull();
-    await userEvent.click(
-      screen.getByRole("menuitem", { name: /Turn on for this agent/ }),
-    );
-    expect(onToggle).toHaveBeenCalledWith(true);
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Open in Connections" })
+        .getAttribute("href"),
+    ).toBe("/w/ws-1/connections/apps/salesforce");
+  });
+
+  it("an organization connection only opens the app's page here", async () => {
+    renderMenu({ connection: connection({ scope: "organization" }) });
+    await openMenu();
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ).toEqual(["Open in Connections"]);
+  });
+
+  it("no app page to open for a provider missing from the registry", async () => {
+    renderMenu({ connection: connection({ provider: "retired-app" }) });
+    await openMenu();
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ).toEqual(["Rename"]);
+  });
+
+  it("no menu for an organization connection missing from the registry, but the slot stays", () => {
+    const { container } = renderMenu({
+      connection: connection({
+        scope: "organization",
+        provider: "retired-app",
+      }),
+    });
+    expect(
+      screen.queryByRole("button", { name: /More actions for/ }),
+    ).toBeNull();
+    // Keeps the row's switch in line with its neighbours'.
+    const slot = container.querySelector("span[aria-hidden]");
+    expect(slot?.className).toContain("size-7");
   });
 
   it("no Reconnect for an inactive row", async () => {

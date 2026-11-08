@@ -88,4 +88,16 @@ describe("the memory tool surface", () => {
     expect(flat).toContain("Deleting a file does not delete the memory");
     expect(flat).toContain("source of truth");
   });
+
+  it("corrections are a same-turn save, with one home in the fragment", () => {
+    // Without this, agents fix the task and move on, and the person has to
+    // correct them again next time. One home per rule (the 2026-10 budget
+    // audit): the correction clause lives inside the save bullet, never in
+    // a second bullet restating it. MUTATION-PROOF: split it back out and
+    // the count fails; drop the clause and the content check fails.
+    const flat = memoryFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("save it in the same turn, before you answer");
+    expect(flat.match(/the moment you learn/g)).toHaveLength(1);
+    expect(flat.match(/corrects you/g)).toHaveLength(1);
+  });
 });

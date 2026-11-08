@@ -18,7 +18,7 @@ import {
 
 describe("vendor OAuth client groups", () => {
   it("groups every app that shares a vendor OAuth client", () => {
-    expect(groupMembers("google")).toHaveLength(17);
+    expect(groupMembers("google")).toHaveLength(18);
     expect(groupMembers("atlassian").sort()).toEqual(["confluence", "jira"]);
     expect(groupMembers("microsoft")).toHaveLength(4);
   });

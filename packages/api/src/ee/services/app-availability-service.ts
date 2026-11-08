@@ -1,6 +1,7 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "../../services/errors";
 import { getApp } from "../../apps/registry";
+import { resolvePrincipalSet } from "../../services/policy-simulate/principal-set";
 
 // ── App availability (policy-engine step 7) ─────────────────────────────────
 // A SEPARATE org-level allowlist deciding which apps a workspace may connect (the
@@ -244,7 +245,9 @@ export const setAppAvailability = async (
  * `find_available_providers`: the union of the providers of every rule that
  * names one of the workspace's inherited people — its WorkspaceAccess users (direct
  * + members of granted groups), active-only, plus the groups to match (granted
- * directly + every group those users belong to). Every arm is org-fenced.
+ * directly + every group those users belong to). That set is the policy
+ * engine's principal set (`resolvePrincipalSet`), org-fenced on every arm; the
+ * gateway shares one CTE between the two the same way.
  *
  * Off the gateway hot path (this backs the connect-UI filter only); the gateway
  * resolves its own set once at connect. A handful of indexed queries, and only a
@@ -260,63 +263,8 @@ export const deriveAvailableProviders = async (
   });
   if (org?.appAvailabilityMode !== "restricted") return null; // open → all apps
 
-  // WorkspaceAccess rows for the workspace: direct users + candidate groups.
-  const accessRows = await db.workspaceAccess.findMany({
-    where: { workspaceId },
-    select: { userId: true, groupId: true },
-  });
-  const directUserIds = accessRows.flatMap((r) => (r.userId ? [r.userId] : []));
-  const groupCandidates = accessRows.flatMap((r) =>
-    r.groupId ? [r.groupId] : [],
-  );
-
-  // direct_groups: org-fenced — a granted group must belong to this org.
-  const directGroups = groupCandidates.length
-    ? (
-        await db.group.findMany({
-          where: { id: { in: groupCandidates }, organizationId },
-          select: { id: true },
-        })
-      ).map((g) => g.id)
-    : [];
-
-  // candidate_users: direct WorkspaceAccess users ∪ members of the direct groups.
-  const groupMemberUserIds = directGroups.length
-    ? (
-        await db.groupMember.findMany({
-          where: { groupId: { in: directGroups } },
-          select: { userId: true },
-        })
-      ).map((m) => m.userId)
-    : [];
-  const candidateUserIds = [
-    ...new Set([...directUserIds, ...groupMemberUserIds]),
-  ];
-
-  // all_users: only ACTIVE org members contribute (org-fenced + suspended out).
-  const allUserIds = candidateUserIds.length
-    ? (
-        await db.organizationMember.findMany({
-          where: {
-            userId: { in: candidateUserIds },
-            organizationId,
-            status: { not: "suspended" },
-          },
-          select: { userId: true },
-        })
-      ).map((m) => m.userId)
-    : [];
-
-  // all_groups: direct groups ∪ org-fenced groups the inherited users belong to.
-  const memberGroupIds = allUserIds.length
-    ? (
-        await db.groupMember.findMany({
-          where: { userId: { in: allUserIds }, group: { organizationId } },
-          select: { groupId: true },
-        })
-      ).map((m) => m.groupId)
-    : [];
-  const allGroupIds = [...new Set([...directGroups, ...memberGroupIds])];
+  const { userIds: allUserIds, groupIds: allGroupIds } =
+    await resolvePrincipalSet(workspaceId, organizationId);
 
   if (allUserIds.length === 0 && allGroupIds.length === 0) return [];
 

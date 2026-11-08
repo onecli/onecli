@@ -64,10 +64,11 @@ describe("the skills fragment", () => {
 describe("the skills tools", () => {
   const byName = new Map(skillsTools.map((tool) => [tool.name, tool]));
 
-  it("ships exactly the four agent-tier tools", () => {
+  it("ships exactly the five agent-tier tools", () => {
     expect([...byName.keys()].sort()).toEqual([
       "skill_create",
       "skill_delete",
+      "skill_import",
       "skill_list",
       "skill_update",
     ]);
@@ -88,7 +89,7 @@ describe("the skills tools", () => {
     // SKILL_DESCRIPTION_MAX_LENGTH / SKILL_CONTENT_MAX_LENGTH.
     expect(schema.properties.name?.pattern).toBe("^[a-z0-9]+(?:-[a-z0-9]+)*$");
     expect(schema.properties.name?.maxLength).toBe(64);
-    expect(schema.properties.description?.maxLength).toBe(500);
+    expect(schema.properties.description?.maxLength).toBe(1024);
     expect(schema.properties.content?.maxLength).toBe(24_000);
   });
 

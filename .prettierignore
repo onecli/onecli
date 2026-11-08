@@ -15,6 +15,7 @@ apps/gateway/crates/policy-engine/src/catalog.generated.json
 # the gateway's; prettier does not read nested .gitignore files, so it is
 # named here too).
 apps/sandbox-home-device/target/
+apps/sandbox-home-device/target-*/
 
 # Generated gRPC client (buf + protoc-gen-es output, gitignored).
 packages/sandbox-home-device-proto/src/gen/

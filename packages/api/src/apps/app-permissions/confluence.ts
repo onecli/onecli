@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const confluencePermissions: AppPermissionDefinition = {
   provider: "confluence",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",
