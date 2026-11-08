@@ -33,6 +33,8 @@ let db: Db;
 let app: ReturnType<typeof import("../app").createApiApp>;
 /** Drains the detached Slack replies (fireReply) so negatives are exact. */
 let settleDetachedReplies: () => Promise<void>;
+/** The events arm processes after its ack; resolve once that run settles. */
+let settleInbound: () => Promise<void>;
 let getCrypto: typeof import("../providers").getCrypto;
 
 const P = "rchwire-";
@@ -52,6 +54,8 @@ let currentSession: { id: string; email: string } | null = null;
 let slackServer: Server;
 const slackCalls: { method: string; form: URLSearchParams; raw: string }[] = [];
 const slackHandlers: Record<string, () => unknown> = {};
+/** Per-method answer delay (ms): a slow Slack, for ack-timing proofs. */
+const slackDelays: Record<string, number> = {};
 
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
@@ -62,13 +66,15 @@ const startSlackFake = (): Promise<string> =>
         const method = (req.url ?? "/").slice(1);
         slackCalls.push({ method, form: new URLSearchParams(raw), raw });
         const handler = slackHandlers[method];
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            ok: true,
-            ...((handler ? handler() : {}) as object),
-          }),
-        );
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              ok: true,
+              ...((handler ? handler() : {}) as object),
+            }),
+          );
+        }, slackDelays[method] ?? 0);
       });
     });
     slackServer.listen(0, "127.0.0.1", () => {
@@ -106,7 +112,9 @@ const signedHeaders = (rawBody: string, contentType: string) => {
 };
 
 let eventSeq = 0;
-const postEvent = (event: unknown) => {
+/** A signed event, then the inbox run it started (the events arm acks before
+ * processing). */
+const postEvent = async (event: unknown) => {
   eventSeq += 1;
   const raw = JSON.stringify({
     type: "event_callback",
@@ -114,11 +122,13 @@ const postEvent = (event: unknown) => {
     event_id: `EvWire${eventSeq}`,
     event,
   });
-  return app.request("/v1/channels/slack/events", {
+  const res = await app.request("/v1/channels/slack/events", {
     method: "POST",
     headers: signedHeaders(raw, "application/json"),
     body: raw,
   });
+  await settleInbound();
+  return res;
 };
 
 const postInteractivity = (payload: unknown) => {
@@ -161,6 +171,8 @@ beforeAll(async () => {
     { getSession: async () => currentSession },
     { selfUrl: SELF_URL },
   );
+  settleInbound = (await import("../services/channels/inbound-event-service"))
+    .settleInboundEventsForTests;
 
   // Clean slate, prefix-fenced.
   await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
@@ -225,7 +237,7 @@ afterAll(async () => {
 describe.skipIf(!PROOF_URL)(
   "reach grants — the end-to-end acceptance walk over the real wire",
   () => {
-    it("invite → owner card → EVERYONE held pending → approve on the card → guest turn → dashboard members_only → refused → blocked → silent", async () => {
+    it("invite → owner card → EVERYONE held pending → approve on the card → guest turn → dashboard sends retired members_only → stored approved → blocked → silent", async () => {
       // ── Seed the channel-ready agent (grant an LLM key so turns run). ──
       const agent = await db.agent.create({
         data: {
@@ -361,7 +373,7 @@ describe.skipIf(!PROOF_URL)(
       expect(pendingRes.status).toBe(200);
       await waitForSlackCall("chat.postMessage", 2);
       const softLine = slackCallsFor("chat.postMessage").at(-1);
-      expect(softLine?.form.get("text")).toContain("to approve me");
+      expect(softLine?.form.get("text")).toContain("to let me answer here");
       // No dashboard link: the room can't act on it, the owner has a card.
       expect(softLine?.form.get("text")).not.toContain("http");
       expect(
@@ -385,7 +397,7 @@ describe.skipIf(!PROOF_URL)(
       await waitForSlackCall("chat.postMessage", 3);
       expect(
         slackCallsFor("chat.postMessage").at(-1)?.form.get("text"),
-      ).toContain("to approve me");
+      ).toContain("to let me answer here");
       expect(
         await db.turn.count({
           where: { conversation: { agentId: agent.id } },
@@ -432,9 +444,13 @@ describe.skipIf(!PROOF_URL)(
       expect(turn.message).toBe("Dana (guest): @[wire agent] deploy please");
       expect(turn.source).toBe("slack");
 
-      // ── 5. DASHBOARD narrows to members_only (the real PUT). ──
+      // ── 5. ROLLING-DEPLOY COMPAT: an older dashboard bundle still sends
+      // the retired `members_only`. The real PUT accepts it and stores
+      // `approved` (the same mapping the data migration applied). The space
+      // is already approved (step 4), so the mapped value is a no-op:
+      // already_settled, and the row still reads `approved`. ──
       currentSession = { id: OWNER, email: `${OWNER}@example.com` };
-      const revokeRes = await app.request(
+      const retiredRes = await app.request(
         `/v1/agents/${agent.id}/channels/slack/reach/C-WIRE`,
         {
           method: "PUT",
@@ -445,42 +461,16 @@ describe.skipIf(!PROOF_URL)(
           body: JSON.stringify({ state: "members_only" }),
         },
       );
-      expect(revokeRes.status).toBe(200);
-      expect(await revokeRes.json()).toMatchObject({
-        kind: "decided",
-        state: "members_only",
-      });
-      currentSession = null;
-
-      // ── 6. STRANGER under members_only → the identity refusal. ──
-      // Free the one-active-turn slot first so the refusal is the door's.
-      await db.turn.updateMany({
-        where: { conversation: { agentId: agent.id } },
-        data: { status: "done", finishedAt: new Date() },
-      });
-      const postRevokeRes = await postEvent({
-        type: "app_mention",
-        channel: "C-WIRE",
-        user: "U-STRANGER",
-        text: "<@UBOT> still there?",
-        ts: "300.1",
-      });
-      expect(postRevokeRes.status).toBe(200);
-      await waitForSlackCall("chat.postMessage", 4);
-      const refusal = slackCallsFor("chat.postMessage").at(-1);
-      // The identity refusal (not-linked), NOT the waiting line and NOT an
-      // answer: the channel is settled, just not open to everyone.
-      expect(refusal?.form.get("text")).toContain(
-        "couldn't match your Slack account",
-      );
+      expect(retiredRes.status).toBe(200);
+      expect(await retiredRes.json()).toEqual({ kind: "already_settled" });
       expect(
-        await db.turn.count({
-          where: {
-            conversation: { agentId: agent.id },
-            status: { not: "done" },
-          },
-        }),
-      ).toBe(0);
+        (
+          await db.agentReachGrant.findUniqueOrThrow({
+            where: { id: grant.id },
+          })
+        ).state,
+      ).toBe("approved");
+      currentSession = null;
 
       // ── 7. THE DASHBOARD VIEW carries the space's state (the web's read). ──
       currentSession = { id: OWNER, email: `${OWNER}@example.com` };
@@ -501,7 +491,7 @@ describe.skipIf(!PROOF_URL)(
         expect.arrayContaining([
           expect.objectContaining({
             externalRef: "C-WIRE",
-            state: "members_only",
+            state: "approved",
             label: "#proj-wire",
           }),
         ]),
@@ -561,7 +551,7 @@ describe.skipIf(!PROOF_URL)(
             where: { id: grant.id },
           })
         ).state,
-      ).toBe("members_only");
+      ).toBe("approved");
 
       // ── 8b. BLOCKED: the third settlement. The agent goes SILENT in the
       // channel - no answer, no refusal, no turn. Even the linked owner
@@ -581,6 +571,11 @@ describe.skipIf(!PROOF_URL)(
       expect(blockRes.status).toBe(200);
       currentSession = null;
 
+      // Settle step 4's guest turn so the count below sees only new turns.
+      await db.turn.updateMany({
+        where: { conversation: { agentId: agent.id } },
+        data: { status: "done", finishedAt: new Date() },
+      });
       const postsBeforeBlock = slackCallsFor("chat.postMessage").length;
       const blockedMember = await postEvent({
         type: "app_mention",
@@ -653,7 +648,7 @@ describe.skipIf(!PROOF_URL)(
         },
       );
       expect(approvePerson.status).toBe(200);
-      // `members_only` is not a coherent answer about one human, and the
+      // The retired `members_only` was never a person answer: the person
       // schema refuses it rather than storing an unrenderable state.
       const badPerson = await app.request(
         `/v1/agents/${agent.id}/channels/slack/reach/people/U-DM`,
@@ -713,11 +708,17 @@ describe.skipIf(!PROOF_URL)(
           spaces?: { externalRef: string }[];
         }[];
       };
-      expect(withPeople.presences[0]?.people).toEqual([
+      // The workspace owner (when their Slack is linked) leads the list as
+      // a fixed row; the knocked person follows.
+      expect(
+        withPeople.presences[0]?.people?.filter(
+          (p) => !(p as { isOwner?: boolean }).isOwner,
+        ),
+      ).toEqual([
         expect.objectContaining({
           externalRef: "U-DM",
           state: "approved",
-          label: "@Sam",
+          label: "Sam",
         }),
       ]);
       // The two kinds stay in their own lists - a person never appears as
@@ -883,7 +884,7 @@ describe.skipIf(!PROOF_URL)(
           "content-type": "application/json",
           "x-workspace-id": WORKSPACE,
         },
-        body: JSON.stringify({ state: "members_only" }),
+        body: JSON.stringify({ state: "approved" }),
       });
       expect(reopen.status).toBe(200);
 
@@ -997,6 +998,199 @@ describe.skipIf(!PROOF_URL)(
       expect(reblock.status).toBe(200);
       expect(await listenInView()).toBe("mentions");
       currentSession = null;
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "the approved person's DM over the real wire (signed card click)",
+  () => {
+    it("a DM knock approved on the owner's card is acked before the slow notice, then the person is told once, by name", async () => {
+      // Its own agent + presence (app id) under the suite's integration.
+      const APP = "A0RCHNOTICE";
+      const agent = await db.agent.create({
+        data: {
+          workspaceId: WORKSPACE,
+          name: "notice agent",
+          identifier: `${P}notice`,
+          accessToken: `aoc_${P}notice`,
+          kind: "hosted",
+          harness: "fake",
+        },
+        select: { id: true },
+      });
+      // One Slack integration per org: reuse the walk's, or plant it when
+      // this test runs alone.
+      const integration =
+        (await db.channelIntegration.findFirst({
+          where: { organizationId: ORG, provider: "slack" },
+          select: { id: true },
+        })) ??
+        (await db.channelIntegration.create({
+          data: {
+            organizationId: ORG,
+            provider: "slack",
+            externalId: TEAM,
+            name: "Reach Wire Co",
+            createdByUserId: OWNER,
+          },
+          select: { id: true },
+        }));
+      // The owner's own Slack identity, so the knock's card has a recipient
+      // and the card click resolves the clicker.
+      await db.channelUserLink.upsert({
+        where: {
+          integrationId_externalUserId: {
+            integrationId: integration.id,
+            externalUserId: "U-OWNER",
+          },
+        },
+        create: {
+          integrationId: integration.id,
+          externalUserId: "U-OWNER",
+          userId: OWNER,
+          linkedVia: "manual",
+        },
+        update: {},
+      });
+      await db.agentChannel.create({
+        data: {
+          agentId: agent.id,
+          integrationId: integration.id,
+          provider: "slack",
+          externalId: APP,
+          identityRef: "UBOT2",
+          transport: "events",
+          status: "active",
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({
+              botToken: "xoxb-notice",
+              signingSecret: SIGNING_SECRET,
+            }),
+          ),
+          createdByUserId: OWNER,
+        },
+      });
+      slackHandlers["users.info"] = () => ({
+        user: {
+          id: "U-KNOCK",
+          team_id: TEAM,
+          name: "riley",
+          profile: { display_name: "Riley" },
+        },
+      });
+      slackHandlers["conversations.open"] = () => ({
+        channel: { id: "D-KNOCK" },
+      });
+      slackHandlers["chat.postMessage"] = () => ({
+        channel: "D-KNOCK",
+        ts: "77.1",
+      });
+
+      // ── 1. The person DMs the agent: a pending knock, told to wait. ──
+      const knockRaw = JSON.stringify({
+        type: "event_callback",
+        api_app_id: APP,
+        event_id: "EvNotice1",
+        event: {
+          type: "message",
+          channel: "D-KNOCK",
+          channel_type: "im",
+          user: "U-KNOCK",
+          text: "hi, can you help?",
+          ts: "700.1",
+        },
+      });
+      const knockRes = await app.request("/v1/channels/slack/events", {
+        method: "POST",
+        headers: signedHeaders(knockRaw, "application/json"),
+        body: knockRaw,
+      });
+      expect(knockRes.status).toBe(200);
+      await settleInbound();
+      await settleDetachedReplies();
+      const waitLine = slackCallsFor("chat.postMessage").find((c) =>
+        (c.form.get("text") ?? "").includes("to let us talk"),
+      );
+      expect(waitLine?.form.get("text")).toBe(
+        "I can't reply to you yet. I've asked Olive Owner to let us talk, and I'll message you here once they approve.",
+      );
+      const knock = await db.agentReachGrant.findFirstOrThrow({
+        where: { agentId: agent.id, subjectKind: "external_user" },
+      });
+      expect(knock.state).toBe("pending");
+
+      // The bell's public read carries the ask with its provider tenant (the
+      // Slack team id the dashboard's channel link is built from).
+      currentSession = { id: OWNER, email: `${OWNER}@example.com` };
+      const bell = await app.request(
+        `/v1/workspaces/${WORKSPACE}/channel-approvals`,
+        { headers: { "x-workspace-id": WORKSPACE } },
+      );
+      currentSession = null;
+      expect(bell.status).toBe(200);
+      const { items } = (await bell.json()) as {
+        items: { id: string; kind: string; tenantExternalId?: string }[];
+      };
+      expect(items.find((item) => item.id === knock.id)).toMatchObject({
+        kind: "reach",
+        tenantExternalId: TEAM,
+      });
+
+      // ── 2. A SLOW Slack for the notice: opening the DM takes 2.5 s. The
+      // click must still be answered well inside Slack's 3 s window. ──
+      slackDelays["conversations.open"] = 2500;
+      const opensBefore = slackCallsFor("conversations.open").length;
+      const clickRaw = `payload=${encodeURIComponent(
+        JSON.stringify({
+          type: "block_actions",
+          api_app_id: APP,
+          user: { id: "U-OWNER" },
+          actions: [{ action_id: "reach_approve", value: knock.id }],
+        }),
+      )}`;
+      const started = Date.now();
+      const clickRes = await app.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: signedHeaders(clickRaw, "application/x-www-form-urlencoded"),
+        body: clickRaw,
+      });
+      const ackMs = Date.now() - started;
+      expect(clickRes.status).toBe(200);
+      expect(ackMs).toBeLessThan(1500);
+      expect(
+        (
+          await db.agentReachGrant.findUniqueOrThrow({
+            where: { id: knock.id },
+          })
+        ).state,
+      ).toBe("approved");
+
+      // ── 3. The notice lands after the ack: once, to the person, by name.
+      // (Scoped to THIS person's DM: the walk above approves its own knock
+      // from the dashboard, which is told too.) ──
+      const notices = () =>
+        slackCallsFor("chat.postMessage").filter(
+          (c) =>
+            c.form.get("channel") === "D-KNOCK" &&
+            (c.form.get("text") ?? "").includes("send your message again here"),
+        );
+      for (let i = 0; i < 200 && notices().length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      delete slackDelays["conversations.open"];
+      // The owner-card machinery may open the owner's own DM too; the person
+      // is opened exactly once, for the notice.
+      expect(
+        slackCallsFor("conversations.open")
+          .slice(opensBefore)
+          .filter((c) => c.form.get("users") === "U-KNOCK"),
+      ).toHaveLength(1);
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]?.form.get("channel")).toBe("D-KNOCK");
+      expect(notices()[0]?.form.get("text")).toBe(
+        "Olive Owner approved you. You can talk to me (notice agent) now, just send your message again here.",
+      );
     });
   },
 );

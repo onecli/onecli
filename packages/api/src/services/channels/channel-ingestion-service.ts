@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { getCrypto } from "../../providers";
 import { ServiceError } from "../errors";
@@ -6,7 +7,12 @@ import {
   ensureDirectConversation,
   ensureSourcedConversation,
 } from "../conversation-service";
-import { abortTurn, createTurn, requestSendNow } from "../turn-service";
+import {
+  abortTurn,
+  createTurn,
+  findTurnBySourceEvent,
+  requestSendNow,
+} from "../turn-service";
 import { sendConversationMessage } from "../follow-up-service";
 import {
   createFailedAttachment,
@@ -40,9 +46,7 @@ import type {
 } from "./types";
 import { normalizeMentionName, type FollowUpAction } from "@onecli/channels";
 import { logger } from "../../lib/logger";
-// Type-only: the runtime import of the reach service stays dynamic (below)
-// so this hot ingestion path does not eagerly pull the reach module graph.
-import type { ReachState } from "./agent-reach-service";
+import { leaseExpiry, whileLeased } from "../../lib/lease";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_ROWS_PER_MESSAGE,
@@ -61,15 +65,17 @@ const log = logger.child({ component: "channel-ingestion" });
  *
  * Two laws every door obeys:
  *
- * 1. **Idempotent by event id.** Providers deliver at least once (unacked
+ * 1. **Exactly once by event id.** Providers deliver at least once (unacked
  *    envelopes are retried, reconnects replay, webhooks re-POST) and adapter
- *    memory dies with its process — so the dedupe is a DATABASE insert, first
- *    thing: a P2002 on `channel_ingested_events` means "already ingested" and
- *    the door answers `duplicate` without side effects. Insert-FIRST is a
- *    deliberate at-most-once choice: a crash between the insert and the turn
- *    loses one message (the user retypes — the same failure a crashed web
- *    send has), whereas insert-last would double-answer on redelivery, which
- *    costs money and reads as a malfunction.
+ *    memory dies with its process, so every door runs its event through
+ *    one DATABASE ledger, `ingestEvent`, whatever the provider: the event is
+ *    claimed first (a lease on `channel_ingested_events`), the door runs,
+ *    and the claim settles. A settled event answers `duplicate`; an event
+ *    another run still holds is retried later (`EventInFlightError`); an
+ *    event whose holder died is taken over once its lease lapses, so a
+ *    crash never loses the message, and the turn a dead holder already
+ *    created is found by its `sourceEventId`, so it is never answered
+ *    twice.
  *
  * 2. **Agent-authored events are refused**, defense-in-depth behind the
  *    adapter's own echo guard — the bot hearing its own answer must never
@@ -136,30 +142,133 @@ const requirePresence = async (
   return presence;
 };
 
+/** The event is being processed by another holder right now: retry later.
+ * Retryable on purpose: the events inbox backs off and tries again, so an
+ * event a crash interrupted is never lost to its own redelivery. */
+export class EventInFlightError extends ServiceError {
+  constructor() {
+    super("CONFLICT", "This event is already being processed.");
+    this.name = "EventInFlightError";
+  }
+}
+
 /**
- * The at-least-once dedupe. True = first sight; false = redelivery.
- * Opportunistically prunes this presence's old rows so the table stays a
- * working set, not a log.
+ * The at-least-once ledger every door runs an event through, whatever the
+ * provider: claim the event, run the door, settle the claim.
+ *
+ * - First sight: the claim row is written (a lease, renewed while the door
+ *   runs) and `run` executes.
+ * - Settled: a duplicate, `run` never executes.
+ * - Claimed by a live holder: `EventInFlightError` (retry later).
+ * - Claimed by a holder whose lease lapsed (it died mid-event): taken over,
+ *   and `run` executes again. Anything the dead holder already created is
+ *   found by the door, not created twice (`Turn.sourceEventId`).
+ *
+ * A `run` that throws hands its claim straight back, so the next delivery
+ * runs the event again at once instead of waiting out the lease. An outcome
+ * that settled nothing new is still settled, because re-running it would
+ * only repeat the same answer. Every write after the claim is fenced to this
+ * run's own token, so a run that overran its lease never touches the claim
+ * of the run that took the event over.
  */
-const recordEventOnce = async (
+const ingestEvent = async <T>(
   agentChannelId: string,
   eventId: string,
-): Promise<boolean> => {
+  duplicate: T,
+  run: () => Promise<T>,
+): Promise<T> => {
+  const claim = await claimEvent(agentChannelId, eventId);
+  if (claim.kind === "settled") return duplicate;
+  if (claim.kind === "in-flight") throw new EventInFlightError();
+  const ours = { agentChannelId, eventId, claimToken: claim.token };
+  let result: T;
   try {
-    await db.channelIngestedEvent.create({
-      data: { agentChannelId, eventId },
-      select: { id: true },
-    });
+    result = await whileLeased(
+      {
+        renew: () =>
+          db.channelIngestedEvent.updateMany({
+            where: ours,
+            data: { claimExpiresAt: leaseExpiry() },
+          }),
+        onRenewError: (err) =>
+          log.warn(
+            { err, agentChannelId, eventId },
+            "event claim renewal failed",
+          ),
+      },
+      run,
+    );
   } catch (err) {
-    if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === "P2002"
-    ) {
-      return false;
-    }
+    await db.channelIngestedEvent
+      .updateMany({
+        where: ours,
+        data: { claimToken: null, claimExpiresAt: new Date() },
+      })
+      .catch((releaseErr: unknown) =>
+        log.warn(
+          { err: releaseErr, agentChannelId, eventId },
+          "event claim release failed; it lapses with its lease",
+        ),
+      );
     throw err;
   }
-  // Fire-and-forget prune: losing one pass costs nothing.
+  const settled = await db.channelIngestedEvent.updateMany({
+    where: ours,
+    data: { claimToken: null, claimExpiresAt: null },
+  });
+  if (settled.count === 0) {
+    log.warn(
+      { agentChannelId, eventId },
+      "event claim was taken over before its run settled",
+    );
+  }
+  return result;
+};
+
+type EventClaim =
+  | { kind: "claimed"; token: string }
+  | { kind: "settled" }
+  | { kind: "in-flight" };
+
+/** Take the event's claim, or say why there is none to take. */
+const claimEvent = async (
+  agentChannelId: string,
+  eventId: string,
+): Promise<EventClaim> => {
+  const claimToken = randomUUID();
+  const claimExpiresAt = leaseExpiry();
+  try {
+    await db.channelIngestedEvent.create({
+      data: { agentChannelId, eventId, claimToken, claimExpiresAt },
+      select: { id: true },
+    });
+    pruneIngestedEvents(agentChannelId);
+    return { kind: "claimed", token: claimToken };
+  } catch (err) {
+    if (
+      !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+      err.code !== "P2002"
+    ) {
+      throw err;
+    }
+  }
+  // Already claimed: take it over only if its holder's lease lapsed (or its
+  // run failed and handed it back). One conditional write, so exactly one of
+  // two racing takers wins.
+  const takeover = await db.channelIngestedEvent.updateMany({
+    where: { agentChannelId, eventId, claimExpiresAt: { lt: new Date() } },
+    data: { claimToken, claimExpiresAt },
+  });
+  if (takeover.count === 1) return { kind: "claimed", token: claimToken };
+  const row = await db.channelIngestedEvent.findUnique({
+    where: { agentChannelId_eventId: { agentChannelId, eventId } },
+    select: { claimExpiresAt: true },
+  });
+  return { kind: row?.claimExpiresAt ? "in-flight" : "settled" };
+};
+
+/** Fire-and-forget prune: losing one pass costs nothing. */
+const pruneIngestedEvents = (agentChannelId: string): void => {
   db.channelIngestedEvent
     .deleteMany({
       where: {
@@ -172,7 +281,29 @@ const recordEventOnce = async (
     .catch((err: unknown) =>
       log.warn({ err, agentChannelId }, "ingested-event prune failed"),
     );
-  return true;
+};
+
+const DUPLICATE = { kind: "duplicate" } as const;
+
+/**
+ * The turn an earlier run of this same event already created, as the
+ * outcome that run answered. Only a taken-over event (its first holder died
+ * after the turn committed, before the claim settled) ever finds one; every
+ * other run gets null and proceeds.
+ */
+const landedOutcome = async (
+  presence: PresenceRow,
+  eventId: string,
+): Promise<IngestOutcome | null> => {
+  const turn = await findTurnBySourceEvent({
+    agentId: presence.agent.id,
+    source: presence.provider as ChannelProviderId,
+    sourceEventId: eventId,
+  });
+  if (!turn) return null;
+  return turn.followUpOfTurnId
+    ? { kind: "followUp", conversationId: turn.conversationId, turn }
+    : { kind: "turn", conversationId: turn.conversationId, turn };
 };
 
 /**
@@ -369,12 +500,13 @@ const upsertThreadLink = async (input: {
 
 /**
  * Fetch a message's files with the presence's credential and store them as
- * attachment rows — called ONLY after `recordEventOnce` (the dedupe means a
- * provider redelivery can never double-download) and `authorizeSpeaker` (an
- * unauthorized user's files are never fetched; the order is a security
- * property, not a style choice). Per-file failures become byteless `failed`
- * rows so the turn can say what happened; files past the per-message cap are
- * refused the same visible way.
+ * attachment rows. Called ONLY inside the event's ingest claim (a provider
+ * redelivery never fetches them a second time; a run that takes over a dead
+ * holder's claim may, and the dead run's unsent uploads are swept as stale)
+ * and after `authorizeSpeaker` (an unauthorized user's files are never
+ * fetched; the order is a security property, not a style choice). Per-file
+ * failures become byteless `failed` rows so the turn can say what happened;
+ * files past the per-message cap are refused the same visible way.
  */
 const ingestMessageFiles = async (
   presence: PresenceRow,
@@ -475,8 +607,11 @@ const createTurnOutcome = async (
   // Null = a GUEST speaker admitted by an approved space grant: no platform
   // identity to attribute, the framed prefix carries who spoke.
   userId: string | null,
-  attachmentIds?: string[],
-  sourceThreadId?: string | null,
+  attachmentIds: string[] | undefined,
+  // The event this turn answers: its id is stamped on the turn (a taken-over
+  // event finds it there, `landedOutcome`), and its thread is where the
+  // completion pass answers when the surface addresses finer than the link.
+  event: { eventId: string; sourceThreadId?: string | null },
 ): Promise<IngestOutcome> => {
   try {
     // Decode provider tokens LAST, after the speaker prefix was framed:
@@ -490,9 +625,12 @@ const createTurnOutcome = async (
       {
         source: presence.provider as ChannelProviderId,
         userId,
+        sourceEventId: event.eventId,
         // Where the person actually typed, when the surface says so — the
         // completion pass answers there instead of at the link's one address.
-        ...(sourceThreadId != null && { sourceThreadId }),
+        ...(event.sourceThreadId != null && {
+          sourceThreadId: event.sourceThreadId,
+        }),
       },
       attachmentIds,
     );
@@ -656,9 +794,18 @@ const cleanName = (raw: string): string =>
  * provider profile lookup. Fail-open at every level: a failed lookup leaves
  * that token verbatim, and a thrown decode returns the raw text - a
  * comprehension gap must never cost the turn.
+ *
+ * Also how the agent reads back its OWN posted replies (`list_my_replies`),
+ * so what it re-reads is in the same grammar it writes.
  */
-const decodeInboundText = async (
-  presence: PresenceRow,
+export const decodeInboundText = async (
+  presence: Pick<
+    PresenceRow,
+    "provider" | "credentials" | "identityRef" | "integrationId"
+  > & {
+    integration: Pick<PresenceRow["integration"], "externalId">;
+    agent: Pick<PresenceRow["agent"], "name">;
+  },
   text: string,
 ): Promise<string> => {
   const providerId = presence.provider as ChannelProviderId;
@@ -754,16 +901,25 @@ export const ingestDirectMessage = async (
   if (presence.identityRef && input.externalUserId === presence.identityRef) {
     return { kind: "ignored", reason: "agent-authored" };
   }
-  if (!(await recordEventOnce(presence.id, input.eventId))) {
-    return { kind: "duplicate" };
-  }
+  return ingestEvent(presence.id, input.eventId, DUPLICATE, () =>
+    directMessage(presence, input),
+  );
+};
+
+const directMessage = async (
+  presence: PresenceRow,
+  input: DirectMessageInput,
+): Promise<IngestOutcome> => {
+  const landed = await landedOutcome(presence, input.eventId);
+  if (landed) return landed;
 
   // Lane 1 - IDENTITY, first and unchanged. Note the deliberate ASYMMETRY
   // with the group door: there the grant is a precondition that holds even
   // members, because a channel is one shared room with one policy. A DM is
   // nobody's shared room - holding a linked teammate's own DM pending would
-  // be nonsense - so here identity wins and the person grant is the
-  // fallback for people identity cannot place.
+  // be nonsense - so here identity admits without a person row, and the
+  // person grant is the fallback for people identity cannot place. The one
+  // exception: Never on a member's own row still silences them (below).
   const speaker = await authorizeSpeaker(presence, input.externalUserId);
   if ("refusal" in speaker) {
     // Lane 2 - PERSON REACH: the knock. Admits an approved stranger as a
@@ -773,6 +929,31 @@ export const ingestDirectMessage = async (
     const person = await tryPersonLane(presence, input);
     if (person) return person;
     return { kind: "refused", message: speaker.refusal };
+  }
+
+  // ONE SETTING PER PERSON, members included: the person's row means what
+  // Contacts shows. A workspace member needs no row to be answered (identity
+  // is enough), but Never on their row silences their DMs like anyone
+  // else's. Silent, never a refusal: a blocked person hears nothing. A
+  // workspace owner is always answered: their row is fixed, so a stale
+  // Never from before it was locked can never silence them.
+  const { resolvePersonReach, workspaceOwnerRefs } =
+    await import("./agent-reach-service");
+  const personState = await resolvePersonReach({
+    agentId: presence.agent.id,
+    integrationId: presence.integrationId,
+    externalRef: input.externalUserId,
+  });
+  if (
+    personState === "blocked" &&
+    !(
+      await workspaceOwnerRefs(
+        presence.agent.workspaceId,
+        presence.integrationId,
+      )
+    ).has(input.externalUserId)
+  ) {
+    return { kind: "ignored", reason: "person-reach-denied" };
   }
 
   const conversation = await ensureDirectConversation(
@@ -802,7 +983,7 @@ export const ingestDirectMessage = async (
     input.text,
     speaker.userId,
     attachmentIds,
-    input.sourceThreadId,
+    input,
   );
 };
 
@@ -819,10 +1000,8 @@ export const ingestDirectMessage = async (
  * cannot govern: a provider with no reach facet, an unverifiable speaker, or
  * a foreign-tenant one (the same-tenant fence the space lane uses).
  *
- * `members_only` is deliberately NOT a person settlement - it says nothing
- * about one individual - but a row carrying it (hand-set, or normalized
- * from a legacy `denied`) reads as "not this person", which is the honest
- * reading of the pre-rename word.
+ * The person lane decides DIRECT messages only (a channel answers by its own
+ * setting). Its two settlements are `approved` and `blocked`.
  */
 const tryPersonLane = async (
   presence: PresenceRow,
@@ -865,10 +1044,15 @@ const tryPersonLane = async (
     });
     if (!probe || !probe.sameTenant) return null;
 
-    const label = reach.personLabel
-      ? await reach
-          .personLabel({ credentialsJson, externalRef: input.externalUserId })
-          .catch(() => null)
+    const label = reach.personProfile
+      ? ((
+          await reach
+            .personProfile({
+              credentialsJson,
+              externalRef: input.externalUserId,
+            })
+            .catch(() => null)
+        )?.name ?? null)
       : null;
     const grant = await ensurePersonGrant({
       agentId: presence.agent.id,
@@ -890,12 +1074,12 @@ const tryPersonLane = async (
   if (state === "pending") {
     return {
       kind: "refused",
-      message: await pendingReachMessage(presence.agent.workspaceId),
+      message: await pendingReachMessage(presence.agent.workspaceId, "person"),
     };
   }
-  // blocked / members_only (incl. legacy denied|revoked): a settled no. The
-  // person already heard the identity refusal once when they first wrote;
-  // repeating it forever would be nagging, so the agent simply stops.
+  // blocked: a settled no. The person already heard the identity refusal
+  // once when they first wrote; repeating it forever would be nagging, so
+  // the agent simply stops.
   return { kind: "ignored", reason: "person-reach-denied" };
 };
 
@@ -966,7 +1150,7 @@ const admitPersonGuest = async (
     `${speakerName} (guest): ${input.text}`,
     null,
     attachmentIds,
-    input.sourceThreadId,
+    input,
   );
 };
 
@@ -1002,9 +1186,17 @@ export const ingestGroupMessage = async (
   if (presence.identityRef && input.externalUserId === presence.identityRef) {
     return { kind: "ignored", reason: "agent-authored" };
   }
-  if (!(await recordEventOnce(presence.id, input.eventId))) {
-    return { kind: "duplicate" };
-  }
+  return ingestEvent(presence.id, input.eventId, DUPLICATE, () =>
+    groupMessage(presence, input),
+  );
+};
+
+const groupMessage = async (
+  presence: PresenceRow,
+  input: GroupMessageInput,
+): Promise<IngestOutcome> => {
+  const landed = await landedOutcome(presence, input.eventId);
+  if (landed) return landed;
 
   // THE CHANNEL GATE, first and for everyone. The grant is a PRECONDITION
   // for the channel, not a fallback for strangers: until a human settles
@@ -1020,17 +1212,14 @@ export const ingestGroupMessage = async (
   // THE APP ARM (PR 5a). An app has no identity to link (the email walk is
   // meaningless for a bot user), so the identity lane is skipped and the
   // channel's settlement is the whole decision: `approved` opens the room
-  // to everyone in it, apps included ("all approved means all");
-  // `members_only` says nothing about apps and admits none — SILENTLY, not
-  // with the "link your account" refusal a person hears, because text
-  // answered to an app is a loop seed. The blocked-person precedence law
-  // below applies to an app's ref exactly as to a person's.
+  // to everyone in it, apps included ("all approved means all"). An
+  // ungoverned surface admits no app - SILENTLY, never with the "link your
+  // account" refusal a person hears, because text answered to an app is a
+  // loop seed. A person-level row for the app's ref is not consulted here:
+  // it governs direct messages only (see below).
   if (input.speakerKind === "app") {
-    if (gate.state !== "approved") {
-      return { kind: "ignored", reason: "app-members-only" };
-    }
-    if (await personReachDenied(presence, input.externalUserId)) {
-      return { kind: "ignored", reason: "person-reach-denied" };
+    if (!gate.everyone) {
+      return { kind: "ignored", reason: "app-not-admitted" };
     }
     return admitGuest(presence, input, membership);
   }
@@ -1040,17 +1229,17 @@ export const ingestGroupMessage = async (
   const speaker = await authorizeSpeaker(presence, input.externalUserId);
   if ("refusal" in speaker) {
     // Lane 2 - SPACE REACH: `approved` opens the channel to everyone in it
-    // (same provider tenant), so a stranger is admitted as a guest. Under
-    // `members_only` the identity refusal stands.
-    if (gate.state === "approved") {
-      // THE PRECEDENCE LAW: a person-level "no" beats a space-level "yes".
-      // Opening a channel is a statement about a ROOM; blocking a person is
-      // a statement about a HUMAN, and the narrower, more deliberate one
-      // must win - otherwise a blocked individual walks straight back in
-      // through any open channel, which would make blocking meaningless.
-      if (await personReachDenied(presence, input.externalUserId)) {
-        return { kind: "ignored", reason: "person-reach-denied" };
-      }
+    // (same provider tenant), so a stranger is admitted as a guest. On an
+    // ungoverned surface the identity refusal stands.
+    //
+    // ONE SETTING PER SURFACE: in a channel, the channel's setting is the
+    // whole answer. A person's own row ("Never") governs direct messages
+    // only, so it is deliberately NOT read here. Letting it reach into
+    // channels silently overrode an open channel for people the owner had
+    // only meant to keep out of DMs. A channel is either open to everyone
+    // in it or silent; workspace members are always answered through the
+    // identity lane above.
+    if (gate.everyone) {
       const guest = await admitGuest(presence, input, membership);
       if (guest) return guest;
     }
@@ -1105,65 +1294,49 @@ export const ingestGroupMessage = async (
       `${speakerName}: ${input.text}`,
       speaker.userId,
       attachmentIds,
-      input.sourceThreadId,
+      input,
     ),
   );
-};
-
-/**
- * The person-level "no" the precedence law reads: a `blocked` row, or a row
- * carrying `members_only` (hand-set, or normalized from a legacy `denied`),
- * which reads as "not this one". Shared by the person and app arms of the
- * open-channel walk so the law cannot drift between them.
- */
-const personReachDenied = async (
-  presence: PresenceRow,
-  externalUserId: string,
-): Promise<boolean> => {
-  const { resolvePersonReach } = await import("./agent-reach-service");
-  const person = await resolvePersonReach({
-    agentId: presence.agent.id,
-    integrationId: presence.integrationId,
-    externalRef: externalUserId,
-  });
-  return person === "blocked" || person === "members_only";
 };
 
 /**
  * THE CHANNEL GATE. Resolves what this channel's settlement permits, before
  * any speaker is considered.
  *
- * Returns `open` with the settlement (the caller uses `approved` to decide
- * whether strangers get the guest lane), or a closed outcome that ends the
- * turn for everyone:
+ * Returns `open` (with `everyone`: whether strangers get the guest lane),
+ * or a closed outcome that ends the turn for everyone:
  *   - `pending`  -> the waiting line, naming the owner + dashboard link;
  *   - `blocked`  -> total silence (the "Don't allow" settlement);
  *   - no grant   -> plant it, post the owner cards, then answer as pending.
  *
- * Fails OPEN to `members_only` for anything it cannot govern - a provider
- * with no reach facet, or a thread that maps to no space (a DM). Those are
- * channels this feature does not model, and they must keep working exactly
- * as they did before the feature existed.
+ * Fails OPEN to members-only (`everyone: false`) for anything it cannot
+ * govern - a provider with no reach facet, or a thread that maps to no space
+ * (a DM). Those are surfaces this feature does not model, and they must keep
+ * working exactly as they did before the feature existed.
  */
 const checkChannelGate = async (
   presence: PresenceRow,
   input: GroupMessageInput,
 ): Promise<
-  | { kind: "open"; state: ReachState; membership?: SpaceMembershipSnapshot }
+  | {
+      kind: "open";
+      everyone: boolean;
+      membership?: SpaceMembershipSnapshot;
+    }
   | { kind: "closed"; outcome: IngestOutcome }
 > => {
   const providerId = presence.provider as ChannelProviderId;
   const reach = channelProvider(providerId).reach;
   const space = reach?.spaceOf(input.externalThreadId);
   // Ungoverned surfaces (no facet, or not a space): pre-feature behavior.
-  if (!reach || !space) return { kind: "open", state: "members_only" };
+  if (!reach || !space) return { kind: "open", everyone: false };
 
   const {
     ensureSpaceGrant,
     resolveSpaceReach,
     postReachCards,
     pendingReachMessage,
-    normalizeState,
+    parseState,
   } = await import("./agent-reach-service");
 
   let state = await resolveSpaceReach({
@@ -1216,18 +1389,19 @@ const checkChannelGate = async (
       kind: "closed",
       outcome: {
         kind: "refused",
-        message: await pendingReachMessage(presence.agent.workspaceId),
+        message: await pendingReachMessage(presence.agent.workspaceId, "space"),
       },
     };
   }
   const membership = await captureSpaceMembership(presence.id, space);
-  if (!membership?.grant || normalizeState(membership.grant.state) !== state) {
+  if (!membership?.grant || parseState(membership.grant.state) !== state) {
     return {
       kind: "closed",
       outcome: { kind: "ignored", reason: "stale-membership" },
     };
   }
-  return { kind: "open", state, membership };
+  // The only open settlement left is `approved`: everyone here.
+  return { kind: "open", everyone: state === "approved", membership };
 };
 
 /**
@@ -1318,7 +1492,7 @@ const admitGuest = async (
       framed,
       null,
       attachmentIds,
-      input.sourceThreadId,
+      input,
     ),
   );
 };
@@ -1347,11 +1521,15 @@ export const ingestGroupInvite = async (
   input: GroupInviteInput,
 ): Promise<GroupInviteOutcome> => {
   const presence = await requirePresence(input.agentChannelId);
+  return ingestEvent(presence.id, input.eventId, DUPLICATE, () =>
+    groupInvite(presence, input),
+  );
+};
 
-  if (!(await recordEventOnce(presence.id, input.eventId))) {
-    return { kind: "duplicate" };
-  }
-
+const groupInvite = async (
+  presence: PresenceRow,
+  input: GroupInviteInput,
+): Promise<GroupInviteOutcome> => {
   // A real self-join invalidates old probes even if the inviter is unknown
   // or an approved grant does not change. Do this before any remote lookup.
   if (input.channel) await noteSpaceMembershipJoin(presence.id);
@@ -1439,9 +1617,10 @@ export const ingestGroupLeave = async (
   input: GroupLeaveInput,
 ): Promise<void> => {
   const presence = await requirePresence(input.agentChannelId);
-  if (!(await recordEventOnce(presence.id, input.eventId))) return;
-  const snapshot = await captureSpaceDeparture(presence.id, input.channel);
-  if (snapshot) await commitSpaceDeparture(snapshot);
+  await ingestEvent(presence.id, input.eventId, undefined, async () => {
+    const snapshot = await captureSpaceDeparture(presence.id, input.channel);
+    if (snapshot) await commitSpaceDeparture(snapshot);
+  });
 };
 
 /** System messages are hints, never speakers or instructions. Reconcile through
@@ -1451,21 +1630,22 @@ export const ingestSystemNotice = async (input: {
   eventId: string;
 }): Promise<void> => {
   const presence = await requirePresence(input.agentChannelId);
-  if (!(await recordEventOnce(presence.id, input.eventId))) return;
-  void reconcileSpaceMemberships({ presenceId: presence.id, reason: "hint" })
-    .then((result) => {
-      if (result.cleaned > 0)
-        log.info(
-          { presenceId: presence.id, ...result },
-          "system notice reconciled space membership",
-        );
-    })
-    .catch((err: unknown) =>
-      log.warn(
-        { err, presenceId: presence.id },
-        "system notice reconcile failed",
-      ),
-    );
+  await ingestEvent(presence.id, input.eventId, undefined, async () => {
+    void reconcileSpaceMemberships({ presenceId: presence.id, reason: "hint" })
+      .then((result) => {
+        if (result.cleaned > 0)
+          log.info(
+            { presenceId: presence.id, ...result },
+            "system notice reconciled space membership",
+          );
+      })
+      .catch((err: unknown) =>
+        log.warn(
+          { err, presenceId: presence.id },
+          "system notice reconcile failed",
+        ),
+      );
+  });
 };
 
 export interface SessionStopInput {
@@ -1500,21 +1680,29 @@ export const ingestSessionStop = async (
   input: SessionStopInput,
 ): Promise<SessionStopOutcome> => {
   const presence = await requirePresence(input.agentChannelId);
-  if (!(await recordEventOnce(presence.id, input.eventId))) {
-    return { kind: "duplicate" };
-  }
-  const address = {
-    presenceId: presence.id,
-    channel: input.channel,
-    threadTs: input.threadTs,
-  };
-  const outcome = await stopLoaderTurn(presence, input.externalUserId, address);
-  // The provider leaves the session in `processing` (Slack documents it),
-  // so an authorized stop, or a loader with nothing behind it, settles it
-  // here. A refused one does NOT: the agent is still working, and the
-  // loader saying so is the truth.
-  if (outcome.kind !== "refused") await settleStoppedSession(address);
-  return outcome;
+  return ingestEvent(
+    presence.id,
+    input.eventId,
+    DUPLICATE,
+    async (): Promise<SessionStopOutcome> => {
+      const address = {
+        presenceId: presence.id,
+        channel: input.channel,
+        threadTs: input.threadTs,
+      };
+      const outcome = await stopLoaderTurn(
+        presence,
+        input.externalUserId,
+        address,
+      );
+      // The provider leaves the session in `processing` (Slack documents
+      // it), so an authorized stop, or a loader with nothing behind it,
+      // settles it here. A refused one does NOT: the agent is still working,
+      // and the loader saying so is the truth.
+      if (outcome.kind !== "refused") await settleStoppedSession(address);
+      return outcome;
+    },
+  );
 };
 
 export interface CardStopInput {

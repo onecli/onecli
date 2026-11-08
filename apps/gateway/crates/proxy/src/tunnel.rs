@@ -89,7 +89,7 @@ pub async fn open(
     available_apps: &db::AvailableApps,
     cache: &dyn CacheStore,
 ) -> Result<TcpStream, Refusal> {
-    let (hostname, port) = split_authority(host);
+    let (hostname, port) = egress::split_authority(host, 443);
     let start = std::time::Instant::now();
 
     // The app-availability gate (step 7): a restricted workspace reaches
@@ -130,12 +130,14 @@ pub async fn open(
     .await;
 
     let workspace_id = proxy_ctx.workspace_id.as_deref();
+    let agent_id = proxy_ctx.agent_id.as_deref();
     let refused: Option<(StatusCode, RequestDecision, Response<ForwardResponseBody>)> =
         match decision {
             PolicyDecision::Allow => None,
             PolicyDecision::Blocked { rule_name } => {
                 warn!(host = %hostname, rule = %rule_name, "tunnel BLOCKED by policy rule");
-                let resp = response::blocked_by_policy(METHOD, PATH, &rule_name, workspace_id);
+                let resp =
+                    response::blocked_by_policy(METHOD, PATH, &rule_name, agent_id, workspace_id);
                 Some((
                     StatusCode::FORBIDDEN,
                     RequestDecision::Blocked { rule_name },
@@ -153,7 +155,7 @@ pub async fn open(
                     RequestDecision::Blocked {
                         rule_name: RULE.to_string(),
                     },
-                    response::blocked_by_policy(METHOD, PATH, RULE, workspace_id),
+                    response::blocked_by_policy(METHOD, PATH, RULE, agent_id, workspace_id),
                 ))
             }
             PolicyDecision::RateLimited {
@@ -176,7 +178,7 @@ pub async fn open(
                 Some((
                     StatusCode::FORBIDDEN,
                     RequestDecision::BlockedByDefaultPolicy,
-                    response::blocked_by_default_policy(METHOD, PATH, host, workspace_id),
+                    response::blocked_by_default_policy(METHOD, PATH, host, agent_id, workspace_id),
                 ))
             }
         };
@@ -319,53 +321,4 @@ fn record_refusal(
 /// wrapped latency would be a lie in the row.
 fn elapsed_ms(start: std::time::Instant) -> u32 {
     u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX)
-}
-
-/// The host and port a CONNECT authority names.
-///
-/// Bracket-aware, unlike `strip_port`: `[::1]:443` is the IPv6 loopback on
-/// 443, not a host called `[`, and the destination guard can only refuse an
-/// address it is shown (its `normalize_host` strips the brackets itself).
-/// 443 when no port is named: every browser names one, but the proxy
-/// protocol does not require it.
-#[must_use]
-fn split_authority(authority: &str) -> (&str, u16) {
-    let (host, port) = match authority.rsplit_once(':') {
-        // `[v6]:port` or `host:port`. A bare `v6` has colons too but no
-        // brackets, and must not lose its last group to a port.
-        Some((host, port)) if host.ends_with(']') || !host.contains(':') => {
-            (host, port.parse().ok())
-        }
-        _ => (authority, None),
-    };
-    (host, port.unwrap_or(443))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn authority_splits_host_and_port_with_443_as_the_default() {
-        assert_eq!(split_authority("example.com"), ("example.com", 443));
-        assert_eq!(split_authority("example.com:443"), ("example.com", 443));
-        assert_eq!(split_authority("example.com:8443"), ("example.com", 8443));
-        assert_eq!(split_authority("example.com:nope"), ("example.com", 443));
-        assert_eq!(split_authority("10.0.0.5:80"), ("10.0.0.5", 80));
-    }
-
-    /// The shape `strip_port` gets wrong: the guard must be shown `[::1]`,
-    /// not `[`, or a loopback tunnel becomes a lookup failure instead of a
-    /// refusal.
-    #[test]
-    fn authority_keeps_a_bracketed_ipv6_literal_whole() {
-        assert_eq!(split_authority("[::1]:443"), ("[::1]", 443));
-        assert_eq!(split_authority("[::1]"), ("[::1]", 443));
-        assert_eq!(
-            split_authority("[::ffff:127.0.0.1]:8443"),
-            ("[::ffff:127.0.0.1]", 8443)
-        );
-        // Unbracketed: no port can be told apart from a group, so none is.
-        assert_eq!(split_authority("::1"), ("::1", 443));
-    }
 }

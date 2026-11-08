@@ -1,12 +1,10 @@
 "use client";
 
 import {
-  useMutation,
   useQuery,
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { appBlocklist } from "@/lib/api";
 import type { BlocklistHostState, PageScope } from "@/lib/api/app-blocklist";
 import { queryKeys } from "@/lib/api/keys";
@@ -107,20 +105,5 @@ export const useSetBlocklistHost = (provider: string, scope: PageScope) => {
     refresh: refreshBlocklist(provider),
     failure: (qc, { host, enabled }) =>
       `Couldn't ${enabled ? "block" : "unblock"} ${hostName(qc, provider, host.hostId)}`,
-  });
-};
-
-export const useRemoveBlocklistRule = (provider: string, scope: PageScope) => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (ruleId: string) =>
-      appBlocklist.remove(provider, ruleId, scope),
-    onSuccess: () => {
-      qc.invalidateQueries({
-        queryKey: queryKeys.appBlocklist.byProvider(provider),
-      });
-      invalidateGatewayCache();
-    },
-    onError: () => toast.error("Failed to remove host"),
   });
 };

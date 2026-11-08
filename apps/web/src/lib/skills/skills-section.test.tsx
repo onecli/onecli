@@ -63,6 +63,7 @@ vi.mock("@/hooks/use-skills", () => ({
   }),
   useOrgSkill: () => ({ data: null, isPending: false, isSuccess: false }),
   useCreateSkill: () => ({ mutate: state.create, isPending: false }),
+  useImportSkillZip: () => ({ mutate: vi.fn(), isPending: false }),
   useUpdateSkill: () => ({ mutate: state.update, isPending: false }),
   useSetSkillEnabled: () => ({ mutate: state.setEnabled, isPending: false }),
   useDeleteSkill: () => ({ mutate: state.remove, isPending: false }),
@@ -116,6 +117,11 @@ const failedListing = vi.hoisted(() => (status: number, message: string) => ({
 const noLibrary = vi.hoisted(() =>
   failedListing(404, "No skill library is connected"),
 );
+
+const orgState = vi.hoisted(() => ({ isAdmin: false }));
+vi.mock("@/hooks/use-org", () => ({
+  useOrgMembership: () => ({ data: { isAdmin: orgState.isAdmin } }),
+}));
 
 vi.mock("@/hooks/use-skill-library", () => ({
   isNoLibrary: (error: unknown) =>
@@ -272,6 +278,9 @@ const renderSection = (tier: "agent" | "organization" = "agent") =>
 beforeEach(() => {
   state.skills = [];
   state.orgSkills = [];
+  orgState.isAdmin = false;
+  // The workspace layout writes this on every workspace page (any edition).
+  document.cookie = "onecli-default-org=org-1;path=/";
   state.isPending = false;
   state.isError = false;
   state.detail = null;
@@ -491,6 +500,56 @@ describe("the create dialog", () => {
     expect(screen.getByText("Fill in the required fields.")).toBeVisible();
   });
 
+  it("an imported skill lists its files read-only and a save sends none, so the server keeps them", async () => {
+    state.skills = [skill()];
+    state.detail = {
+      ...skill(),
+      content: "Imported body",
+      files: [
+        {
+          path: "scripts/run.sh",
+          content: "",
+          bytes: 90,
+          binary: false,
+          executable: true,
+          editable: false,
+        },
+        {
+          path: "assets/logo.png",
+          content: "",
+          bytes: 4096,
+          binary: true,
+          executable: false,
+          editable: false,
+        },
+      ],
+    };
+    renderSection();
+    await user.click(
+      screen.getByRole("button", { name: "Edit release-checklist" }),
+    );
+    // Listed, not editable: no path inputs, no Add file.
+    expect(screen.getByText("Files (3)")).toBeVisible();
+    expect(screen.getByText("scripts/run.sh")).toBeVisible();
+    expect(screen.getByText(/runs ·/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Add file/ })).toBeNull();
+    // The description stays one line: Enter adds nothing.
+    const description = screen.getByLabelText(/^Description/);
+    await user.clear(description);
+    await user.type(description, "New words{Enter}more");
+    expect(description).toHaveValue("New wordsmore");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(state.update).toHaveBeenCalledTimes(1);
+    const [{ patch }] = state.update.mock.calls[0] as [
+      { patch: Record<string, unknown> },
+    ];
+    expect(patch).toEqual({
+      description: "New wordsmore",
+      content: "Imported body",
+    });
+  });
+
   it("deleting asks first, and only then fires the mutation", async () => {
     state.skills = [skill()];
     state.detail = { ...skill(), content: "Existing body", files: [] };
@@ -580,7 +639,7 @@ describe("the create dialog", () => {
     await user.type(screen.getByLabelText(/^Description/), "How to ship");
     await user.type(screen.getByLabelText(/Instructions/), "Run it.");
     await user.click(screen.getByRole("button", { name: /Add file/ }));
-    await user.type(screen.getByLabelText("File 1 path"), "Notes.md");
+    await user.type(screen.getByLabelText("File 1 path"), ".notes.md");
     await user.type(screen.getByLabelText("File 1 content"), "More.");
 
     // Two problems: an empty Name above a bad file. Form order decides, and
@@ -599,7 +658,7 @@ describe("the create dialog", () => {
       "true",
     );
     expect(screen.getByLabelText("File 1 path")).toHaveAccessibleDescription(
-      /at most two lowercase segments/,
+      /at most six folders deep/,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
       "Fix the highlighted file.",
@@ -656,6 +715,52 @@ describe("the create dialog", () => {
 });
 
 describe("the GitHub library", () => {
+  it("no library, org admin: Add to library links to the workspace's org Skills page, right after New skill", () => {
+    orgState.isAdmin = true;
+    renderSection();
+    const link = screen.getByRole("link", { name: /Add to library/ });
+    expect(link).toHaveAttribute("href", "/org/org-1/skills");
+    const newSkill = screen.getByRole("button", { name: /New skill/ });
+    expect(
+      newSkill.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(newSkill.parentElement).toBe(link.parentElement);
+  });
+
+  it("no library, org admin, but no workspace org known: no link rather than a wrong one", () => {
+    orgState.isAdmin = true;
+    document.cookie = "onecli-default-org=;path=/;max-age=0";
+    renderSection();
+    expect(screen.queryByRole("link", { name: /Add to library/ })).toBeNull();
+  });
+
+  it("empty: every way to add a skill sits together in the card, New skill first", () => {
+    orgState.isAdmin = true;
+    renderSection();
+    expect(screen.getByText("No skills yet")).toBeInTheDocument();
+    const newSkill = screen.getByRole("button", { name: /New skill/ });
+    const zip = screen.getByRole("button", { name: /Upload a zip/ });
+    const library = screen.getByRole("link", { name: /Add to library/ });
+    expect(zip.parentElement).toBe(newSkill.parentElement);
+    expect(library.parentElement).toBe(newSkill.parentElement);
+    expect(
+      newSkill.compareDocumentPosition(zip) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /New skill/ })).toHaveLength(
+      1,
+    );
+  });
+
+  it("no library, not an admin: no library button at all", () => {
+    renderSection();
+    expect(screen.queryByRole("link", { name: /Add to library/ })).toBeNull();
+  });
+
+  it("org page never shows Add to library, even for an admin", () => {
+    orgState.isAdmin = true;
+    renderSection("organization");
+    expect(screen.queryByRole("link", { name: /Add to library/ })).toBeNull();
+  });
   it("no repo connected: no Add-from-library button and no library section", () => {
     renderSection();
     expect(

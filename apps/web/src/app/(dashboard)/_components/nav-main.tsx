@@ -6,6 +6,7 @@ import { type LucideIcon } from "lucide-react";
 
 import {
   SidebarGroup,
+  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -26,9 +27,12 @@ export interface NavItem {
 
 interface NavMainProps {
   items: NavItem[] | NavItem[][];
+  /** Optional group label above the items (the workspace nav's "Workspace",
+   *  matching the Agents group label above it). */
+  label?: string;
 }
 
-export const NavMain = ({ items }: NavMainProps) => {
+export const NavMain = ({ items, label }: NavMainProps) => {
   const pathname = usePathname();
 
   const isActive = (url: string) => {
@@ -43,6 +47,11 @@ export const NavMain = ({ items }: NavMainProps) => {
 
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
+      {label && (
+        <SidebarGroupLabel className="group-data-[collapsible=icon]:hidden">
+          {label}
+        </SidebarGroupLabel>
+      )}
       {groups.map((group, i) => (
         <div key={i}>
           {i > 0 && <SidebarSeparator className="my-2" />}

@@ -12,10 +12,11 @@ import {
  * The TS half of the TS↔Rust KMS envelope contract.
  *
  * TypeScript writes the 4-part envelope (`ee/kms-crypto.ts` at secret
- * creation); the Rust gateway decrypts it (`apps/gateway/src/ee/kms_crypto.rs`
- * on the request path). Neither can import the other, so the contract is a
- * committed fixture both sides must open: `kms-envelope.fixture.json` here,
- * `include_str!`-ed by the Rust twin (the corpus-test pattern).
+ * creation); the Rust gateway decrypts it
+ * (`apps/gateway/crates/ee/ee/src/kms_crypto.rs` on the request path).
+ * Neither can import the other, so the contract is a committed fixture both
+ * sides must open: `kms-envelope.fixture.json` here, `include_str!`-ed by the
+ * Rust twin (the corpus-test pattern).
  *
  * This used to be guarded only by the gateway E2E suite against a KMS
  * emulator; the E2E lane now runs the enterprise edition (local AES), so this

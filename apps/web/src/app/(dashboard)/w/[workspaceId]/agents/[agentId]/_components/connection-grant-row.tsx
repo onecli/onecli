@@ -1,11 +1,17 @@
 "use client";
 
 import { getApp } from "@onecli/api/apps/registry";
-import { connectionTags } from "@onecli/api/lib/connection-display";
+import {
+  connectionTags,
+  displayConnectionLabel,
+  extractDatabaseTarget,
+  shortDatabaseServer,
+} from "@onecli/api/lib/connection-display";
 import { KeyRound, Settings2 } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
+import { cn } from "@onecli/ui/lib/utils";
 import type { AgentGrantConnection, Connection } from "@/lib/api";
 import type { CredentialAccessStatus } from "@/lib/api/policy-visibility";
 import { useEffectiveAppPermissions } from "@/lib/api/policy-visibility";
@@ -17,6 +23,7 @@ import {
 import { AppIcon } from "@/lib/components/app-icon";
 import { EffectivePill } from "./effective-pill";
 import { ConnectionRowMenu } from "./connection-row-menu";
+import { chooserTileClassName } from "./chooser-layout";
 
 interface ConnectionGrantRowProps {
   agentId: string;
@@ -33,10 +40,14 @@ interface ConnectionGrantRowProps {
   credentialOrgBlocked: boolean;
   /** The provider has a permission catalog (Manage needs one). */
   hasCatalog: boolean;
-  onManage: () => void;
+  /** Opens the Manage sheet; without it the row offers no Manage. */
+  onManage?: () => void;
   /** Called before a toggle writes, so the list can keep this row where it
    * is while its state flips (no jumping out from under the pointer). */
   onBeforeToggle?: () => void;
+  /** The new agent's chooser: a bordered tile with no ⋮ menu. Given no
+   * `onManage` either, its switch is its only control. */
+  compact?: boolean;
 }
 
 export const ConnectionGrantRow = ({
@@ -49,6 +60,7 @@ export const ConnectionGrantRow = ({
   hasCatalog,
   onManage,
   onBeforeToggle,
+  compact = false,
 }: ConnectionGrantRowProps) => {
   const attach = useSetConnectionGrant();
   const detach = useDetachConnection();
@@ -102,9 +114,17 @@ export const ConnectionGrantRow = ({
       ? "Blocked by your organization"
       : null;
 
+  const shownName =
+    displayConnectionLabel(connection.label, connection.metadata) ??
+    app?.name ??
+    connection.provider;
   // What the connection itself reaches (e.g. a GitHub App's repos), so two
   // connections to the same account never read identically.
-  const tags = connectionTags(connection.metadata);
+  // A database names its server instead, short (`orders-prod`).
+  const target = extractDatabaseTarget(connection.metadata);
+  const tags = target
+    ? [shortDatabaseServer(target)]
+    : connectionTags(connection.metadata);
   const reach =
     tags.length === 0
       ? null
@@ -113,7 +133,12 @@ export const ConnectionGrantRow = ({
         : `${tags.slice(0, 2).join(", ")} +${tags.length - 2}`;
 
   return (
-    <div className="flex items-center justify-between gap-4 py-3">
+    <div
+      className={cn(
+        "flex items-center justify-between",
+        compact ? chooserTileClassName : "gap-4 py-3",
+      )}
+    >
       <div className="flex min-w-0 items-center gap-3">
         <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
           {app ? (
@@ -129,16 +154,19 @@ export const ConnectionGrantRow = ({
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">
-              {connection.label ?? app?.name ?? connection.provider}
-            </span>
+            <span className="truncate text-sm font-medium">{shownName}</span>
             {connection.scope === "organization" && (
               <Badge variant="outline" className="text-[10px] font-normal">
-                Organization
+                {compact ? "Org" : "Organization"}
               </Badge>
             )}
           </div>
-          <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+          <div
+            className={cn(
+              "text-muted-foreground mt-0.5 flex items-center text-xs",
+              compact ? "min-w-0 flex-wrap gap-x-2" : "gap-2",
+            )}
+          >
             <span className="truncate">
               {app?.name ?? connection.provider}
               {reach && (
@@ -162,7 +190,12 @@ export const ConnectionGrantRow = ({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-3">
+      <div
+        className={cn(
+          "flex shrink-0 items-center",
+          compact ? "gap-2" : "gap-3",
+        )}
+      >
         {/* The switch is the status for the ordinary cases: off = unattached,
             on + working = usable. A pill appears only when it adds something
             the switch cannot — Limited, Blocked, Network only. An org block
@@ -174,7 +207,7 @@ export const ConnectionGrantRow = ({
           credentialStatus !== "usable" && (
             <EffectivePill status={credentialStatus} />
           )}
-        {manageable && (
+        {manageable && onManage && (
           // Ghost, not outline: a tertiary action repeated on every row must
           // not out-weigh the status pills — quiet shape, full-strength text.
           <Button variant="ghost" size="xs" onClick={onManage}>
@@ -193,15 +226,15 @@ export const ConnectionGrantRow = ({
             disabled={toggleDisabled}
             // Same fallback chain as the visible name above — the accessible
             // name must match what sighted users read (label-in-name).
-            aria-label={`${attached || orgGranted ? "Detach" : "Attach"} ${connection.label ?? app?.name ?? connection.provider}`}
+            aria-label={`${attached || orgGranted ? "Detach" : "Attach"} ${shownName}`}
             onCheckedChange={toggle}
           />
-          <ConnectionRowMenu
-            connection={connection}
-            active={attached || orgGranted}
-            toggleDisabled={toggleDisabled}
-            onToggle={toggle}
-          />
+          {!compact && (
+            <ConnectionRowMenu
+              connection={connection}
+              active={attached || orgGranted}
+            />
+          )}
         </div>
       </div>
     </div>

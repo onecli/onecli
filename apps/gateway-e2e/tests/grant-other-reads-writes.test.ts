@@ -1,5 +1,10 @@
 import { describe, expect } from "vitest";
 
+import {
+  compileConnectionStack,
+  defaultConnectionGrant,
+} from "@onecli/api/services/grants-compile";
+
 import { decideApproval, waitForApproval } from "../src/control.js";
 import { compiledGrantStack, type WorldSpec } from "../src/fixtures.js";
 import { startForwardProxy } from "../src/forward-proxy.js";
@@ -15,6 +20,11 @@ import { scenario } from "../src/scenario.js";
  * "All other reads" on Allowed, an unlisted GET passes the grant, an unlisted
  * POST still asks, and a catalog tool the user did not pick stays blocked.
  *
+ * A new connection's default grant allows Other reads only for a catalog
+ * checked safe for them (`unlistedReads: "allow"`): GitHub App passes that
+ * same unlisted GET, while Cloudflare, whose API answers a GET with a tunnel
+ * token, holds it.
+ *
  * Hermetic: an ALLOWED request is forwarded to a local forward proxy that
  * records it (nothing leaves the machine), the same pattern as
  * navan.test.ts; held requests are DENIED, and blocks never egress.
@@ -26,6 +36,20 @@ const world = (otherReads: "allow" | "ask"): WorldSpec => ({
   appConnections: [{ provider: "github-app", label: "acme" }],
   rules: [...compiledGrantStack("github-app", ["get_repo"], { otherReads })],
 });
+
+/** The REAL default grant (what a new connection gets) for `provider`. */
+const defaultWorld = (provider: string): WorldSpec => {
+  const grant = defaultConnectionGrant(provider);
+  if (grant.access !== "custom") throw new Error("expected a custom grant");
+  return {
+    appConnections: [{ provider, label: "acme" }],
+    rules: compiledGrantStack(provider, grant.allow, {
+      ask: grant.ask,
+      otherReads: grant.otherReads,
+      otherWrites: grant.otherWrites,
+    }),
+  };
+};
 
 describe("customized grants: all other reads / writes (wire-level)", () => {
   scenario(
@@ -102,7 +126,7 @@ describe("customized grants: all other reads / writes (wire-level)", () => {
   );
 
   scenario(
-    "the default (both Needs approval) still holds an unlisted GET",
+    "All other reads = Needs approval holds an unlisted GET",
     async (cx) => {
       await cx.seed({ ...world("ask"), withApiKey: true });
       const gw = await cx.startGateway();
@@ -118,4 +142,162 @@ describe("customized grants: all other reads / writes (wire-level)", () => {
       expect((await held.response).status).toBe(403);
     },
   );
+});
+
+describe("the default grant's Other reads (wire-level)", () => {
+  scenario(
+    "an audited app (GitHub App): an unlisted GET is forwarded without approval",
+    async (cx) => {
+      await cx.seed(defaultWorld("github-app"));
+      const proxy = await startForwardProxy();
+      try {
+        const gw = await cx.startGateway({
+          env: {
+            HTTP_PROXY: proxy.url,
+            HTTPS_PROXY: proxy.url,
+            NO_PROXY: "127.0.0.1",
+          },
+        });
+        const res = await throughProxy(gw.origin, {
+          url: `${GH}/installation/repositories`,
+          token: cx.ids.agentToken,
+          timeoutMs: 30_000,
+        });
+        expect(res.status).toBe(200);
+        expect(proxy.requests().map((r) => r.url)).toEqual([
+          `${GH}/installation/repositories`,
+        ]);
+      } finally {
+        await proxy.close();
+      }
+    },
+  );
+
+  scenario(
+    "an app with a credential-returning GET (Cloudflare tunnel token) holds it",
+    async (cx) => {
+      await cx.seed({ ...defaultWorld("cloudflare"), withApiKey: true });
+      const gw = await cx.startGateway();
+      const url =
+        "http://api.cloudflare.com/client/v4/accounts/a1/cfd_tunnel/t1/token";
+
+      const held = await startHeldRequest(
+        gw.origin,
+        { url, token: cx.ids.agentToken },
+        HOLD_MS,
+      );
+      const approval = await waitForApproval(gw, cx.ids.apiKey);
+      expect(approval.url).toContain("/cfd_tunnel/t1/token");
+      await decideApproval(gw, cx.ids.apiKey, approval.id, "deny");
+      expect((await held.response).status).toBe(403);
+    },
+  );
+});
+
+describe("a read that returns a secret always asks (wire-level)", () => {
+  // GitHub's secret scanning alerts carry the leaked secret in clear text.
+  // `get_repo` (`/repos/*/*`) and "All other reads" both reach them, so the
+  // gateway holds them whatever the grant allows.
+  const ALERTS = `${GH}/repos/acme/web/secret-scanning/alerts`;
+  const WHY = "Secret scanning alerts include the leaked secret in clear text";
+
+  scenario(
+    "the default GitHub grant holds it, and the card says why",
+    async (cx) => {
+      await cx.seed({ ...defaultWorld("github"), withApiKey: true });
+      const gw = await cx.startGateway();
+
+      const held = await startHeldRequest(
+        gw.origin,
+        { url: ALERTS, token: cx.ids.agentToken },
+        HOLD_MS,
+      );
+      const approval = await waitForApproval(gw, cx.ids.apiKey);
+      expect(approval.url).toContain("/secret-scanning/alerts");
+      expect(approval.summary?.details).toContainEqual({
+        label: "Why it asks",
+        value: WHY,
+      });
+      await decideApproval(gw, cx.ids.apiKey, approval.id, "deny");
+      expect((await held.response).status).toBe(403);
+    },
+  );
+
+  scenario(
+    "a full-access grant asks too, and an approval forwards it",
+    async (cx) => {
+      const [full] = compileConnectionStack("Grant: e2e", "github-app", {
+        access: "full",
+      });
+      if (!full) throw new Error("expected the full-access grant row");
+      await cx.seed({
+        appConnections: [{ provider: "github-app", label: "acme" }],
+        rules: [
+          {
+            name: full.name,
+            action: full.action,
+            source: "grant",
+            identities: ["agent"],
+            targets: [
+              { kind: "connection", connectionIndex: 0, tools: full.tools },
+            ],
+          },
+        ],
+        withApiKey: true,
+      });
+      const proxy = await startForwardProxy();
+      try {
+        const gw = await cx.startGateway({
+          env: {
+            HTTP_PROXY: proxy.url,
+            HTTPS_PROXY: proxy.url,
+            NO_PROXY: "127.0.0.1",
+          },
+        });
+        const held = await startHeldRequest(
+          gw.origin,
+          { url: ALERTS, token: cx.ids.agentToken },
+          HOLD_MS,
+        );
+        expect(proxy.requests()).toEqual([]);
+        const approval = await waitForApproval(gw, cx.ids.apiKey);
+        await decideApproval(gw, cx.ids.apiKey, approval.id, "approve");
+        expect((await held.response).status).toBe(200);
+        expect(proxy.requests().map((r) => r.url)).toEqual([ALERTS]);
+      } finally {
+        await proxy.close();
+      }
+    },
+  );
+
+  scenario("a rule that blocks it still blocks it", async (cx) => {
+    await cx.seed({
+      appConnections: [{ provider: "github-app", label: "acme" }],
+      rules: [
+        {
+          name: "no secret scanning",
+          action: "block",
+          identities: ["agent"],
+          targets: [
+            {
+              hostPattern: "api.github.com",
+              pathPattern: "/repos/*/*/secret-scanning/*",
+            },
+          ],
+        },
+        ...compiledGrantStack("github-app", ["get_repo"]),
+      ],
+    });
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: ALERTS,
+      token: cx.ids.agentToken,
+    });
+    expect(res.status).toBe(403);
+    expect(res.json()).toMatchObject({
+      error: "blocked_by_policy",
+      rule_name: "no secret scanning",
+    });
+  });
 });

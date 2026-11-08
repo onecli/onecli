@@ -203,6 +203,27 @@ export const findPeople = async (
     .map(({ rank, ...candidate }) => (void rank, candidate));
 };
 
+/** The channels the agent's bot is IN, by name: what a platform post (an
+ * eval report) can land in. Empty when there is no active presence or the
+ * provider refused. Read-only. */
+export const listMemberChannels = async (
+  agentId: string,
+): Promise<{ ref: string; name: string; private: boolean }[]> => {
+  const presence = await presenceOf(agentId);
+  if (!presence) return [];
+  const channels = await fromProvider(presence, (provider, credentialsJson) =>
+    provider.listChannels({ credentialsJson, ownOnly: true }),
+  );
+  return (channels ?? [])
+    .flatMap((channel) => {
+      const name = cleanLabel(channel.name);
+      return name
+        ? [{ ref: channel.ref, name: `#${name}`, private: channel.private }]
+        : [];
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+};
+
 /** Channel search — read-only discovery ("does #general exist, am I in
  * it?"). Sees what channels:read/groups:read grant: public channels plus
  * private ones the bot joined. Never a send power. */
@@ -214,10 +235,19 @@ export const findChannels = async (
   if (!presence) return [];
   const normalized = searchKeyOf(query.replace(/^#/, ""));
   if (!normalized) return [];
+  // The send path's pick key: exact name, no separator folding.
+  const exact = normalizeMentionName(query.replace(/^#/, ""));
 
   const results: (ChannelCandidate & { rank: number })[] = [];
   const channels = await fromProvider(presence, (provider, credentialsJson) =>
-    provider.listChannels({ credentialsJson }),
+    provider.listChannels({
+      credentialsJson,
+      // The agent's own channel with exactly this name settles the search,
+      // so the workspace-wide read is skipped: slow and rate-limited on a
+      // big workspace. A folded match ("guy_private" for guy-private) does
+      // not, since that read may hold the exact one.
+      enough: (name) => normalizeMentionName(cleanLabel(name)) === exact,
+    }),
   );
   for (const channel of channels ?? []) {
     const name = cleanLabel(channel.name);

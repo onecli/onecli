@@ -50,36 +50,64 @@ const log = logger.child({ component: "greeting-service" });
  *      fails coded `no_model_key` would put a failure card at the very top of
  *      a brand-new thread. The web renders its own empty-thread welcome in
  *      that case — in the PRODUCT's voice, not the agent's, because words the
- *      agent never said must never appear in its bubble.
+ *      agent never said must never appear in its bubble. For the same reason
+ *      the greeting itself is a BRIEF, never a script to recite: what lands
+ *      in the agent's bubble is always the agent's own writing.
  */
 
 /** How much of a person's display name may reach the model instruction. */
 const FIRST_NAME_MAX_CHARS = 40;
 
-/** What the agent is asked to do. The person's first name is passed so the
- * greeting can be personal; the connection picks match the card the web
- * renders under a greeting turn. Kept short and directive: the whole point is
- * a two-sentence hello, not an essay. */
-export const buildGreetingInstruction = (firstName: string | null): string =>
+/** How much of a person's email may reach the model instruction (RFC 5321
+ * caps an address at 254). */
+const EMAIL_MAX_CHARS = 254;
+
+/** What the agent is asked to do: write its own first message, in its own
+ * voice, to the brief below. A brief, never a script: the welcome must be
+ * the agent's words (the product's no-ventriloquism rule, header point 3),
+ * so it reads like every other reply it gives. The web renders the Gmail
+ * card and an "Add different tools" button under the reply, so the brief
+ * points at Gmail and asks for no links or other apps. */
+export const buildGreetingInstruction = ({
+  email,
+  agentName,
+}: {
+  email: string | null;
+  agentName: string;
+}): string =>
   [
-    "This is the very first message in a brand-new conversation. Greet the person" +
-      (firstName ? ` (their first name is ${firstName})` : "") +
-      " in your own voice, in two or three short sentences.",
-    "Say you are ready to work, and suggest they start by connecting a first app:",
-    "Gmail or GitHub to work with, or Slack to talk with you from there.",
-    "Do not list capabilities, do not use headings or bullet points, do not ask more than one question.",
+    "This is the very first message in a brand-new conversation with a person who just signed up" +
+      (email ? ` (their email is ${email})` : "") +
+      ".",
+    `Write your welcome in your own words, as ${agentName}, in three or four short sentences:`,
+    "greet them, say who you are and that you can get work done for them even while they are away,",
+    "ask what their name is, and suggest they start by connecting their Gmail with the button below your message.",
+    "Do not list capabilities, do not use headings, bullet points or links, do not name other apps, and do not use tools.",
   ].join(" ");
 
 /**
- * First name only, never an email address — and BOUNDED, because this is a
- * user-controlled string (`updateProfile` accepts 1..255 chars of anything)
- * on its way into a model instruction. Control characters are stripped and
- * the name is capped: the same treatment every other user-supplied string
- * gets before it reaches the model (see `stripControl` in turn-service's
- * bridge). A person can still only steer their OWN agent this way, so the
- * bound is hygiene rather than a trust boundary — but an unbounded splice
- * into platform-authored text is exactly the shape that stops being harmless
- * the moment someone else's name renders here.
+ * An email address bounded and cleaned for a model instruction: control
+ * characters stripped, whitespace removed, length capped. The email is the
+ * account's own (set at sign-up, verified by the auth provider), and it only
+ * ever reaches that person's own agent; the bound is hygiene, not a trust
+ * boundary.
+ */
+export const emailForGreeting = (
+  email: string | null | undefined,
+): string | null => {
+  const clean = stripControl(email ?? "").replace(/\s+/g, "");
+  if (!clean || !clean.includes("@")) return null;
+  return clean.length > EMAIL_MAX_CHARS ? null : clean;
+};
+
+/**
+ * A name, first word only, BOUNDED, because it is a user-controlled string
+ * (a display name or an agent name, 1..255 chars of anything) on its way
+ * into a model instruction. Control characters are stripped and the word is
+ * capped: the same treatment every other user-supplied string gets before it
+ * reaches the model (see `stripControl` in turn-service's bridge). A person
+ * can still only steer their OWN agent this way, so the bound is hygiene
+ * rather than a trust boundary.
  */
 export const firstNameOf = (name: string | null | undefined): string | null => {
   const first = stripControl(name ?? "")
@@ -163,14 +191,23 @@ export const greetEmptyDirectThread = async (
     );
     if (blocker) return;
 
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: { name: true },
-    });
+    const [user, agent] = await Promise.all([
+      db.user.findUnique({
+        where: { id: userId },
+        select: { email: true },
+      }),
+      db.agent.findFirst({
+        where: { id: conversation.agentId, workspaceId },
+        select: { name: true },
+      }),
+    ]);
 
     const turnId = await claimGreeting(
       conversation.id,
-      buildGreetingInstruction(firstNameOf(user?.name)),
+      buildGreetingInstruction({
+        email: emailForGreeting(user?.email),
+        agentName: firstNameOf(agent?.name) ?? "your assistant",
+      }),
     );
     // Lost the race — another open is already greeting this thread.
     if (!turnId) return;

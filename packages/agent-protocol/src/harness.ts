@@ -1,4 +1,5 @@
 import type { AgentEvent } from "./events";
+import type { TURN_FAILURE_CODES } from "./failure-codes";
 
 /**
  * A text delta as a harness reports it: the canonical `text.delta`, plus the
@@ -69,18 +70,47 @@ interface HarnessMessageReplied {
 }
 
 /**
+ * The turn ended cleanly but UNANSWERED: the model wrote nothing visible
+ * (no text, no tool call) and the harness says why. A provider safety stop
+ * (`model_refused`), or an empty response its own retries could not recover
+ * (`model_empty_response`). Without this a clean end with no words reads as
+ * a normal `turn.done`, and the person is left with silence.
+ *
+ * Emitted at most once, before the terminal event, and only from the
+ * harness's own stop signal: never inferred from the absence of text (a
+ * steered run can legitimately end with its words stored under a follow-up)
+ * and never from anything the model wrote. Never when words the model wrote
+ * after its last tool call still stand either: a reply cut short is still a
+ * reply. `message` is the harness's own explanation; it rides beside the
+ * code as the raw error (operator material: the control plane shows its
+ * canonical copy instead).
+ *
+ * Harness-to-supervisor only, like `message.replied`: the supervisor turns
+ * it into the turn's failure, and it has no wire form.
+ */
+interface HarnessTurnUnanswered {
+  type: "turn.unanswered";
+  code:
+    | typeof TURN_FAILURE_CODES.modelRefused
+    | typeof TURN_FAILURE_CODES.modelEmptyResponse;
+  message: string;
+}
+
+/**
  * What `HarnessSession.runTurn` yields: the canonical vocabulary, with message
- * framing and follow-up replies on top. Both are harness-to-supervisor
- * concerns only. The supervisor reads them to build the turn's answers, then
- * forwards each event in the wire vocabulary (`AgentEvent`), which carries
- * neither: a reply travels as its own durable `text` event instead.
+ * framing, follow-up replies, and an unanswered turn's reason on top. All are
+ * harness-to-supervisor concerns only. The supervisor reads them to build the
+ * turn's answers and outcome, then forwards each event in the wire vocabulary
+ * (`AgentEvent`), which carries none of them: a reply travels as its own
+ * durable `text` event, and an unanswered turn as its `turn.result` failure.
  */
 export type HarnessEvent =
   | Exclude<AgentEvent, { type: "text.delta" | "message.joined" }>
   | HarnessTextDelta
   | HarnessTextReplace
   | HarnessMessageJoined
-  | HarnessMessageReplied;
+  | HarnessMessageReplied
+  | HarnessTurnUnanswered;
 
 /**
  * The vendor-neutral harness interface (plans/hosted-agents-v2.md §3.5).
@@ -183,6 +213,14 @@ export interface StartSessionOptions {
    * fixtures that never emit such events need not thread it.
    */
   context?: { conversationId: string };
+  /**
+   * Environment the harness must give THIS session's child processes (its
+   * shells, their background jobs) on top of its own: what the supervisor
+   * learned AFTER the harness launched. Today the desktop's `DISPLAY` and
+   * session bus, which come up after the harness so the first turn never
+   * waits on them. Optional; absent = nothing beyond the launch env.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -206,6 +244,15 @@ export interface TurnInput {
    * cannot carry images ignores it — the files are on disk regardless.
    */
   images?: TurnImage[];
+  /**
+   * The context size, in tokens, this conversation should run at from this
+   * turn on (the platform's context fit). The adapter applies it to the
+   * session before sending the message and skips it when unchanged.
+   * Optional and best-effort: an adapter whose harness has no such knob
+   * ignores it, and a refusal never fails the turn. Absent = leave the
+   * session's size as it is.
+   */
+  contextTokens?: number;
 }
 
 /** What `HarnessSession.backgroundRunningTool` did. */
@@ -278,6 +325,15 @@ export interface HarnessSession {
   backgroundRunningTool?(): Promise<BackgroundedTool>;
   /** Stop the in-flight turn; the runTurn iterable still ends cleanly. */
   abort(): Promise<void>;
+  /**
+   * Replace the environment this session's child processes get on top of
+   * the harness's own (`StartSessionOptions.env`, applied late): a session
+   * started before the desktop came up learns `DISPLAY` here, and its
+   * next shell has a screen. Present only where the harness scopes an
+   * environment per session; absent = the session's children see the
+   * launch env alone, and the supervisor restarts the session instead.
+   */
+  setEnv?(env: Record<string, string>): Promise<void>;
   /**
    * Let go of this session WITHOUT ending it, so a later `startSession`
    * with its `sessionRef` resumes the same transcript in THIS process. The
@@ -356,6 +412,16 @@ export interface Harness {
    */
   readonly backgroundTasks?: HarnessBackgroundTasks;
   startSession(options: StartSessionOptions): Promise<HarnessSession>;
+  /**
+   * Start whatever backs this adapter now, ahead of the first session, so
+   * the first turn does not pay for it. Best effort and idempotent: the
+   * first `startSession` reuses what this started, and a start that failed
+   * surfaces there exactly as it would have without the head start. The
+   * backing process inherits this process's environment, so the supervisor
+   * calls this only once that environment is final. Adapters with nothing
+   * worth starting early omit it.
+   */
+  prewarm?(homeDir: string): void;
   /**
    * Register the listener for TERMINAL failure of whatever backs this adapter
    * — the process died, the socket closed, the runtime never came up.

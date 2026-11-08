@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { openConnectPopup } from "@/lib/connect-popup";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Settings2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Settings2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
@@ -326,13 +326,17 @@ export const AppDetail = ({
         <div className="space-y-3">
           <div className="flex items-start justify-between">
             <h3 className="text-sm font-medium">Connected accounts</h3>
+            {/* Shown only once an account is connected: a second click adds
+                another account (another login), it doesn't reconnect the
+                first. */}
             <Button
               variant="outline"
               size="sm"
               onClick={handleConnect}
               className="shrink-0"
             >
-              Connect
+              <Plus className="size-4" />
+              Add account
             </Button>
           </div>
           {connections.length > 0 && inheritedConnections.length > 0 && (
@@ -340,7 +344,7 @@ export const AppDetail = ({
               Workspace accounts
             </p>
           )}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
             {connections.map((conn) => (
               <ConnectionAccountCard
                 key={conn.id}
@@ -365,7 +369,7 @@ export const AppDetail = ({
               >
                 Organization accounts
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                 {inheritedConnections.map((conn) => (
                   <InheritedConnectionCard
                     key={conn.id}

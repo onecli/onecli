@@ -1,12 +1,20 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, type RefObject } from "react";
+import {
+  useState,
+  useEffect,
+  useId,
+  useRef,
+  useMemo,
+  type RefObject,
+} from "react";
 import Image from "next/image";
 import { useInvalidateGatewayCache } from "@/hooks/use-invalidate-cache";
 import { toast } from "sonner";
 import {
   ArrowLeft,
   CircleHelp,
+  ExternalLink,
   Key,
   Lock,
   Settings2,
@@ -45,6 +53,7 @@ import { queryKeys } from "@/lib/api/keys";
 import type { CreateSecretInput } from "@onecli/api/validations/secret";
 import type { SecretActions } from "./types";
 import { CopyableCommand } from "./copyable-command";
+import { CodexLoginSteps } from "./codex-login-steps";
 import { inlineLinkClassName } from "./inline-link";
 import { AnthropicKeyBadge } from "./anthropic-key-badge";
 import { keyFormatWarning } from "./key-format-warning";
@@ -236,6 +245,7 @@ export const SecretDialog = ({
 
   const [type, setType] = useState<SecretType>("anthropic");
   const [openaiMode, setOpenaiMode] = useState<"api-key" | "codex">("api-key");
+  const openaiMethodLabelId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -523,6 +533,26 @@ export const SecretDialog = ({
                       ? "Your token or key is encrypted and injected into requests to api.anthropic.com."
                       : `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`}
               </DialogDescription>
+              {type === "openai" &&
+                !fromOnePassword &&
+                (!isEdit || isOAuthMode) && (
+                  <a
+                    href={
+                      openaiMode === "codex"
+                        ? "https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
+                        : "https://onecli.sh/docs/integrations/openai#setup-api-key"
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={cn(
+                      inlineLinkClassName,
+                      "inline-flex w-fit items-center gap-1 text-xs",
+                    )}
+                  >
+                    Setup guide
+                    <ExternalLink className="size-3" aria-hidden />
+                  </a>
+                )}
               {isGeneric && !isEdit && !prefill && (
                 <CustomConnectionExamples
                   onPick={(example) => {
@@ -540,10 +570,13 @@ export const SecretDialog = ({
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
               {type === "openai" && !isEdit && !fromOnePassword && (
                 <div className="space-y-2">
+                  <p id={openaiMethodLabelId} className="text-sm font-medium">
+                    How to connect
+                  </p>
                   <div
                     className="flex w-full items-center gap-1 rounded-lg border p-1"
                     role="radiogroup"
-                    aria-label="OpenAI auth method"
+                    aria-labelledby={openaiMethodLabelId}
                   >
                     <button
                       type="button"
@@ -584,67 +617,27 @@ export const SecretDialog = ({
                       Codex (OAuth)
                     </button>
                   </div>
-                  <p className="text-muted-foreground text-xs">
-                    {openaiMode === "api-key" ? (
-                      <>
-                        Paste your API key from{" "}
-                        <a
-                          href="https://platform.openai.com/api-keys"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={inlineLinkClassName}
-                        >
-                          platform.openai.com
-                        </a>
-                        .{" "}
-                        <a
-                          href="https://onecli.sh/docs/integrations/openai#setup-api-key"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={inlineLinkClassName}
-                        >
-                          Setup guide
-                        </a>
-                      </>
-                    ) : (
-                      <>
-                        Run{" "}
-                        <CopyableCommand
-                          command="codex login --device-auth"
-                          toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
-                        />{" "}
-                        and upload the auth.json file.{" "}
-                        <a
-                          href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={inlineLinkClassName}
-                        >
-                          Setup guide
-                        </a>
-                      </>
-                    )}
-                  </p>
+                  {openaiMode === "api-key" ? (
+                    <p className="text-muted-foreground text-xs">
+                      Paste your API key from{" "}
+                      <a
+                        href="https://platform.openai.com/api-keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={inlineLinkClassName}
+                      >
+                        platform.openai.com
+                      </a>
+                      .
+                    </p>
+                  ) : (
+                    <CodexLoginSteps />
+                  )}
                 </div>
               )}
 
               {type === "openai" && isEdit && isOAuthMode && (
-                <p className="text-muted-foreground text-xs">
-                  Run{" "}
-                  <CopyableCommand
-                    command="codex login --device-auth"
-                    toastMessage="Copied. Run it in your terminal, then upload the auth.json it writes."
-                  />{" "}
-                  and upload the auth.json file.{" "}
-                  <a
-                    href="https://onecli.sh/docs/integrations/openai#setup-codex-oauth"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={inlineLinkClassName}
-                  >
-                    Setup guide
-                  </a>
-                </p>
+                <CodexLoginSteps />
               )}
 
               <div className="space-y-2">
@@ -677,24 +670,15 @@ export const SecretDialog = ({
 
               <div className="space-y-2">
                 <Label htmlFor="secret-value">
-                  {isOAuthMode ? (
-                    <>
-                      Token file{" "}
-                      <code className="bg-muted text-muted-foreground ml-1 select-all rounded px-1.5 py-0.5 text-xs font-normal">
-                        ~/.codex/auth.json
-                      </code>
-                    </>
-                  ) : isGeneric ? (
-                    isEdit ? (
-                      "New API key / Secret"
-                    ) : (
-                      "API key / Secret"
-                    )
-                  ) : isEdit ? (
-                    "New value"
-                  ) : (
-                    "Secret value"
-                  )}{" "}
+                  {isOAuthMode
+                    ? "Token file"
+                    : isGeneric
+                      ? isEdit
+                        ? "New API key / Secret"
+                        : "API key / Secret"
+                      : isEdit
+                        ? "New value"
+                        : "Secret value"}{" "}
                   {isEdit && !isOAuthMode && !fromOnePassword && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)

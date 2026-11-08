@@ -50,9 +50,12 @@ const teamsish: Facet = {
     return `Room ${externalRef.replace("room@", "")}`;
   },
 
-  async personLabel({ credentialsJson, externalRef }) {
+  async personProfile({ credentialsJson, externalRef }) {
     if (!credentialsJson) return null;
-    return `Person ${externalRef.replace("person@", "")}`;
+    return {
+      name: `Person ${externalRef.replace("person@", "")}`,
+      avatarUrl: null,
+    };
   },
 
   // This provider has no app concept: a room's app roster is always empty.

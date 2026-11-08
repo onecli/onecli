@@ -449,3 +449,37 @@ describe("describeExchangeFailure", () => {
     expect(describeExchangeFailure("boom")).toEqual({ errorName: "string" });
   });
 });
+
+describe("resolveConnectCredentials conditional fields", () => {
+  it("never stores a PostgreSQL CA certificate under Encrypt only", async () => {
+    const { postgres } = await import("./postgres");
+    const fields = {
+      password: "pw",
+      host: "db.example.com",
+      database: "app",
+      username: "agent",
+      sslmode: "require",
+      sslrootcert: "stale, not even PEM",
+    };
+    const encrypt = await resolveConnectCredentials(
+      "postgres",
+      postgres,
+      { fields },
+      ORG,
+    );
+    expect(encrypt.ok).toBe(true);
+    if (encrypt.ok)
+      expect(encrypt.credentials).not.toHaveProperty("sslrootcert");
+    const verify = await resolveConnectCredentials(
+      "postgres",
+      postgres,
+      { fields: { ...fields, sslmode: "verify-full" } },
+      ORG,
+    );
+    // Under Verify the same value is kept, and so validated.
+    expect(verify).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/PEM/),
+    });
+  });
+});

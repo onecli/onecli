@@ -13,10 +13,15 @@ import {
 import type { AgentKind } from "@/lib/api/types";
 
 const restart = vi.fn();
+const remove = vi.fn();
 const idle = { mutate: vi.fn(), isPending: false };
 
 vi.mock("@/hooks/use-agents", () => ({
-  useDeleteAgent: () => idle,
+  useDeleteAgent: () => ({
+    mutate: vi.fn(),
+    mutateAsync: remove,
+    isPending: false,
+  }),
   useRenameAgent: () => idle,
   useRestartAgent: () => ({ mutate: restart, isPending: false }),
 }));
@@ -31,13 +36,23 @@ beforeAll(() => {
   Element.prototype.releasePointerCapture = vi.fn();
 });
 
-beforeEach(() => restart.mockReset());
+beforeEach(() => {
+  restart.mockReset();
+  remove.mockReset();
+});
 afterEach(cleanup);
 
-const renderMenu = (kind: AgentKind, channels?: { provider: string }[]) =>
+const renderMenu = (
+  kind: AgentKind,
+  channels?: { provider: string }[],
+  onDeleted: () => void = vi.fn(),
+) =>
   render(
     <AgentActionsMenu
       agent={{ id: "agent-1", name: "Donna", kind, channels }}
+      onDetails={vi.fn()}
+      onViewActivity={vi.fn()}
+      onDeleted={onDeleted}
     />,
   );
 
@@ -98,5 +113,56 @@ describe("AgentActionsMenu: Restart agent", () => {
     await userEvent.click(screen.getByRole("button", { name: /^restart$/i }));
     expect(restart).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+});
+
+describe("AgentActionsMenu: Delete agent", () => {
+  const confirmDelete = async (onDeleted: () => void) => {
+    renderMenu("hosted", undefined, onDeleted);
+    await openMenu();
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: /delete agent/i }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+  };
+
+  it("calls onDeleted from the mutation's PROMISE, which survives an unmount", async () => {
+    // The agent page unmounts this menu the moment the delete invalidates
+    // the agent list (it swaps to "Agent not found"); React Query drops a
+    // per-call onSuccess of an unmounted observer. The promise does not.
+    remove.mockResolvedValue(undefined);
+    const onDeleted = vi.fn();
+    await confirmDelete(onDeleted);
+    expect(remove).toHaveBeenCalledWith("agent-1");
+    await vi.waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not navigate away when the delete fails", async () => {
+    remove.mockRejectedValue(new Error("boom"));
+    const onDeleted = vi.fn();
+    await confirmDelete(onDeleted);
+    await vi.waitFor(() => expect(remove).toHaveBeenCalled());
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentActionsMenu: Delete agent double-submit", () => {
+  it("deletes once even when Delete is pressed twice before it settles", async () => {
+    let settle: () => void = () => {};
+    remove.mockImplementation(
+      () => new Promise<void>((resolve) => (settle = resolve)),
+    );
+    const onDeleted = vi.fn();
+    renderMenu("hosted", undefined, onDeleted);
+    await openMenu();
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: /delete agent/i }),
+    );
+    const confirm = screen.getByRole("button", { name: /^delete$/i });
+    await userEvent.click(confirm);
+    await userEvent.click(confirm);
+    expect(remove).toHaveBeenCalledTimes(1);
+    settle();
+    await vi.waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
   });
 });

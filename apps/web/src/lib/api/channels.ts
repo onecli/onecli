@@ -46,36 +46,36 @@ export interface AgentChannelPresence {
   managedBy: { name: string | null; email: string } | null;
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: string }[];
-  /** Per-space reach: every channel the presence is in or was asked about.
-   * `members_only` = no grant (today's default). Absent on older servers. */
+  /** Per-space reach: every channel the presence is in or was asked about
+   * (`pending` until someone decides). Absent on older servers. */
   spaces?: ChannelSpaceReach[];
   /** Absent on older servers that predate the person lane. */
   people?: ChannelPersonReach[];
 }
 
 /**
- * How a channel is settled. `pending` means nobody has answered yet, and the
- * agent answers NO ONE there until someone does - it is a real state, not a
- * flavor of "off". The server normalizes the pre-rename `denied`/`revoked`
- * spellings to `members_only`, so they never reach this type.
+ * How a channel (or person) is settled. `pending` means nobody has answered
+ * yet, and the agent answers NO ONE there until someone does - it is a real
+ * state, not a flavor of "off".
  */
-export type ChannelReachState =
-  | "pending"
-  | "approved"
-  | "members_only"
-  | "blocked";
+export type ChannelReachState = "pending" | "approved" | "blocked";
 
-/** One PERSON's reach row: someone who messaged the agent directly with no
- * OneCLI account to match. Two settlements only - "members_only" describes
- * a population, not a person - though a legacy row can still read as one,
- * so the type stays the full union and the UI treats anything that is not
- * `approved`/`pending` as "not allowed". */
+/** A human's answer about a channel or person: Always allow, or Never. */
+export type ReachDecision = Exclude<ChannelReachState, "pending">;
+
+/** One PERSON's reach row: someone the agent DMs with, or who DM'd it. Their
+ * one setting decides their direct messages and the agent's own messages
+ * to them: allowed, Never, or still pending. */
 export interface ChannelPersonReach {
   externalRef: string;
-  /** "@display-name" when known; fall back to the ref. */
+  /** Their display name when known; fall back to the ref. */
   label: string | null;
   state: ChannelReachState;
   decidedAt: string | null;
+  /** Their profile photo (provider CDN, https), when the provider has one. */
+  avatarUrl: string | null;
+  /** A workspace owner: always shown, a fixed Always allow. */
+  isOwner: boolean;
 }
 
 /** One channel's reach row on a presence. */
@@ -205,6 +205,23 @@ const agentBase = (agentId: string, sub = "") =>
 
 // ── Agent-level surface ─────────────────────────────────────────────────────
 
+/** The caller's own remembered sender for one recipient (send_message's
+ * "send as the agent or as you?" choice). */
+export interface SendAsPreference {
+  recipientRef: string;
+  sendAs: "agent" | "you";
+}
+
+export const sendAsPreferences = (agentId: string) =>
+  apiGet<{ preferences: SendAsPreference[] }>(
+    `/v1/agents/${encodeURIComponent(agentId)}/send-as-preferences`,
+  );
+
+export const forgetSendAsPreference = (agentId: string, recipientRef: string) =>
+  apiDelete(
+    `/v1/agents/${encodeURIComponent(agentId)}/send-as-preferences/${encodeURIComponent(recipientRef)}`,
+  );
+
 export const agentView = (agentId: string) =>
   apiGet<AgentChannelsView>(agentBase(agentId));
 
@@ -241,25 +258,25 @@ export const attach = (
     input ?? {},
   );
 
-/** Settle one channel: open it to everyone in it (same Slack workspace),
- * keep it to OneCLI users only, or block the agent there entirely. */
+/** Settle one channel: answer everyone in it (same Slack workspace), or
+ * keep the agent silent there. */
 export const setReachState = (
   agentId: string,
   provider: ChannelProvider,
   externalRef: string,
-  state: Exclude<ChannelReachState, "pending">,
+  state: ReachDecision,
 ) =>
   apiPut<{ kind: string }>(
     agentBase(agentId, `/${provider}/reach/${encodeURIComponent(externalRef)}`),
     { state },
   );
 
-/** Settle one PERSON: may they message this agent, or not. */
+/** Settle one PERSON: Always allow, or Never. */
 export const setPersonReachState = (
   agentId: string,
   provider: ChannelProvider,
   externalRef: string,
-  state: "approved" | "blocked",
+  state: ReachDecision,
 ) =>
   apiPut<{ kind: string }>(
     agentBase(
@@ -456,10 +473,12 @@ export type ActionApprovalStatus =
 /** The agent's action approvals — pending first is the caller's sort. */
 
 export interface ActionApprovalDecisionInput {
-  /** approve_always = approve AND stop asking about this recipient. */
-  decision: "approve" | "approve_always" | "reject";
+  /** On a standing question, approve is Always allow and reject is Never. */
+  decision: "approve" | "reject";
   /** Dashboard-only: relayed verbatim to the agent on reject. */
   reason?: string;
+  /** The picked option on a choice card ("agent" | "you", or "allow"). */
+  choice?: "agent" | "you" | "allow";
 }
 
 export const decideActionApproval = (
@@ -470,6 +489,8 @@ export const decideActionApproval = (
   apiPost<{
     kind: "decided" | "already_settled";
     status?: ActionApprovalStatus;
+    /** The handler's own outcome line (e.g. "Sent to Sam."). */
+    note?: string;
   }>(`/v1/agents/${agentId}/approvals/${approvalId}/decision`, input);
 
 /** Approve an agent-proposed custom connection WITH the key the person
@@ -486,37 +507,12 @@ export const approveCustomConnection = (
     value,
   });
 
-export interface AgentContact {
-  id: string;
-  kind: "person" | "channel" | "app";
-  externalRef: string;
-  displayName: string;
-  policy: "ask" | "allow" | "blocked";
-  updatedAt: string;
-}
-
-/** The agent's outbound address book (send_message's standing decisions). */
-export const listContacts = (agentId: string) =>
-  apiGet<{ contacts: AgentContact[] }>(`/v1/agents/${agentId}/contacts`);
-
-/** Flip a contact's policy — `ask` is the revoke direction. */
-export const setContactPolicy = (
-  agentId: string,
-  contactId: string,
-  policy: "ask" | "allow" | "blocked",
-) =>
-  apiPut<{ id: string; policy: string }>(
-    `/v1/agents/${agentId}/contacts/${contactId}`,
-    { policy },
-  );
-
-export const deleteContact = (agentId: string, contactId: string) =>
-  apiDelete(`/v1/agents/${agentId}/contacts/${contactId}`);
-
 /** One of the agent's peers (PR 5b): another hosted agent it may message. */
 export interface AgentPeer {
   agentId: string;
   name: string;
+  /** The peer's uploaded avatar, when it has one. */
+  imageUrl: string | null;
   /** The peer's workspace when it is not this agent's own; null otherwise. */
   workspaceName: string | null;
   /** THIS agent's side of the relationship. */
@@ -553,11 +549,11 @@ export const resumePeer = (agentId: string, peerAgentId: string) =>
     {},
   );
 
-/** Set THIS agent's side of a pair — `ask` is the revoke direction. */
+/** Set THIS agent's side of a pair: Always allow, or Never. */
 export const setPeerPolicy = (
   agentId: string,
   peerAgentId: string,
-  policy: "ask" | "allow" | "blocked",
+  policy: "allow" | "blocked",
 ) =>
   apiPut<{ id: string; policy: string }>(
     `/v1/agents/${encodeURIComponent(agentId)}/links/${encodeURIComponent(peerAgentId)}`,

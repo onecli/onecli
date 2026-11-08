@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import {
   ceilingWarningSteerId,
   isPlatformSteerId,
@@ -395,6 +396,59 @@ describe("turn.deliver context (runner wire)", () => {
       runnerWorkItemSchema.parse({ ...base, someFutureField: "x" }),
     ).not.toHaveProperty("someFutureField");
   });
+
+  it("carries a manifest up to the per-message cap, never past it", () => {
+    const entry = (i: number) => ({
+      id: `att-${i}`,
+      path: `attachments/t-1/f${i}.pdf`,
+      name: `f${i}.pdf`,
+      mimeType: "application/pdf",
+      sizeBytes: 1,
+      sha256: "a".repeat(64),
+    });
+    const withFiles = (n: number) => ({
+      ...base,
+      attachments: Array.from({ length: n }, (_, i) => entry(i)),
+    });
+    expect(
+      runnerWorkItemSchema.safeParse(withFiles(MAX_ATTACHMENTS_PER_MESSAGE))
+        .success,
+    ).toBe(true);
+    expect(
+      runnerWorkItemSchema.safeParse(withFiles(MAX_ATTACHMENTS_PER_MESSAGE + 1))
+        .success,
+    ).toBe(false);
+  });
+});
+
+/** The manifest bound a runner advertises: a count, absent on runners that
+ * predate it (the control plane then sends the legacy bound). */
+describe("maxAttachmentsPerMessage (runner capability)", () => {
+  const base = {
+    maxSandboxes: 1,
+    backend: "docker",
+    homeDurability: "resident",
+  };
+
+  it("is optional, and a positive integer when present", () => {
+    expect(runnerCapabilitiesSchema.parse(base)).not.toHaveProperty(
+      "maxAttachmentsPerMessage",
+    );
+    expect(
+      runnerCapabilitiesSchema.parse({
+        ...base,
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
+      }).maxAttachmentsPerMessage,
+    ).toBe(MAX_ATTACHMENTS_PER_MESSAGE);
+    for (const bad of [0, -1, 2.5, "10", true]) {
+      expect(
+        runnerCapabilitiesSchema.safeParse({
+          ...base,
+          maxAttachmentsPerMessage: bad,
+        }).success,
+      ).toBe(false);
+    }
+  });
 });
 
 /** The steer arm's context (the "a new message arrived" frame for a person's
@@ -441,7 +495,10 @@ describe("turn.message context (runner wire)", () => {
     expect(parsed.kind === "turn.message" && parsed.attachments).toEqual([
       entry("a1"),
     ]);
-    const tooMany = Array.from({ length: 6 }, (_, i) => entry(`a${i}`));
+    const tooMany = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE + 1 },
+      (_, i) => entry(`a${i}`),
+    );
     expect(
       runnerWorkItemSchema.safeParse({ ...base, attachments: tooMany }).success,
     ).toBe(false);

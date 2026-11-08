@@ -35,11 +35,9 @@ describe("createWorkspace", () => {
 
   it("accepts every workspaceNameForOwner output shape", async () => {
     // Pins the equivalence between the shared display-name rules the naming
-    // helper validates against and this file's private validateWorkspaceName:
-    // switchOrganizationAction feeds derived names straight into
-    // createWorkspace, so a divergence would turn the org-switch auto-create
-    // into a thrown error. Covers the name branch, the clamped-email branch,
-    // and the terminal "Personal" guard.
+    // helper validates against and this file's private validateWorkspaceName,
+    // so a derived name passed to createWorkspace never throws. Covers the
+    // name branch, the clamped-email branch, and the terminal "Personal" guard.
     const derived = [
       workspaceNameForOwner("John Smith", "j@x.com"),
       workspaceNameForOwner(null, `${"a".repeat(60)}@example.com`),

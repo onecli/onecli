@@ -31,6 +31,10 @@ pub enum RequestDecision {
     ApprovalPending {
         approval_id: String,
         triggered_at: String,
+        /// Whether the approval card came from the readable fallback (no
+        /// app summarizer knew the request), logged so the fallback rate
+        /// can be tracked.
+        generic_card: bool,
     },
     ApprovalDenied {
         approval_id: String,
@@ -48,10 +52,17 @@ pub enum RequestDecision {
         /// The user who approved the request.
         approved_by: Option<String>,
     },
+    /// Let through without a card by an open "Approve similar" window
+    /// (`approval::similar`): `approval_id` is the card the reviewer approved
+    /// that opened it, `approved_by` who.
+    ApprovedBySimilar {
+        approval_id: String,
+        approved_by: Option<String>,
+    },
     BlockedByDefaultPolicy,
     /// The upstream refused an uncredentialed request and the gateway
     /// answered with its own guidance (`app_not_connected`,
-    /// `access_restricted`, `credential_not_found`,
+    /// `access_restricted`, `credential_not_found`, `credential_unavailable`,
     /// `connection_host_mismatch`). Its own variant — not `Allowed` — so the
     /// request log keeps the row: an un-injected Allowed event is dropped by
     /// design, which made these failures invisible in the activity feed.
@@ -123,6 +134,10 @@ pub struct RequestEvent {
     /// The v2 policy rule that decided this request (rule- or default-decided).
     /// `None` for plain allows and whenever the legacy path decided.
     pub matched_rule: Option<policy::MatchedRule>,
+    /// A database statement this row is about, literals already replaced by
+    /// placeholders (`dbproxy`). Recorded in the request log's `extra_data`
+    /// only; never sent to analytics. `None` on every HTTP row.
+    pub statement: Option<String>,
 }
 
 /// Common telemetry fields for a proxied request, filled by the forward path
@@ -149,6 +164,8 @@ pub struct RequestMeta {
     /// The v2 rule that decided this (allowed) request, when the new engine is
     /// authoritative — threaded to telemetry for "decided by rule X".
     pub matched_rule: Option<policy::MatchedRule>,
+    /// See [`RequestEvent::statement`].
+    pub statement: Option<String>,
 }
 
 impl RequestMeta {
@@ -175,6 +192,7 @@ impl RequestMeta {
             log_id: None,
             budget_charge,
             matched_rule: self.matched_rule,
+            statement: self.statement,
         }
     }
 }
@@ -348,6 +366,7 @@ mod tests {
             log_id: None,
             budget_charge: None,
             matched_rule: None,
+            statement: None,
         }
     }
 

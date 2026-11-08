@@ -65,7 +65,7 @@ export const InstructionsSection = () => {
         >
           {tooLong
             ? `Too long: ${value.length.toLocaleString()} of ${INSTRUCTIONS_MAX_LENGTH.toLocaleString()} characters.`
-            : "Changes reach the agent the next time it starts up."}
+            : "Changes apply after syncing, starting with the next conversation turn. A reply already in progress finishes unchanged."}
         </p>
         <Button
           size="sm"

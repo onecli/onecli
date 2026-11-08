@@ -12,7 +12,7 @@ export interface AccountNavSection {
   items: AccountNavItem[];
 }
 
-export const accountNavSections: AccountNavSection[] = [
+const accountNavSections: AccountNavSection[] = [
   {
     label: "Account Settings",
     items: [

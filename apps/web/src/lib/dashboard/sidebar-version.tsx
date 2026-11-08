@@ -66,7 +66,7 @@ export const SidebarVersion = () => {
             <button
               type="button"
               aria-label={`OneCLI version ${version}, update instructions`}
-              className="text-muted-foreground/70 hover:text-muted-foreground focus-visible:ring-ring self-start rounded-sm px-2 py-1 text-left text-[11px] tabular-nums transition-colors focus-visible:ring-1 focus-visible:outline-none group-data-[collapsible=icon]:hidden"
+              className="text-sidebar-foreground/70 hover:text-sidebar-foreground focus-visible:ring-ring self-start rounded-sm px-2 py-1 text-left text-[11px] tabular-nums transition-colors focus-visible:ring-1 focus-visible:outline-none group-data-[collapsible=icon]:hidden"
             >
               v{version}
             </button>

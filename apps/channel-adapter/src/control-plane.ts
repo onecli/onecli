@@ -10,6 +10,7 @@ import {
   adapterGroupDecisionResponseSchema,
   adapterIngestResponseSchema,
   adapterPromptClaimResponseSchema,
+  adapterPromptOutcomesResponseSchema,
   adapterReachDecisionResponseSchema,
   adapterRegisterResponseSchema,
   adapterReplyClaimResponseSchema,
@@ -32,6 +33,7 @@ import {
   type AdapterGroupDecisionResponse,
   type AdapterIngestRequest,
   type AdapterIngestResponse,
+  type AdapterPromptOutcome,
   type AdapterReachDecisionRequest,
   type AdapterReachDecisionResponse,
   type AdapterWorkResponse,
@@ -113,6 +115,11 @@ export interface ControlPlaneClient {
   listUnsettledPrompts(): Promise<
     z.infer<typeof adapterUnsettledPromptsResponseSchema>["prompts"]
   >;
+  /** How the approvals behind these cards ended, from the control plane's
+   * record (only cards of presences this adapter owns are answered). An
+   * approval with no record yet is simply absent. An older control plane
+   * without the read answers `[]`: no outcome, never an error. */
+  listPromptOutcomes(approvalIds: string[]): Promise<AdapterPromptOutcome[]>;
   /** `turnId` lets the control plane clear the turn's reaction receipt on a
    * CAS win — the answer is posting, so the "seen" reaction comes off. */
   advanceCursor(
@@ -383,6 +390,24 @@ export const createControlPlane = (options: {
         adapterUnsettledPromptsResponseSchema,
       );
       return parsed.prompts;
+    },
+
+    async listPromptOutcomes(approvalIds) {
+      if (approvalIds.length === 0) return [];
+      const ids = approvalIds.map(encodeURIComponent).join(",");
+      try {
+        const parsed = await call(
+          "GET",
+          `/channel-adapter/prompts/outcomes?ids=${ids}`,
+          adapterPromptOutcomesResponseSchema,
+        );
+        return parsed.outcomes;
+      } catch (err) {
+        // Version skew: a control plane older than this read has no such
+        // route. That is "no record", so the card says no more than it saw.
+        if (err instanceof ControlPlaneError && err.status === 404) return [];
+        throw err;
+      }
     },
 
     async advanceCursor(linkId, expect, next, turnId) {

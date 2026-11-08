@@ -23,6 +23,7 @@ import { cn } from "@onecli/ui/lib/utils";
 import type { AttachmentPageMeta } from "@/lib/api/types";
 import { ApiError } from "@/lib/api/client";
 import { ATTACHMENT_CONVERSATION_PARAM, agentChatPath } from "@/lib/navigation";
+import { formatBytes } from "@/lib/format-bytes";
 import {
   useAttachmentMeta,
   useDownloadAttachment,
@@ -123,25 +124,6 @@ const FileGlyph = ({
       />
     </div>
   );
-};
-
-/**
- * Human size: the number through Intl (locale digits and separators), the
- * unit as the plain abbreviation everyone reads (Intl's `unit` style says
- * "21 byte", which no one does), joined with a non-breaking space.
- */
-const SIZE_UNITS = ["B", "KB", "MB", "GB"] as const;
-const formatSize = (bytes: number): string => {
-  let value = bytes;
-  let index = 0;
-  while (value >= 1024 && index < SIZE_UNITS.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  const number = new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: index === 0 ? 0 : 1,
-  }).format(value);
-  return `${number}\u00a0${SIZE_UNITS[index]}`;
 };
 
 /** A parsed ISO stamp, or null for anything Date rejects — a bad value
@@ -285,7 +267,7 @@ const Record = ({
         </Fact>
         <Fact label="Size">
           <span className="tabular-nums" translate="no">
-            {formatSize(meta.sizeBytes)}
+            {formatBytes(meta.sizeBytes)}
           </span>
         </Fact>
         <Fact label="From">{sourceLabel(meta.conversation.source)}</Fact>

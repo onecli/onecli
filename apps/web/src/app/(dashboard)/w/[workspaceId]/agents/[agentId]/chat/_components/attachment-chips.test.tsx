@@ -7,9 +7,9 @@ import type { AttachmentMeta } from "@/lib/api/types";
 import { AttachmentChips } from "./attachment-chips";
 
 /**
- * Clicking an image thumbnail opens an in-app preview (the bytes only ever
- * render through `<img>`) with an explicit Download; any other live file
- * saves on click. Either way a save goes through `useDownloadAttachment`.
+ * Clicking any live file opens the shared in-app preview (images through
+ * `<img>`, text as text, other types a plain card) with an explicit
+ * Download; a save goes through `useDownloadAttachment`.
  */
 
 const api = vi.hoisted(() => ({
@@ -22,9 +22,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
-type Chip = AttachmentMeta & { objectUrl?: string };
-
-const image: Chip = {
+const image: AttachmentMeta = {
   id: "out-1",
   name: "chart.png",
   mimeType: "image/png",
@@ -32,7 +30,6 @@ const image: Chip = {
   status: "bound",
   direction: "outbound",
   caption: "Records by object type",
-  objectUrl: "blob:local-preview",
 };
 
 let clicks: HTMLAnchorElement[];
@@ -58,16 +55,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const renderChips = (attachments: Chip[]) =>
-  render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
-      <AttachmentChips conversationId="c1" attachments={attachments} />
-    </QueryClientProvider>,
+const renderChips = (attachments: AttachmentMeta[]) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <AttachmentChips conversationId="c1" attachments={attachments} />,
+    {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    },
   );
+};
 
 describe("AttachmentChips: image preview", () => {
   it("clicking an image opens a larger preview with its caption, and downloads nothing", async () => {
@@ -79,23 +79,27 @@ describe("AttachmentChips: image preview", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("chart.png");
     expect(dialog).toHaveTextContent("Records by object type");
-    expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
-      "blob:local-preview",
+    await waitFor(() =>
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "blob:fetched",
+      ),
     );
     expect(api.fetchAttachmentDownloadUrl).not.toHaveBeenCalled();
     expect(clicks).toHaveLength(0);
   });
 
-  it("a settled image shares the thumbnail's fetched bytes: one fetch, never a second", async () => {
+  it("optimistic and settled images share authenticated bytes with the preview: one fetch", async () => {
     const user = userEvent.setup();
-    renderChips([{ ...image, objectUrl: undefined }]);
+    const { rerender } = renderChips([{ ...image, status: "pending" }]);
 
     const thumb = screen.getByRole("button", { name: "Preview chart.png" });
+    expect(thumb).toHaveClass("motion-reduce:transition-none");
     await waitFor(() =>
       expect(thumb.querySelector("img")?.getAttribute("src")).toBe(
         "blob:fetched",
       ),
     );
+    rerender(<AttachmentChips conversationId="c1" attachments={[image]} />);
     await user.click(thumb);
 
     const dialog = await screen.findByRole("dialog");
@@ -105,16 +109,20 @@ describe("AttachmentChips: image preview", () => {
     expect(api.fetchAttachmentBlob).toHaveBeenCalledTimes(1);
   });
 
-  it("the preview's Download button saves the file", async () => {
+  it("both Download buttons (header icon and the one under the file) save the file", async () => {
     const user = userEvent.setup();
     renderChips([image]);
 
     await user.click(screen.getByRole("button", { name: "Preview chart.png" }));
-    await user.click(await screen.findByRole("button", { name: "Download" }));
-
+    await user.click(
+      await screen.findByRole("button", { name: "Download chart.png" }),
+    );
     await waitFor(() => expect(clicks).toHaveLength(1));
     expect(api.fetchAttachmentDownloadUrl).toHaveBeenCalledWith("c1", "out-1");
     expect(clicks[0]!.download).toBe("chart.png");
+
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(clicks).toHaveLength(2));
   });
 
   it("closing the preview hands focus back to the thumbnail", async () => {
@@ -132,17 +140,62 @@ describe("AttachmentChips: image preview", () => {
 });
 
 describe("AttachmentChips: other files", () => {
-  it("a non-image file saves on click, with no preview", async () => {
-    const user = userEvent.setup();
+  it("keeps failed and expired files inert without fetching bytes", () => {
     renderChips([
-      { ...image, id: "f1", name: "report.pdf", mimeType: "application/pdf" },
+      { ...image, id: "failed", name: "failed.png", status: "failed" },
+      { ...image, id: "expired", name: "expired.png", status: "expired" },
+    ]);
+    expect(screen.getByText("couldn't be retrieved")).toBeInTheDocument();
+    expect(screen.getByText("expired")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(api.fetchAttachmentBlob).not.toHaveBeenCalled();
+  });
+
+  it("a text file's tile shows its first lines and its type badge, from one fetch shared with the preview", async () => {
+    const user = userEvent.setup();
+    api.fetchAttachmentBlob.mockResolvedValue(
+      new Blob(["Account,ARR\nBluepine,120000"]),
+    );
+    renderChips([
+      {
+        ...image,
+        id: "f3",
+        name: "export.csv",
+        mimeType: "text/csv",
+      },
     ]);
 
-    await user.click(screen.getByRole("button", { name: "Save report.pdf" }));
+    const tile = screen.getByRole("button", { name: "Preview export.csv" });
+    await waitFor(() => expect(tile).toHaveTextContent("Bluepine,120000"));
+    expect(tile).toHaveTextContent("CSV");
 
-    await waitFor(() => expect(clicks).toHaveLength(1));
-    expect(api.fetchAttachmentDownloadUrl).toHaveBeenCalledWith("c1", "f1");
-    expect(clicks[0]!.download).toBe("report.pdf");
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(tile);
+    await waitFor(() =>
+      expect(screen.getByRole("dialog")).toHaveTextContent("Bluepine,120000"),
+    );
+    expect(api.fetchAttachmentBlob).toHaveBeenCalledTimes(1);
+  });
+
+  it("a type with no content view opens a plain card naming it, never an error", async () => {
+    const user = userEvent.setup();
+    renderChips([
+      {
+        ...image,
+        id: "f2",
+        name: "notes.docx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        sizeBytes: 3_581,
+      },
+    ]);
+
+    await user.click(
+      screen.getByRole("button", { name: "Preview notes.docx" }),
+    );
+
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Word document · 3KB",
+    );
+    expect(api.fetchAttachmentBlob).not.toHaveBeenCalled();
   });
 });

@@ -15,12 +15,12 @@ import { oauthCallbackUrl } from "../../services/channels/posture";
 import {
   deleteGrant,
   disconnect,
+  GRANT_MODES,
   getMyConnection,
   listGrants,
   listMyConversations,
   listSlackReadAgents,
   MAX_BULK_SHARE,
-  READ_AUDIENCES,
   shareConversations,
   startConnect,
   upsertGrant,
@@ -37,13 +37,23 @@ import {
  *   GET    /grants               every grant on the agent, with granter
  *   POST   /grants               share many of the caller's own at once
  *   PUT    /grants/:externalRef  grant/re-scope one of the caller's own
+ *                                (readMode, writeMode)
  *   DELETE /grants/:grantId      remove one grant
  *
  * Every operation acts as the authenticated person on their own token:
  * there is no way to connect, list, or grant on someone else's behalf.
  */
 
-const setGrantSchema = z.object({ audience: z.enum(READ_AUDIENCES) }).strict();
+const setGrantSchema = z
+  .object({
+    readMode: z.enum(GRANT_MODES).optional(),
+    writeMode: z.enum(GRANT_MODES).optional(),
+  })
+  // Unknown keys (e.g. a stale client's removed `audience`) are stripped.
+  .refine(
+    (b) => b.readMode !== undefined || b.writeMode !== undefined,
+    "Set at least one of readMode, writeMode",
+  );
 
 const REF = /^[A-Z0-9]{2,32}$/;
 
@@ -53,9 +63,9 @@ const shareManySchema = z
       .array(z.string().regex(REF, "Invalid conversation reference"))
       .min(1)
       .max(MAX_BULK_SHARE),
-    audience: z.enum(READ_AUDIENCES),
   })
-  .strict();
+  // Unknown keys (e.g. a stale client's removed `audience`) are stripped.
+  .strip();
 
 const parseBody = async (raw: Request) =>
   await raw
@@ -170,7 +180,6 @@ export const slackReadRoutes = () => {
       agentId,
       userId: a.userId,
       externalRefs: body.data.externalRefs,
-      audience: body.data.audience,
     });
     // One audit row per grant: each is its own access, removable on its own.
     for (const grant of grants) {
@@ -186,7 +195,8 @@ export const slackReadRoutes = () => {
           readGrantId: grant.id,
           conversationRef: grant.externalRef,
           conversationKind: grant.subjectKind,
-          readAudience: grant.audience,
+          readMode: grant.readMode,
+          writeMode: grant.writeMode,
           bulk: true,
         },
       });
@@ -213,7 +223,8 @@ export const slackReadRoutes = () => {
       agentId: c.req.param("agentId"),
       userId: a.userId,
       externalRef,
-      audience: body.data.audience,
+      ...(body.data.readMode && { readMode: body.data.readMode }),
+      ...(body.data.writeMode && { writeMode: body.data.writeMode }),
     });
     await recordAuditEvent({
       workspaceId,
@@ -227,7 +238,8 @@ export const slackReadRoutes = () => {
         readGrantId: grant.id,
         conversationRef: externalRef,
         conversationKind: grant.subjectKind,
-        readAudience: grant.audience,
+        readMode: grant.readMode,
+        writeMode: grant.writeMode,
       },
     });
     return c.json(grant);

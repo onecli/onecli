@@ -74,6 +74,16 @@ describe("catalogFactsFor", () => {
     });
   });
 
+  // A database's catalog rows are the policy zone's synthetic requests
+  // (`GET /sql/read` on `*.postgres.onecli.invalid`): sampling them would
+  // teach an agent to call a path that is not an API.
+  it("gives a database app its docs but no HTTP hosts or endpoints", () => {
+    const facts = catalogFactsFor("postgres");
+    expect(facts.apiHosts).toEqual([]);
+    expect(facts.endpoints).toEqual([]);
+    expect(facts.docsUrl).toMatch(/^https:\/\/www\.postgresql\.org\//);
+  });
+
   // The call rules send the agent to the docs before it guesses a
   // parameter, so a line without a docs link leaves it nothing to read.
   // Over the whole registry, not only the permission catalog: a connection

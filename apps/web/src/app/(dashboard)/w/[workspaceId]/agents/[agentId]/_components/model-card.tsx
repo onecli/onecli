@@ -81,6 +81,13 @@ export const ModelCard = ({ agentId }: { agentId: string }) => {
   const storedEffort = data.selected.effort ?? DEFAULT;
   const dirty =
     selectedModel !== storedModel || selectedEffort !== storedEffort;
+  // The provider's default level belongs to its default model (picked as
+  // "Default" or by name); any other model with no chosen level runs at that
+  // model's own default.
+  const defaultLevel =
+    selectedModel === DEFAULT || selectedModel === data.defaults.model
+      ? data.efforts.find((effort) => effort.id === data.defaults.effort)
+      : undefined;
 
   const save = () => {
     update.mutate(
@@ -166,7 +173,11 @@ export const ModelCard = ({ agentId }: { agentId: string }) => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={DEFAULT}>Provider default</SelectItem>
+                <SelectItem value={DEFAULT}>
+                  {defaultLevel
+                    ? `Default (${defaultLevel.label})`
+                    : "Model default"}
+                </SelectItem>
                 {data.efforts.map((effort) => (
                   <SelectItem key={effort.id} value={effort.id}>
                     {effort.label}

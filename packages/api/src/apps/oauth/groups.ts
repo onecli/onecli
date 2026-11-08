@@ -172,6 +172,7 @@ export const GOOGLE_ENABLE_APIS_URL =
     "docs",
     "drive",
     "forms",
+    "keep",
     "meet",
     "photoslibrary",
     "searchconsole",
@@ -183,7 +184,7 @@ export const GOOGLE_ENABLE_APIS_URL =
     .map((api) => `${api}.googleapis.com`)
     .join(",");
 
-/** "One Google client for all Google apps (Gmail, Drive, Calendar +14 more)". */
+/** "One Google client for all Google apps (Gmail, Drive, Calendar +15 more)". */
 const vendorClientSummary = (group: OAuthClientGroupId): string => {
   const names = groupMembers(group)
     .map((id) => getApp(id)?.name)

@@ -256,6 +256,38 @@ pub fn apply_injections(
     count
 }
 
+/// The names of the headers [`apply_injections`] sets on `request_path`:
+/// every `SetHeader` / `ReplaceHeader` of a matching rule whose value is a
+/// valid header value (one that is not is skipped there, and would leave the
+/// agent's own header in place). A replace of an absent header sets nothing,
+/// and there is nothing under its name to carry. What a request carries in
+/// these after injection is the credential, and only that.
+pub fn injected_header_names(rules: &[InjectionRule], request_path: &str) -> Vec<HeaderName> {
+    let mut names: Vec<HeaderName> = Vec::new();
+    for rule in rules {
+        if !path_matches(request_path, &rule.path_pattern) {
+            continue;
+        }
+        for injection in &rule.injections {
+            let (Injection::SetHeader { name, value } | Injection::ReplaceHeader { name, value }) =
+                injection
+            else {
+                continue;
+            };
+            let (Ok(name), Ok(_)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(value),
+            ) else {
+                continue;
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// True for the two host-wide catch-all shapes (`*` and `/*`) that
 /// [`path_matches`] accepts for every request path.
 pub fn is_catch_all_pattern(pattern: &str) -> bool {
@@ -1242,6 +1274,44 @@ mod tests {
         assert!(!rules_serve_path(&rules, Some("/calendar/v3/events")));
         assert!(!rules_serve_path(&rules, None));
         assert!(!rules_serve_path(&[], Some("/youtube/v3/search")));
+    }
+
+    #[test]
+    fn injected_header_names_are_the_headers_a_path_gets() {
+        let rules = vec![
+            make_rule("/api/public/*", vec![set_header("X-API-KEY", "k")]),
+            make_rule(
+                "*",
+                vec![
+                    Injection::ReplaceHeader {
+                        name: "authorization".into(),
+                        value: "Bearer t".into(),
+                    },
+                    Injection::RemoveHeader {
+                        name: "cookie".into(),
+                    },
+                    Injection::SetParam {
+                        name: "key".into(),
+                        value: "p".into(),
+                    },
+                    set_header("x-api-key", "again"),
+                ],
+            ),
+        ];
+        assert_eq!(
+            injected_header_names(&rules, "/api/public/campaign/GetAll?x=1"),
+            vec!["x-api-key", "authorization"]
+        );
+        // The first rule's path does not match: only the catch-all's headers.
+        assert_eq!(
+            injected_header_names(&rules, "/UserConfiguration/GetAllExtended"),
+            vec!["authorization", "x-api-key"]
+        );
+        assert!(injected_header_names(&[], "/").is_empty());
+        // A value injection cannot set leaves the agent's own header there:
+        // never listed as the credential.
+        let bad = vec![make_rule("*", vec![set_header("x-api-key", "bad\nvalue")])];
+        assert!(injected_header_names(&bad, "/").is_empty());
     }
 
     #[test]

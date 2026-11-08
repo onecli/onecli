@@ -59,12 +59,15 @@ import { setDefaultRuleActionGate } from "./providers/hooks/rule-action-gate";
 import { setDefaultPolicyValidator } from "./providers/hooks/policy-validator";
 import {
   initConversationReader,
+  initConversationSender,
   initUserReadConnectCompleter,
   setDefaultConversationReader,
+  setDefaultConversationSender,
   setDefaultUserReadConnectCompleter,
 } from "./providers/hooks/conversation-reader";
 import {
   eeConversationReader,
+  eeConversationSender,
   eeUserReadConnectCompleter,
 } from "./ee/slack-read";
 import { eeAgentDesktop } from "./ee/desktop";
@@ -168,6 +171,7 @@ export const ensureEditionDefaults = (): void => {
     setDefaultRuleActionGate(eeRuleActionGate);
     setDefaultPolicyValidator(eePolicyValidator);
     setDefaultConversationReader(eeConversationReader);
+    setDefaultConversationSender(eeConversationSender);
     setDefaultUserReadConnectCompleter(eeUserReadConnectCompleter);
     setDefaultNewOrgPolicySeeder(eeNewOrgPolicySeeder);
     // The agent's hosted desktop: hosted platform only. The self-host arm
@@ -219,6 +223,7 @@ export const ensureEditionDefaults = (): void => {
       // self-host gets the reader; unlicensed keeps the null slot, so the
       // tool refuses and is never listed.
       initConversationReader(eeConversationReader);
+      initConversationSender(eeConversationSender);
       initUserReadConnectCompleter(eeUserReadConnectCompleter);
       // Same reasoning for the team hooks: a licensed self-host reconciles
       // invited roles against directory group mappings. Its seat-cap half is

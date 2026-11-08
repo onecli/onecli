@@ -216,6 +216,32 @@ describe.skipIf(!PROOF_URL)("resolveMentionNames", () => {
     ]);
   });
 
+  it("a BLOCKED contact still resolves: blocking stops DMs, not @mentions in a channel", async () => {
+    const { agentId, integrationId, presenceId } =
+      await seedLinkedTurn("blocked-mention");
+    await linkUser(integrationId, "U0DAN", DAN);
+    await db.agentReachGrant.create({
+      data: {
+        agentId,
+        integrationId,
+        provider: "slack",
+        subjectKind: "external_user",
+        externalRef: "U0DAN",
+        state: "blocked",
+        cardRefs: [],
+      },
+    });
+    const out = await mentions.resolveMentionNames(presenceId, ["dan abramov"]);
+    expect(out).toEqual([
+      {
+        kind: "resolved",
+        name: "dan abramov",
+        externalUserId: "U0DAN",
+        displayName: "Dan Abramov",
+      },
+    ]);
+  });
+
   it("answers unknown for a name with no link — exact match only, never fuzzy", async () => {
     const { integrationId, presenceId } = await seedLinkedTurn("unknown");
     await linkUser(integrationId, "U0DAN", DAN);

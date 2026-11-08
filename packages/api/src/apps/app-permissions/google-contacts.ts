@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleContactsPermissions: AppPermissionDefinition = {
   provider: "google-contacts",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

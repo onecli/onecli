@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESKTOP_CLIPBOARD_MAX_BYTES,
+  DESKTOP_CLIPBOARD_MAX_WIRE_BYTES,
+} from "./index";
+import {
   desktopControlSteerId,
   isPlatformSteerId,
   runnerEventSchema,
@@ -20,6 +24,28 @@ import {
  * live turn.
  */
 describe("desktop frames", () => {
+  it("bounds clipboard text separately from protocol expansion", () => {
+    expect(DESKTOP_CLIPBOARD_MAX_BYTES).toBe(65_536);
+    expect(DESKTOP_CLIPBOARD_MAX_WIRE_BYTES).toBe(
+      2 * DESKTOP_CLIPBOARD_MAX_BYTES + 1024,
+    );
+    // Every input byte can be LF: CRLF normalization doubles that payload.
+    const text = "\n".repeat(DESKTOP_CLIPBOARD_MAX_BYTES);
+    const normalizedBytes = new TextEncoder().encode(
+      `${text.replaceAll("\n", "\r\n")}\0`,
+    ).byteLength;
+    expect(normalizedBytes).toBe(2 * DESKTOP_CLIPBOARD_MAX_BYTES + 1);
+    expect(DESKTOP_CLIPBOARD_MAX_WIRE_BYTES - normalizedBytes).toBe(1023);
+    expect(DESKTOP_CLIPBOARD_MAX_WIRE_BYTES).toBeLessThan(256 * 1024);
+    // The product budget is bytes, not JS character count.
+    expect(new TextEncoder().encode("😀".repeat(16_384)).byteLength).toBe(
+      DESKTOP_CLIPBOARD_MAX_BYTES,
+    );
+    expect(
+      new TextEncoder().encode("😀".repeat(16_385)).byteLength,
+    ).toBeGreaterThan(DESKTOP_CLIPBOARD_MAX_BYTES);
+  });
+
   it("the two screen ports are fixed and distinct", () => {
     expect(DESKTOP_VIEW_PORT).toBe(5900);
     expect(DESKTOP_CONTROL_PORT).toBe(5901);

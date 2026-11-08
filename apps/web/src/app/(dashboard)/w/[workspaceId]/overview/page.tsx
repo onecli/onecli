@@ -1,10 +1,15 @@
-import type { Metadata } from "next";
-import { OverviewContent } from "./_components/overview-content";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = {
-  title: "Overview",
-};
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+}
 
-export default function OverviewPage() {
-  return <OverviewContent />;
+/**
+ * The Overview dashboard is gone. Old bookmarks and links still in the wild
+ * (emails, docs, CLI output) forward to the workspace's front door instead of
+ * a 404.
+ */
+export default async function LegacyOverviewPage({ params }: Props) {
+  const { workspaceId } = await params;
+  redirect(`/w/${encodeURIComponent(workspaceId)}`);
 }

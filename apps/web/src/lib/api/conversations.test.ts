@@ -10,7 +10,10 @@ import type { TranscriptPage } from "./types";
 
 const apiGet = vi.fn();
 const apiPut = vi.fn();
-vi.mock("./client", () => ({
+vi.mock("./client", async (importOriginal) => ({
+  // The pure helpers (`workspaceScope`) stay real; only the transport is
+  // replaced.
+  ...(await importOriginal<typeof import("./client")>()),
   apiGet: (...args: unknown[]) => apiGet(...args),
   apiPost: vi.fn(),
   apiPut: (...args: unknown[]) => apiPut(...args),
@@ -109,6 +112,15 @@ describe("ensureDirect", () => {
     expect(apiPut.mock.calls[0]?.[0]).toBe(
       "/v1/agents/..%2Fsecrets/conversations/direct",
     );
+    expect(apiPut.mock.calls[0]?.[2]).toBeUndefined();
+  });
+
+  it("scopes the door to a named workspace (onboarding's early open)", async () => {
+    apiPut.mockResolvedValueOnce({ id: "cv-1", direct: true });
+    await ensureDirect("ag-1", { workspaceId: "ws-1" });
+    expect(apiPut.mock.calls[0]?.[2]).toEqual({
+      headers: { "X-Workspace-Id": "ws-1" },
+    });
   });
 });
 

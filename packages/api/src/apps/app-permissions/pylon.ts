@@ -1,4 +1,8 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import {
+  toolFactory,
+  type AppPermissionDefinition,
+  type AppTool,
+} from "./types";
 
 // Pylon REST API (docs.usepylon.com/pylon-docs/developer/api/api-reference),
 // every path from the OpenAPI the reference pages embed. The same API is
@@ -17,42 +21,21 @@ import type { AppPermissionDefinition, AppTool } from "./types";
 const HOST = "api.usepylon.com";
 const HOST_ALIASES = ["api.eu.usepylon.com"];
 
+const tool = toolFactory(HOST, HOST_ALIASES);
+
 const read = (
   id: string,
   name: string,
   description: string,
   pathPattern: string,
   method: "GET" | "POST" = "GET",
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  hostAliasPatterns: HOST_ALIASES,
-  pathPattern,
-  method,
-});
+): AppTool => tool(id, name, description, pathPattern, [method]);
 
-const write = (
-  id: string,
-  name: string,
-  description: string,
-  pathPattern: string,
-  methods: string[],
-  aliasPatterns?: string[],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  hostAliasPatterns: HOST_ALIASES,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+const write = tool;
 
 export const pylonPermissions: AppPermissionDefinition = {
   provider: "pylon",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

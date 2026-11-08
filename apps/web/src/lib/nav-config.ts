@@ -12,7 +12,6 @@ import {
   Plug,
   Shield,
   LayoutGrid,
-  LayoutDashboard,
   Download,
   Activity,
   Sparkles,
@@ -73,8 +72,8 @@ export interface NavSurface {
  * agent is the thread (§3.18), so chat lives on the agent page.
  *
  * Agents is not in the sidebar's render list either: the sidebar gives it its
- * own GROUP (`AgentsGroup`), whose "Manage agents" row is this section and
- * whose remaining rows are the workspace's agents. It stays in the TABLE
+ * own GROUP (`AgentsGroup`): the workspace's agents and a New agent row. It
+ * stays in the TABLE
  * because the header breadcrumb resolves section titles from here —
  * `opts.sidebar` is what drops it from the sidebar's copy, so the crumb keeps
  * reading "Agents".
@@ -83,11 +82,8 @@ export const workspaceNavItems = (
   workspaceId: string,
   opts?: NavSurface,
 ): NavItem[] => [
-  {
-    title: "Overview",
-    url: `/w/${workspaceId}/overview`,
-    icon: LayoutDashboard,
-  },
+  // No Overview: the workspace's front door is its first agent (`/w/<id>`
+  // redirects there), and the sidebar puts the Agents group above this list.
   ...(opts?.sidebar
     ? []
     : [{ title: "Agents", url: `/w/${workspaceId}/agents`, icon: AgentIcon }]),
@@ -186,6 +182,13 @@ export const getWorkspaceSettingsSections = (
         title: "Install",
         url: `/w/${workspaceId}/settings/install`,
         icon: Download,
+      },
+      // The caller's PERSONAL key for this workspace (one per user), the
+      // workspace twin of the org settings' API Keys page.
+      {
+        title: "API Key",
+        url: `/w/${workspaceId}/settings/api-key`,
+        icon: KeyRound,
       },
     ],
   },

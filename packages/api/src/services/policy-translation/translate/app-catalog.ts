@@ -30,12 +30,9 @@ export interface RuleVariant {
 }
 
 /**
- * Port of `policy-rule-service.ts::allRuleVariants` — the paths×methods a tool
- * fans into. The gateway evaluates the stored rows; the new engine re-expands
- * via the catalog. The translator only emits an app-target when a group's stored
- * variants EXACTLY equal this expansion (translate/app-permission.ts), so the
- * re-expansion is always faithful; any drift falls back to verbatim network
- * rules. Also used by the corpus tests to generate catalog-consistent rows.
+ * The paths×methods a tool fans into: its path plus aliases, times its methods
+ * (`null` = any method). The gateway re-expands an app target the same way
+ * (`catalog.rs::app_target_matches`).
  */
 export const allRuleVariants = (tool: AppTool): RuleVariant[] => {
   const paths = [tool.pathPattern, ...(tool.aliasPatterns ?? [])];

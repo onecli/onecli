@@ -370,15 +370,17 @@ mod tests {
 
     #[test]
     fn other_endpoints_fall_back_to_the_generic_card() {
+        // An endpoint this module can't name reads through the generic
+        // reader: titled by its resource, its fields as rows.
         let s = zoom("POST", "/v2/users/me/webinars", Some(r#"{"topic":"x"}"#));
-        assert_eq!(s.action, "POST request");
+        assert_eq!(s.action, "Create webinar");
         // A status change this module can't name reads as what was sent.
         let s = zoom(
             "PUT",
             "/v2/meetings/81234567890/status",
             Some(r#"{"action":"pause"}"#),
         );
-        assert_eq!(s.action, "PUT request");
+        assert_eq!(s.action, "Update meeting status");
         let s = zoom("POST", "/v2/users/me/meetings", Some("not json"));
         assert_eq!(s.action, "Create Zoom meeting");
         assert!(s.details.is_empty());

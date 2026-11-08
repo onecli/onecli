@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
+import {
+  act,
+  render as testingRender,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { guideHref } from "@/lib/components/setup-guide-link";
@@ -10,6 +17,11 @@ vi.mock("@/lib/api-fetch", () => ({
   getAuthToken: vi.fn().mockResolvedValue(null),
   getWorkspaceId: () => "ws-1",
 }));
+
+const render = (ui: ReactElement) =>
+  testingRender(
+    <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>,
+  );
 
 const baseApp = {
   id: "monday",

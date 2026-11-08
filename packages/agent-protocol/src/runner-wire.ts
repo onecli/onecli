@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  sandboxResourceBoundsSchema,
+  sandboxResourceObservationSchema,
+  sandboxResourceProfileSchema,
+  sandboxResourceSupportSchema,
+  sandboxStartResourcesSchema,
+} from "./sandbox-resources";
 import { agentEventSchema, turnUsageSchema } from "./events";
 import { AGENT_EFFORTS } from "./harness";
 import {
@@ -17,6 +24,9 @@ import {
   MAX_PREVIEW_RELAUNCHES,
   MAX_SYNC_PART_BYTES,
   MAX_SYNC_PARTS,
+  MAX_CRON_GATE_CHARS,
+  contextTokensSchema,
+  MAX_SESSION_REF_CHARS,
   MAX_TURN_CONTEXT_CHARS,
   MAX_DESKTOP_CONTROLLER_NAME_CHARS,
   agentChannelPresenceSchema,
@@ -29,6 +39,7 @@ import {
   syncFrameByteLength,
   homeRelativePathSchema,
   homeSyncFileSchema,
+  homeSyncBlobSchema,
 } from "./transport";
 import { MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 
@@ -86,65 +97,103 @@ const messageAttachmentsSchema = z
   .optional();
 
 /** What a runner can do, declared at registration — capacity and posture. */
-export const runnerCapabilitiesSchema = z.object({
-  /** Concurrent-sandbox cap the runner enforces; placement respects it. */
-  maxSandboxes: z.number().int().positive(),
-  /** The sandbox backend id (reporting and placement input, never routing). */
-  backend: z.string().min(1),
-  /**
-   * The backend's home durability class (§3.9): `resident` disks
-   * survive on their own; `snapshot` backends archive on park.
-   */
-  homeDurability: z.enum(["resident", "snapshot"]),
-  /**
-   * This runner parses the `turn.message` work item. The steer dispatch arm
-   * is gated on it because the runner's poll parse is all-or-nothing: an
-   * unknown kind would poison whole claimed batches on an older runner, over
-   * and over, until upgrade. Absent = false = follow-ups promote instead —
-   * the queue-only degrade.
-   */
-  steerMessages: z.boolean().optional(),
-  /**
-   * This runner parses the `turn.send_now` work item. Same
-   * all-or-nothing reason as `steerMessages`: the claim arm is gated on it,
-   * so an older runner never receives the kind and a Send now request on
-   * its sandbox simply stays a request. Absent = false.
-   */
-  sendNow: z.boolean().optional(),
-  /**
-   * This runner pulls attachment bytes (`GET /v1/runner/attachments/:id`)
-   * and streams them into the sandbox ahead of the turn. Dispatch composes
-   * the `turn.deliver` manifest + context note ONLY for capable runners —
-   * otherwise the turn ships bare with no note, so the agent is never told
-   * about files that cannot arrive. Absent = false.
-   */
-  attachments: z.boolean().optional(),
-  /**
-   * This runner pulls a mid-run follow-up's attachments ahead of its
-   * `turn.message`, the way it does for a turn's. The steer arm hands a
-   * follow-up WITH files only to a runner advertising this: an older one
-   * would forward the words and drop the files, so its file-carrying
-   * follow-ups promote and run as their own turn instead. Absent = false.
-   */
-  steerAttachments: z.boolean().optional(),
-  /**
-   * This runner relays files the agent sends back (`file.part` reassembly →
-   * `POST /v1/runner/attachments`). The spawn env advertises the send_file
-   * tool to the supervisor ONLY for capable runners — an older runner would
-   * drop the frames on validation and the model would wait out a timeout for
-   * a file that never left. Absent = false.
-   */
-  outboundAttachments: z.boolean().optional(),
-  /**
-   * This runner parses the `desktop.control` work item and forwards
-   * `desktop.state`. Same all-or-nothing reason as `steerMessages`: the
-   * claim arm is gated on it, so an older runner never receives the kind.
-   * Without it the control plane never pushes a controller change, so the
-   * sandbox never opens its input instance: takeover stays dark on that
-   * runner, viewing is unaffected. Absent = false.
-   */
-  desktopControl: z.boolean().optional(),
-});
+export const runnerCapabilitiesSchema = z
+  .object({
+    /** Resource-aware spawn, including pre-wake placement and honest observations. */
+    resourceProfilesV1: z.boolean().optional(),
+    /**
+     * The profile this runner applies when nothing overrides it. Required
+     * together with `resourceProfilesV1`: the control plane resolves
+     * overrides against the RUNNER's defaults, never against its own guess
+     * of what a deployment runs.
+     */
+    resourceDefaults: sandboxResourceProfileSchema.optional(),
+    resourceSupport: sandboxResourceSupportSchema.optional(),
+    resourceBounds: sandboxResourceBoundsSchema.optional(),
+    /** Concurrent-sandbox cap the runner enforces; placement respects it. */
+    maxSandboxes: z.number().int().positive(),
+    /** The sandbox backend id (reporting and placement input, never routing). */
+    backend: z.string().min(1),
+    /**
+     * The backend's home durability class (§3.9): `resident` disks
+     * survive on their own; `snapshot` backends archive on park.
+     */
+    homeDurability: z.enum(["resident", "snapshot"]),
+    /**
+     * This runner parses the `turn.message` work item. The steer dispatch arm
+     * is gated on it because the runner's poll parse is all-or-nothing: an
+     * unknown kind would poison whole claimed batches on an older runner, over
+     * and over, until upgrade. Absent = false = follow-ups promote instead —
+     * the queue-only degrade.
+     */
+    steerMessages: z.boolean().optional(),
+    /**
+     * This runner parses the `turn.send_now` work item. Same
+     * all-or-nothing reason as `steerMessages`: the claim arm is gated on it,
+     * so an older runner never receives the kind and a Send now request on
+     * its sandbox simply stays a request. Absent = false.
+     */
+    sendNow: z.boolean().optional(),
+    /**
+     * This runner pulls attachment bytes (`GET /v1/runner/attachments/:id`)
+     * and streams them into the sandbox ahead of the turn. Dispatch composes
+     * the `turn.deliver` manifest + context note ONLY for capable runners —
+     * otherwise the turn ships bare with no note, so the agent is never told
+     * about files that cannot arrive. Absent = false.
+     */
+    attachments: z.boolean().optional(),
+    /**
+     * This runner pulls a mid-run follow-up's attachments ahead of its
+     * `turn.message`, the way it does for a turn's. The steer arm hands a
+     * follow-up WITH files only to a runner advertising this: an older one
+     * would forward the words and drop the files, so its file-carrying
+     * follow-ups promote and run as their own turn instead. Absent = false.
+     */
+    steerAttachments: z.boolean().optional(),
+    /**
+     * The most files one message's manifest may carry to this runner: the
+     * bound its own wire schema parses. Runners built before the field existed
+     * parse `LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE`, all-or-nothing per poll,
+     * so absent = that. The control plane also never sends more than its own
+     * `MAX_ATTACHMENTS_PER_MESSAGE`; files past the bound are named in the
+     * context note instead of delivered.
+     */
+    maxAttachmentsPerMessage: z.number().int().positive().optional(),
+    /**
+     * This runner relays files the agent sends back (`file.part` reassembly →
+     * `POST /v1/runner/attachments`). The spawn env advertises the send_file
+     * tool to the supervisor ONLY for capable runners — an older runner would
+     * drop the frames on validation and the model would wait out a timeout for
+     * a file that never left. Absent = false.
+     */
+    outboundAttachments: z.boolean().optional(),
+    /**
+     * This runner relays a `file.part` run's `purpose` (the
+     * `x-onecli-file-purpose` header), so a file staged for send_message is
+     * stored WITHOUT attaching to the reply. The supervisor offers
+     * send_message `files` only under such a runner: an older one drops the
+     * key and the file would land under the reply. Absent = false.
+     */
+    stagedAttachments: z.boolean().optional(),
+    /**
+     * This runner parses the `desktop.control` work item and forwards
+     * `desktop.state`. Same all-or-nothing reason as `steerMessages`: the
+     * claim arm is gated on it, so an older runner never receives the kind.
+     * Without it the control plane never pushes a controller change, so the
+     * sandbox never opens its input instance: takeover stays dark on that
+     * runner, viewing is unaffected. Absent = false.
+     */
+    desktopControl: z.boolean().optional(),
+  })
+  .refine(
+    (capabilities) =>
+      capabilities.resourceProfilesV1 !== true ||
+      capabilities.resourceDefaults !== undefined,
+    {
+      message: "resourceProfilesV1 requires resourceDefaults",
+      path: ["resourceDefaults"],
+    },
+  );
 export type RunnerCapabilities = z.infer<typeof runnerCapabilitiesSchema>;
 
 /** The opt-in flags a runner may advertise: each one gates a work kind or
@@ -232,6 +281,7 @@ const containerRefSchema = z.string().min(1).max(200);
  * down, because the sandbox has moved on (deleted, respawned).
  */
 export const runnerSpawnRequestSchema = z.object({
+  resourceObservation: sandboxResourceObservationSchema.optional(),
   containerRef: containerRefSchema,
   tokenHash: sha256HexSchema,
 });
@@ -315,6 +365,8 @@ export type SandboxFile = z.infer<typeof sandboxFileSchema>;
  * current proxy token and grant-derived placeholders.
  */
 export const sandboxStartPayloadSchema = z.object({
+  /** Resolved before wake, never a request to grow an existing home. */
+  resources: sandboxStartResourcesSchema.optional(),
   env: z.record(z.string(), z.string()),
   files: z.array(sandboxFileSchema),
   /**
@@ -385,6 +437,9 @@ export type SandboxStartPayload = z.infer<typeof sandboxStartPayloadSchema>;
  */
 export const MAX_EVENT_BATCH_CHARS = 1_000_000;
 
+/** The runner wire's session-handle bound (see `MAX_SESSION_REF_CHARS`). */
+const sessionRefSchema = z.string().max(MAX_SESSION_REF_CHARS);
+
 export const runnerWorkItemSchema = z
   .discriminatedUnion("kind", [
     z.object({
@@ -411,10 +466,18 @@ export const runnerWorkItemSchema = z
       turnId: z.string().min(1),
       /** Bounded: this is user-authored text that crosses two hops. */
       message: z.string().max(100_000),
-      resumeSessionRef: z.string().max(500).optional(),
+      resumeSessionRef: sessionRefSchema.optional(),
+      /** Fresh harness session for this turn only; see the transport
+       * schema's field of the same name. The runner forwards it verbatim. */
+      ephemeralSession: z.literal(true).optional(),
       /** Delivery-only prompt context (step 8) — see the transport schema's
        * field of the same name; the runner forwards it verbatim. */
       context: z.string().max(MAX_TURN_CONTEXT_CHARS).optional(),
+      /** A scheduled task's gate; see the transport schema's field. */
+      gate: z.string().max(MAX_CRON_GATE_CHARS).optional(),
+      /** The conversation's context size; see the transport schema's field.
+       * The runner forwards it verbatim. */
+      contextTokens: contextTokensSchema.optional(),
       /** The turn's user attachments. Sent only to runners that advertised
        * `capabilities.attachments`. */
       attachments: messageAttachmentsSchema,
@@ -490,6 +553,7 @@ export const runnerWorkItemSchema = z
         .array(
           z.object({
             files: z.array(homeSyncFileSchema),
+            blobs: z.array(homeSyncBlobSchema).optional(),
             prune: z.array(homeRelativePathSchema).optional(),
             instructions: z.string().optional(),
             agentName: z.string().optional(),
@@ -592,6 +656,18 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
      * started a fresh container can never knock the fresh one down.
      */
     observedContainerRef: containerRefSchema.optional(),
+    /**
+     * The machine the substrate placed the sandbox on, from the runner's
+     * own snapshot (never the supervisor's word). Sent only beside a
+     * `home_read_only` stop, where the control plane tells one bad machine
+     * from a fleet-wide problem. Additive-optional, bounded to a DNS name.
+     */
+    node: z
+      .string()
+      .max(253)
+      .regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/)
+      .optional(),
+    resourceObservation: sandboxResourceObservationSchema.optional(),
   }),
   z.object({
     kind: z.literal("supervisor.ready"),
@@ -682,9 +758,12 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
   /**
    * The supervisor's turn-liveness heartbeat, relayed as its own single-event
    * post (never batched with transcript events — an old control plane
-   * rejecting the unknown kind must lose only heartbeats). It carries no
-   * payload beyond identity: arriving at all is the signal, and the control
-   * plane stamps `turns.last_progress_at` from its own clock.
+   * rejecting the unknown kind must lose only heartbeats). Arriving at all is
+   * the signal, and the control plane stamps `turns.last_progress_at` from
+   * its own clock. `sessionRef` is the running harness session, forwarded
+   * from the supervisor's beat so the control plane holds the resume handle
+   * before the turn ends (a sandbox that dies mid-turn never reports one).
+   * Additive-optional: an old control plane strips it.
    */
   z.object({
     kind: z.literal("turn.progress"),
@@ -692,6 +771,7 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
     sandboxId: z.string().min(1),
     conversationId: z.string().min(1),
     turnId: z.string().min(1),
+    sessionRef: sessionRefSchema.optional(),
   }),
   /**
    * A turn reached a terminal state. `sessionRef` rides along because the
@@ -710,7 +790,7 @@ export const runnerEventSchema = z.discriminatedUnion("kind", [
      * Additive-optional: an old control plane strips it. */
     errorCode: z.string().max(64).optional(),
     usage: turnUsageSchema.optional(),
-    sessionRef: z.string().max(500).optional(),
+    sessionRef: sessionRefSchema.optional(),
     /** Per-follow-up steer outcomes, forwarded verbatim from `turn.result`
      * (see the transport schema's field). An old control plane strips it —
      * every follow-up then promotes, the queue-only degrade. */
@@ -965,6 +1045,8 @@ export const RUNNER_ATTACHMENT_HEADERS = {
   name: "x-onecli-file-name",
   sha256: "x-onecli-file-sha256",
   caption: "x-onecli-file-caption",
+  /** "send" = stage for send_message (never under the reply); absent = reply. */
+  purpose: "x-onecli-file-purpose",
 } as const;
 
 /** The header set, parsed. `name` and `caption` are percent-encoded on the
@@ -976,6 +1058,7 @@ export const runnerAttachmentUploadHeadersSchema = z.object({
   name: z.string().min(1).max(255),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
+  purpose: z.literal("send").optional(),
 });
 export type RunnerAttachmentUploadHeaders = z.infer<
   typeof runnerAttachmentUploadHeadersSchema

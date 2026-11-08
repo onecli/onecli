@@ -11,7 +11,7 @@ import type {
 } from "@onecli/agent-protocol";
 import { createAdapter } from "./adapter";
 import type { AdapterConfig } from "./config";
-import type { ControlPlaneClient } from "./control-plane";
+import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import { FakeSocket } from "./test/fake-socket";
 import {
   createFakeControlPlane,
@@ -1013,6 +1013,55 @@ describe("the socket pump: ingest with bounded retry (finding G)", () => {
     expect(attempts).toBe(5); // 1 initial + 4 retries, then it gives up
     expect(logs).toContain("ingest failed after retries");
     expect(slack.callsTo("chat.postMessage")).toEqual([]); // nothing posted
+  });
+
+  it("waits out a dead holder's claim on a 409 instead of burning the retries in seconds", async () => {
+    // The control plane answers 409 while another run holds the event's
+    // claim. If that holder died, its claim lapses after two minutes: the
+    // fast backoff (7.5s in all) would give up long before, dropping the
+    // message. MUTATION-PROOF: drop the 409 branch and the retries are spent
+    // before the claim lapses, so no reply ever posts.
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    // Waited time, as the adapter's own backoff sleeps advance it.
+    let waited = 0;
+    let attempts = 0;
+    const { controlPlane } = feedControlPlane([presence()], {
+      ingest: async () => {
+        attempts += 1;
+        // The dead holder's claim lapses two minutes in.
+        if (waited < 2 * 60_000) {
+          throw new ControlPlaneError(409, "event in flight");
+        }
+        return {
+          kind: "refused",
+          message: "taken over",
+          reply: { channel: "D100", threadTs: null },
+        };
+      },
+    });
+    const adapter = createAdapter({
+      config: adapterConfig(),
+      controlPlane,
+      log: () => {},
+    });
+    adapters.push(adapter);
+    await adapter.start();
+    await waitReal(() => sockets.length === 1, "socket opened");
+    sockets[0]!.open();
+    sockets[0]!.emit(eventsEnvelope("Ev1"));
+
+    await waitReal(() => attempts >= 1, "first ingest attempt");
+    for (let i = 0; i < 6 && attempts < 5; i += 1) {
+      waited += 45_000;
+      await vi.advanceTimersByTimeAsync(45_000);
+    }
+    vi.useRealTimers();
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(1),
+    );
+    expect(slack.callsTo("chat.postMessage")[0]?.form.text).toBe("taken over");
   });
 });
 

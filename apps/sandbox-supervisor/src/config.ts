@@ -77,6 +77,9 @@ export interface SupervisorConfig {
   /** The runner relays files the agent sends back (send_file). False under
    * an older runner or the stdio dev driver: the tool is then not offered. */
   outboundAttachments: boolean;
+  /** The runner relays a file run's `purpose`, so send_message may carry
+   * `files` (staged, never under the reply). Absent or false: not offered. */
+  stagedAttachments?: boolean;
   /** The runner carries port streams, so preview_expose and its fragment
    * are offered. Absent or false: neither is (never teach a missing tool). */
   previews?: boolean;
@@ -157,6 +160,11 @@ export const loadConfig = (): SupervisorConfig => ({
    * runner that advertises outboundAttachments; absent under an older
    * runner or the stdio dev driver, where the tool must not be offered. */
   outboundAttachments: process.env.RUNNER_OUTBOUND_ATTACHMENTS === "1",
+  /** The runner relays a file run's `purpose` (staged files), so
+   * send_message may carry `files`. Absent under an older runner: the
+   * parameter is not offered, and a file never lands under the reply by
+   * mistake. */
+  stagedAttachments: process.env.RUNNER_STAGED_ATTACHMENTS === "1",
   /** The runner carries port streams (its port API is configured), so a
    * preview can reach this sandbox. Absent: preview_expose is not offered. */
   previews: process.env.RUNNER_PORT_STREAMS === "1",

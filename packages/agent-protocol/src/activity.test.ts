@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIVITY_TEXT_MAX,
   activityForReasoning,
+  activityForToolCall,
   activityForTool,
   bareToolName,
-  finishedActivityForTool,
   toolKind,
 } from "./activity";
 
@@ -127,35 +127,28 @@ describe("activityForTool", () => {
   });
 });
 
-describe("finishedActivityForTool", () => {
+describe("a finished tool call's line", () => {
+  const done = (name: string) =>
+    activityForToolCall(name, undefined, false, { output: "" });
+
   it("is the past tense of the same phrase", () => {
-    expect(finishedActivityForTool("bash")).toBe("Ran a command");
-    expect(finishedActivityForTool("read")).toBe("Read a file");
-    expect(finishedActivityForTool("mcp__onecli__websearch")).toBe(
-      "Searched the web",
-    );
-    expect(finishedActivityForTool("mcp__onecli__swarm")).toBe(
-      "Coordinated helpers",
-    );
+    expect(done("bash")).toBe("Ran a command");
+    expect(done("read")).toBe("Read a file");
+    expect(done("mcp__onecli__websearch")).toBe("Searched the web");
+    expect(done("mcp__onecli__swarm")).toBe("Coordinated helpers");
     // The platform's channel tools, seen in real agent turns.
-    expect(finishedActivityForTool("mcp__onecli__find_recipient")).toBe(
-      "Looked someone up",
-    );
+    expect(done("mcp__onecli__find_recipient")).toBe("Looked someone up");
     expect(activityForTool("mcp__onecli__send_message")).toBe(
       "Sending a message",
     );
-    expect(finishedActivityForTool("mcp__onecli__send_file")).toBe(
-      "Sent a file",
-    );
+    expect(done("mcp__onecli__send_file")).toBe("Sent a file");
     expect(activityForTool("mcp__onecli__preview_expose")).toBe(
       "Asking for a preview link",
     );
   });
 
   it("NEVER echoes an unknown tool's raw name", () => {
-    expect(finishedActivityForTool("<img src=x onerror=alert(1)>")).toBe(
-      "Used a tool",
-    );
+    expect(done("<img src=x onerror=alert(1)>")).toBe("Used a tool");
   });
 });
 
@@ -171,5 +164,175 @@ describe("toolKind", () => {
   it("is undefined for a tool that is not one countable kind", () => {
     expect(toolKind("todo")).toBeUndefined();
     expect(toolKind("some_third_party_tool")).toBeUndefined();
+  });
+});
+
+describe("activityForToolCall: act-as-you lines name the conversation", () => {
+  it("send_as_me reads Sent as you to <conversation>", () => {
+    expect(
+      activityForToolCall(
+        "mcp__onecli__send_as_me",
+        JSON.stringify({ conversation: "#general", text: "hi" }),
+        false,
+      ),
+    ).toBe("Sent as you to #general");
+    expect(
+      activityForToolCall(
+        "send_as_me",
+        JSON.stringify({ conversation: "Sam" }),
+        true,
+      ),
+    ).toBe("Sending as you to Sam");
+  });
+  it("edit and delete read in <conversation>", () => {
+    const input = JSON.stringify({ conversation: "#eng", messageId: "1" });
+    expect(activityForToolCall("edit_my_message", input, false)).toBe(
+      "Edited a message sent as you in #eng",
+    );
+    expect(activityForToolCall("delete_my_message", input, false)).toBe(
+      "Asked to delete a message sent as you in #eng",
+    );
+  });
+  it("no input or another tool: the plain phrase, never 'someone'", () => {
+    expect(activityForToolCall("send_as_me", undefined, false)).toBe(
+      "Sent as you",
+    );
+    expect(activityForToolCall("send_message", '{"to":"x"}', false)).toBe(
+      "Sent a message",
+    );
+  });
+});
+
+describe("activityForToolCall: a finished send says what really happened", () => {
+  const asMe = JSON.stringify({ conversation: "@Sam", text: "hi" });
+  const toSam = JSON.stringify({ to: "@Sam", text: "hi" });
+  const out = (status: string) => ({ output: JSON.stringify({ status }) });
+  it("sent reads Sent as you to X", () => {
+    expect(activityForToolCall("send_as_me", asMe, false, out("sent"))).toBe(
+      "Sent as you to @Sam",
+    );
+  });
+  it("held, needs_access, needs_choice and an error never say Sent", () => {
+    expect(activityForToolCall("send_as_me", asMe, false, out("held"))).toBe(
+      "Waiting for your approval: send as you to @Sam",
+    );
+    expect(
+      activityForToolCall("send_as_me", asMe, false, out("needs_access")),
+    ).toBe("Needs your input: send to @Sam");
+    expect(
+      activityForToolCall("send_message", toSam, false, out("needs_choice")),
+    ).toBe("Needs your input: send to @Sam");
+    expect(
+      activityForToolCall("send_message", toSam, false, {
+        output: "boom",
+        isError: true,
+      }),
+    ).toBe("Couldn't send to @Sam");
+    expect(
+      activityForToolCall("send_message", toSam, false, out("not_sent")),
+    ).toBe("Not sent to @Sam");
+  });
+  it("edit and delete follow their outcome too", () => {
+    const input = JSON.stringify({ conversation: "#eng", messageId: "1" });
+    expect(
+      activityForToolCall("delete_my_message", input, false, out("held")),
+    ).toBe("Waiting for your approval: delete a message in #eng");
+    expect(
+      activityForToolCall("edit_my_message", input, false, {
+        isError: true,
+      }),
+    ).toBe("Couldn't edit a message in #eng");
+  });
+  it("the agent's own-reply changes never claim a change that failed", () => {
+    const failed = { output: "refused", isError: true };
+    expect(
+      activityForToolCall(
+        "mcp__onecli__edit_my_reply",
+        "{}",
+        false,
+        out("edited"),
+      ),
+    ).toBe("Edited its reply");
+    expect(activityForToolCall("edit_my_reply", "{}", false, failed)).toBe(
+      "Couldn't edit its reply",
+    );
+    expect(activityForToolCall("delete_my_reply", "{}", false, failed)).toBe(
+      "Couldn't delete its reply",
+    );
+    expect(activityForToolCall("delete_my_reply", "{}", true, failed)).toBe(
+      "Deleting its reply",
+    );
+    expect(
+      activityForToolCall("list_my_replies", undefined, false, { output: "" }),
+    ).toBe("Looked at its own replies");
+  });
+  it("names the conversation for changes and thread posts elsewhere", () => {
+    const there = '{"conversation":"#x","messageId":"1.2"}';
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("edited")),
+    ).toBe("Edited a message in #x");
+    expect(
+      activityForToolCall("delete_my_reply", there, false, out("deleted")),
+    ).toBe("Deleted a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, {
+        output: "no",
+        isError: true,
+      }),
+    ).toBe("Couldn't edit its reply");
+    expect(activityForToolCall("delete_my_reply", there, true)).toBe(
+      "Deleting its reply",
+    );
+    expect(
+      activityForToolCall(
+        "send_message",
+        '{"to":"#x","text":"hi","thread":"1.2"}',
+        false,
+        out("sent"),
+      ),
+    ).toBe("Posted in a thread in #x");
+  });
+  it("a change elsewhere that waits on the person never claims it happened", () => {
+    const there = '{"conversation":"#x","messageId":"1.2"}';
+    expect(
+      activityForToolCall("delete_my_reply", there, false, out("held")),
+    ).toBe("Waiting for your approval: delete a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("held")),
+    ).toBe("Waiting for your approval: edit a message in #x");
+    expect(
+      activityForToolCall("edit_my_reply", there, false, out("needs_access")),
+    ).toBe("Needs your input: edit a message in #x");
+  });
+  it("while running, the result is not consulted", () => {
+    expect(activityForToolCall("send_as_me", asMe, true, out("held"))).toBe(
+      "Sending as you to @Sam",
+    );
+  });
+});
+
+describe("activityForToolCall: send_message with files", () => {
+  const withFiles = JSON.stringify({
+    to: "#proj-reports",
+    text: "here",
+    files: ["report.csv"],
+  });
+  const out = (status: string) => ({ output: JSON.stringify({ status }) });
+  it("names the file count and the target, and never says Sent while held", () => {
+    expect(activityForToolCall("send_message", withFiles, true)).toBe(
+      "Sending 1 file to #proj-reports",
+    );
+    expect(
+      activityForToolCall("send_message", withFiles, false, out("held")),
+    ).toBe("Waiting for approval: send 1 file to #proj-reports");
+    expect(
+      activityForToolCall("send_message", withFiles, false, out("sent")),
+    ).toBe("Sent 1 file to #proj-reports");
+    expect(
+      activityForToolCall("send_message", withFiles, false, {
+        output: "nope",
+        isError: true,
+      }),
+    ).toBe("Couldn't send 1 file to #proj-reports");
   });
 });

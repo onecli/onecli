@@ -8,8 +8,8 @@ import { PINNED_ROW } from "./transcript-layout";
 
 let timeline: { kind: string; key: string; at: number }[] = [];
 vi.mock("./use-approval-cards", () => ({ useApprovalCards: () => [] }));
-vi.mock("./use-action-approval-cards", () => ({
-  useActionApprovalCards: () => [],
+vi.mock("./use-channel-approval-cards", () => ({
+  useChannelApprovalCards: () => [],
 }));
 vi.mock("./approval-timeline", () => ({ useApprovalTimeline: () => timeline }));
 vi.mock("./approval-timeline-slot", () => ({

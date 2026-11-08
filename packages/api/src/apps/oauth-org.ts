@@ -10,7 +10,10 @@ import {
   signedRedirectPath,
 } from "./oauth/groups";
 import { accessLevelFromState, resolveAccessLevel } from "./access-level";
-import { extractLabel } from "../lib/connection-display";
+import {
+  extractLabel,
+  findDuplicateConnection,
+} from "../lib/connection-display";
 import { setPartialGrantParams } from "./missing-permissions";
 import {
   createConnection,
@@ -47,6 +50,7 @@ import { db } from "@onecli/db";
 import { ROLE_HIERARCHY } from "../providers";
 import type { AuthContext } from "../providers";
 import { CAPS } from "../lib/env";
+import type { ConnectResponse } from "./connect-credentials";
 
 /**
  * The org-door authorization shared by BOTH entry points: the canonical
@@ -509,13 +513,11 @@ export const orgConnect = async (
     );
     const effectiveLabel =
       options?.label || extractLabel(options?.metadata) || null;
-    const duplicate = effectiveLabel
-      ? existing.find(
-          (c) =>
-            c.label?.toLowerCase().trim() ===
-            effectiveLabel.toLowerCase().trim(),
-        )
-      : existing[0];
+    const duplicate = findDuplicateConnection(
+      existing,
+      effectiveLabel,
+      options?.metadata,
+    );
 
     if (duplicate) {
       connection = await reconnectConnection(
@@ -558,7 +560,10 @@ export const orgConnect = async (
   // just the workspace the request was scoped to.
   invalidateGatewayCacheForOrg(organizationId);
 
-  return Response.json({ success: true });
+  return Response.json({
+    success: true,
+    connectionId: connection.id,
+  } satisfies ConnectResponse);
 };
 
 export const tryHandleOrgConnect = async (

@@ -8,6 +8,7 @@ import type { Prisma } from "@onecli/db";
 import { z } from "zod";
 import { cleanLabel } from "../../lib/format";
 import { logger } from "../../lib/logger";
+import { agentImageUrlOrNull } from "../agent-image-service";
 import { ensureSourcedConversation } from "../conversation-service";
 import { ServiceError } from "../errors";
 import { peerRoster } from "./agent-peer-roster";
@@ -76,8 +77,9 @@ const log = logger.child({ service: "agent-link" });
  *      both sides' consent; a cross-workspace pair gets one per `ask` side,
  *      the message is delivered when the LAST required approval executes,
  *      and a rejection on either side fails the other pending card loudly
- *      ("the other agent's owner declined"). "Approve + always allow" sets
- *      the decider's side to `allow` (both sides in one workspace);
+ *      ("the other agent's owner declined"). Each card asks about the PAIR,
+ *      not the message: Always allow sets the decider's side to `allow`,
+ *      Never to `blocked` (both sides in one workspace);
  *   6. at execute the live link is re-read (a block after the card wins),
  *      the 4a/5a verify-at-approve lesson.
  *
@@ -494,7 +496,8 @@ export const requestCommunicate = async (input: {
   // Cross-workspace: the sender's owners decide from the sender's agent, the
   // receiver's owners from the receiver's, and the second approve is the
   // one that delivers. Same workspace: the single hold delivers.
-  const summary = `${cleanLabel(from.name)} wants to talk to ${cleanLabel(peer.name)}: "${cleanLabel(text, 200)}"`;
+  // The card asks about the other AGENT, with the first message as context.
+  const summary = `${cleanLabel(from.name)} wants to talk to ${cleanLabel(peer.name)} from now on? First message: "${cleanLabel(text, 200)}"`;
   const approvalIds: string[] = [];
   for (const side of holdSides) {
     const held = await requestActionApproval({
@@ -1238,30 +1241,69 @@ registerActionHandler(
     });
   },
   {
-    // "Approve + always allow": THE DECIDER'S side flows from now on. Across
-    // workspaces the other side's standing is untouched - one relationship,
-    // two owners. In ONE workspace the decider owns both sides (the card
-    // they just approved carried both consents), so both flip: otherwise
-    // the next message would still ask on the side nobody was shown.
-    alwaysAllow: async (approval, deciderUserId) => {
-      const payload = communicatePayloadSchema.parse(approval.payload);
-      const pair = await loadPair(payload.fromAgentId, payload.toAgentId);
-      const link = await ensureLink(payload.fromAgentId, payload.toAgentId);
-      const sameOwners =
-        pair !== null && pair.from.workspaceId === pair.to.workspaceId;
-      const sideA = { policyA: "allow", decidedByAUserId: deciderUserId };
-      const sideB = { policyB: "allow", decidedByBUserId: deciderUserId };
-      await db.agentLink.update({
-        where: { id: link.id },
-        data: sameOwners
-          ? { ...sideA, ...sideB }
-          : sideOf(link, approval.agentId) === "A"
-            ? sideA
-            : sideB,
-      });
+    // ONE relationship, one setting: the card asks about the OTHER AGENT
+    // (Always allow / Never), never about one message. Each answer lands on
+    // THE DECIDER'S side (`setDeciderSides`); Never also ends every open
+    // task on the pair.
+    standing: {
+      allow: async (approval, deciderUserId) => {
+        const payload = communicatePayloadSchema.parse(approval.payload);
+        await setDeciderSides(
+          approval.agentId,
+          payload,
+          "allow",
+          deciderUserId,
+        );
+      },
+      never: async (approval, deciderUserId) => {
+        const payload = communicatePayloadSchema.parse(approval.payload);
+        await setDeciderSides(
+          approval.agentId,
+          payload,
+          "blocked",
+          deciderUserId,
+        );
+        await closePairTasks(payload.fromAgentId, payload.toAgentId, "blocked");
+      },
     },
   },
 );
+
+/**
+ * Record a standing answer on THE DECIDER'S side. Across workspaces the
+ * other side's standing is untouched - one relationship, two owners. In ONE
+ * workspace the decider owns both sides (the card carried both consents),
+ * so both flip: otherwise the next message would still ask on the side
+ * nobody was shown. An allow never lifts a side already on Never: a stale
+ * card's click must not undo a deliberate block set since (only the
+ * dashboard's own change does).
+ */
+const setDeciderSides = async (
+  approvalAgentId: string,
+  payload: { fromAgentId: string; toAgentId: string },
+  policy: "allow" | "blocked",
+  deciderUserId: string,
+): Promise<void> => {
+  const pair = await loadPair(payload.fromAgentId, payload.toAgentId);
+  const link = await ensureLink(payload.fromAgentId, payload.toAgentId);
+  const sameOwners =
+    pair !== null && pair.from.workspaceId === pair.to.workspaceId;
+  const sticky = policy === "allow" ? { not: "blocked" } : undefined;
+  const sides = sameOwners ? ["A", "B"] : [sideOf(link, approvalAgentId)];
+  for (const side of sides) {
+    if (side === "A") {
+      await db.agentLink.updateMany({
+        where: { id: link.id, policyA: sticky },
+        data: { policyA: policy, decidedByAUserId: deciderUserId },
+      });
+    } else {
+      await db.agentLink.updateMany({
+        where: { id: link.id, policyB: sticky },
+        data: { policyB: policy, decidedByBUserId: deciderUserId },
+      });
+    }
+  }
+};
 
 /** Is decision (`at`, `id`) strictly later than the sibling's? Same instant
  *  falls to the id order, so the answer is total and both sides agree. */
@@ -1280,6 +1322,8 @@ const decidedAfter = (
 export interface AgentPeer {
   agentId: string;
   name: string;
+  /** The peer's uploaded avatar, when it has one. */
+  imageUrl: string | null;
   /** The peer's workspace name when it is not the caller's own; null for a
    * same-workspace peer (the common case, needs no qualifier). */
   workspaceName: string | null;
@@ -1361,6 +1405,7 @@ export const listPeers = async (input: {
           select: {
             id: true,
             name: true,
+            imageKey: true,
             workspace: { select: { name: true } },
           },
         },
@@ -1368,6 +1413,7 @@ export const listPeers = async (input: {
           select: {
             id: true,
             name: true,
+            imageKey: true,
             workspace: { select: { name: true } },
           },
         },
@@ -1403,6 +1449,7 @@ export const listPeers = async (input: {
     peers.set(r.id, {
       agentId: r.id,
       name: r.name,
+      imageUrl: agentImageUrlOrNull(r.id, r.imageKey),
       workspaceName: null,
       myPolicy: "ask",
       theirPolicy: "ask",
@@ -1415,6 +1462,7 @@ export const listPeers = async (input: {
     const entry: AgentPeer = {
       agentId: other.id,
       name: other.name,
+      imageUrl: agentImageUrlOrNull(other.id, other.imageKey),
       workspaceName: existing ? null : other.workspace.name,
       myPolicy: policyOfSide(link, input.agentId),
       theirPolicy: policyOfSide(link, other.id),

@@ -161,7 +161,7 @@ describe("approvalTimeline", () => {
     // Before the record answers, a departure is stamped with the last time
     // it was seen STILL pending (not the poll that noticed it leave): the
     // resend was created after that, so it never joins the decided card.
-    const approved = cardOf({}, "decided");
+    const approved = cardOf({}, "unknown");
     const resend = cardOf();
     approved.settledAt = resend.at - 1;
     const entries = approvalTimeline([approved, resend]);
