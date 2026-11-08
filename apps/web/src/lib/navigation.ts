@@ -55,8 +55,8 @@ export const isAgentPagePath = (pathname: string): boolean =>
 
 /**
  * Prefix an absolute dashboard path with `/w/<workspaceId>` from the current
- * pathname. Used by shared dashboard components (connections tabs, overview
- * cards, app detail) so a "Secrets" tab click inside `/w/<id>/connections`
+ * pathname. Used by shared dashboard components (connections tabs, settings
+ * panes, app detail) so a "Secrets" tab click inside `/w/<id>/connections`
  * resolves to `/w/<id>/connections/secrets`.
  *
  * The whole dashboard is org-scoped — a bare `/agents`-style path 404s
@@ -138,16 +138,44 @@ export const agentWebhookRunsPath = (
     `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "webhook", webhook: webhookId }).toString()}`,
   );
 
+/** Activity's Runs tab narrowed to ONE schedule's runs (its "History"). */
+export const agentScheduleRunsPath = (
+  currentPathname: string,
+  agentId: string,
+  cronId: string,
+): string =>
+  withWorkspacePrefix(
+    currentPathname,
+    `/activity?${new URLSearchParams({ tab: "runs", agent: agentId, view: "cron", schedule: cronId }).toString()}`,
+  );
+
+/** The agent's chat with a message ready to finish and send (`?draft=`,
+ * read once by the chat). */
+export const agentChatDraftPath = (
+  currentPathname: string,
+  agentId: string,
+  draft: string,
+): string =>
+  `${agentSectionPath(currentPathname, agentId, "chat")}?draft=${encodeURIComponent(draft)}`;
+
 /**
- * Where "Get Started" lands: the workspace's agent roster with its create flow
+ * Where "Get Started" lands: the workspace's agents page with its create flow
  * already open (`?new=1`). Creating the first agent IS getting started — the
  * install instructions come after there is something to install.
  *
  * The param, not local state, so every entry point (the header button, the
- * org-scope picker, a pasted link) opens the same door; the roster strips it
+ * org-scope picker, a pasted link) opens the same door; the agents page strips it
  * once consumed so a refresh doesn't reopen the dialog.
  */
 export const AGENT_CREATE_PARAM = "new";
+
+/**
+ * `?new=primary`: open the create door's PRIMARY action (BYO creation for a
+ * BYO-world org, hosted creation otherwise) rather than the hosted-intent
+ * default of any other value. For entry points that are not about hosted
+ * agents, e.g. Install's "New agent" option.
+ */
+export const AGENT_CREATE_PRIMARY = "primary";
 
 export const agentsCreatePath = (workspaceId: string): string =>
   `/w/${encodeURIComponent(workspaceId)}/agents?${AGENT_CREATE_PARAM}=1`;

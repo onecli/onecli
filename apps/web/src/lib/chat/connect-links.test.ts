@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  connectLinkTextFromTools,
   extractConnectSuggestions,
   isCardConnectLink,
   parseConnectLink,
@@ -230,5 +231,91 @@ describe("extractConnectSuggestions", () => {
         ["gmail", "connect"],
       ]);
     }
+  });
+});
+
+describe("connectLinkTextFromTools", () => {
+  // The tool mints the gateway's exact shape: every byte but a letter or a
+  // digit percent-encoded, so the link scan never stops inside the name.
+  const JIRA_CONNECT =
+    "https://app.onecli.sh/w/a/connections?connect=jira&source=agent&agent_name=Donna%27s%20Bot&agent_id=ag%2D1";
+  const result = (body: unknown) => JSON.stringify(body);
+
+  it("lifts the connect link from request_app_connection, MCP-prefixed or not", () => {
+    const text = connectLinkTextFromTools([
+      {
+        callId: "c1",
+        name: "mcp__onecli__request_app_connection",
+        output: result({ status: "connect", connectUrl: JIRA_CONNECT }),
+      },
+    ]);
+    expect(extractConnectSuggestions(text)).toEqual([
+      expect.objectContaining({
+        kind: "connect",
+        app: expect.objectContaining({ id: "jira" }),
+        agentName: "Donna's Bot",
+      }),
+    ]);
+  });
+
+  it("an attach result leads with the attach row, like access_restricted", () => {
+    const text = connectLinkTextFromTools([
+      {
+        callId: "c1",
+        name: "request_app_connection",
+        output: result({
+          status: "attach",
+          manageUrl:
+            "https://app.onecli.sh/w/a/agents/ag-1/connections?attach=jira",
+          connectUrl: JIRA_CONNECT,
+        }),
+      },
+    ]);
+    expect(extractConnectSuggestions(text)).toEqual([
+      expect.objectContaining({
+        kind: "attach",
+        app: expect.objectContaining({ id: "jira" }),
+      }),
+    ]);
+  });
+
+  it("an answer with no link still gets the card from the tool", () => {
+    const answer = "Jira isn't connected yet. Use the button below.";
+    const tools = connectLinkTextFromTools([
+      {
+        callId: "c1",
+        name: "request_app_connection",
+        output: result({ status: "connect", connectUrl: JIRA_CONNECT }),
+      },
+    ]);
+    expect(extractConnectSuggestions(`${answer}\n${tools}`)).toHaveLength(1);
+  });
+
+  it("ignores other tools, failed calls and unfinished ones", () => {
+    expect(
+      connectLinkTextFromTools([
+        { callId: "a", name: "bash", output: JIRA_CONNECT },
+        {
+          callId: "b",
+          name: "request_app_connection",
+          output: JIRA_CONNECT,
+          isError: true,
+        },
+        { callId: "c", name: "request_app_connection" },
+      ]),
+    ).toBe("");
+  });
+
+  it("dedupes against the same link in the answer", () => {
+    const tools = connectLinkTextFromTools([
+      {
+        callId: "c1",
+        name: "request_app_connection",
+        output: result({ status: "connect", connectUrl: JIRA_CONNECT }),
+      },
+    ]);
+    expect(
+      extractConnectSuggestions(`Connect: ${JIRA_CONNECT}\n${tools}`),
+    ).toHaveLength(1);
   });
 });

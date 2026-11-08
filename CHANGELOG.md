@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.19.0](https://github.com/onecli/onecli/compare/v2.18.0...v2.19.0) (2026-11-05)
+
+
+### Features
+
+* context sizing, Approve similar, honest refusals, read-only home restarts, faster wakes ([#640](https://github.com/onecli/onecli/issues/640)) ([1d63469](https://github.com/onecli/onecli/commit/1d6346933ba0615fc5a313afcbb1c2a30f54dd0a))
+
+## [2.18.0](https://github.com/onecli/onecli/compare/v2.17.0...v2.18.0) (2026-11-03)
+
+
+### Features
+
+* Bitbucket Cloud, schedule checks, agents send files and post into threads, Codex logins ([#635](https://github.com/onecli/onecli/issues/635)) ([e98119c](https://github.com/onecli/onecli/commit/e98119cdd54b01d6a391e1664bd8a4d1b316d755))
+
+## [2.17.0](https://github.com/onecli/onecli/compare/v2.16.0...v2.17.0) (2026-10-31)
+
+
+### Features
+
+* PostgreSQL through the gateway, Zendesk and HeyReach, readable approval cards, Slack as you ([#631](https://github.com/onecli/onecli/issues/631)) ([4692e04](https://github.com/onecli/onecli/commit/4692e04a2068021d28c9073d68100b0bc96bfab8))
+
 ## [2.16.0](https://github.com/onecli/onecli/compare/v2.15.0...v2.16.0) (2026-10-22)
 
 

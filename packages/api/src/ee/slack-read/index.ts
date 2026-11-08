@@ -1,16 +1,37 @@
 import { oauthUserAccess } from "@onecli/channels/slack";
 import type {
   ConversationReader,
+  ConversationSender,
   UserReadConnectCompleter,
 } from "../../providers/hooks/conversation-reader";
 import { verifyOAuthState } from "../../lib/oauth-state";
 import { hasActiveMembership } from "../../middleware/auth/resolve";
 import { ServiceError } from "../../services/errors";
-import { completeConnect, isUserReadState, readConversation } from "./service";
+import {
+  canSendAsUser,
+  completeConnect,
+  isUserReadState,
+  readConversation,
+  deleteAsUser,
+  editAsUser,
+  isOwnAsUser,
+  listOwnAsUser,
+  sendAsUser,
+} from "./service";
 
 /** The injected `read_conversation` body (see providers/hooks). */
 export const eeConversationReader: ConversationReader = {
   read: (input) => readConversation(input),
+};
+
+/** The injected `send_as_me` body (see providers/hooks). */
+export const eeConversationSender: ConversationSender = {
+  available: (agentId) => canSendAsUser(agentId),
+  send: (input) => sendAsUser(input),
+  edit: (input) => editAsUser(input),
+  delete: (input) => deleteAsUser(input),
+  listOwn: (input) => listOwnAsUser(input),
+  isOwn: (input) => isOwnAsUser(input),
 };
 
 /** The injected "Connect your Slack" OAuth return. The signature is

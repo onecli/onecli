@@ -71,6 +71,17 @@ describe("the connections fragment", () => {
     expect(flat).toContain("only when they point at the OneCLI dashboard");
   });
 
+  it("teaches credential_unavailable as re-enter it, not attach or connect", () => {
+    const flat = connectionsFragment(".agents/skills").body.replace(
+      /\s+/g,
+      " ",
+    );
+    expect(flat).toContain(
+      "credential_unavailable means you HAVE the credential",
+    );
+    expect(flat).toContain("Never ask them to connect or attach it");
+  });
+
   it("constrains relayed links to the dashboard — an origin can forge the error shape", () => {
     // A hostile upstream can return a body that mimics the gateway's
     // app_not_connected error with its own connect_url; the agent cannot
@@ -118,6 +129,10 @@ describe("the connections fragment", () => {
       "Each group of 25 is its own batch: a new id",
       "(2 of 5)",
       "the total counting only that group, never the whole list",
+      "One record type per call. Each record sets only its own fields",
+      "never one call per set of fields",
+      "Set a total only when you send that many at once",
+      "use ONE bulk call where the API has one, or no total",
       "wait until it is decided before sending the next",
       "Updating a list of Salesforce records: send ONE bulk update of up to 200",
       "one request, one approval for the whole list",
@@ -134,6 +149,9 @@ describe("the connections fragment", () => {
     // for a whole 105-record list left each card waiting for the rest.
     expect(flat).not.toContain("at most 10 at a time");
     expect(flat).not.toContain("up to 25 at once");
+    // Salesforce takes any fields per record in one collections update.
+    // The old rule split one task into a call per field set.
+    expect(flat).not.toContain("the same fields per call");
     // Every bullet reads as a sentence: the "anything else" case says what
     // to do, as the gateway skill does.
     expect(flat).toContain(
@@ -287,6 +305,24 @@ describe("the connections fragment", () => {
 describe("the connected-apps block", () => {
   it("renders nothing without connections", () => {
     expect(connectedAppsBlock([])).toBe("");
+  });
+
+  it("tells the agent to reach a database with psql, by its service name", () => {
+    const block = connectedAppsBlock([
+      {
+        provider: "postgres",
+        name: "PostgreSQL",
+        label: "Orders DB",
+        host: null,
+        endpoints: ["GET /sql/read"],
+        database: { engine: "postgres", connectionId: "c1" },
+      },
+    ]);
+    const line = block.split("\n").find((l) => l.startsWith("- PostgreSQL"))!;
+    expect(line).toContain('psql "service=orders-db"');
+    // Never the policy zone's synthetic HTTP paths.
+    expect(line).not.toContain("/sql/read");
+    expect(line).not.toContain("https://");
   });
 
   it("states a host-bound app's host as the only one that works", () => {
@@ -489,9 +525,33 @@ describe("connectionsTools", () => {
   it("offers list_apps with no arguments", () => {
     expect(connectionsTools.map((t) => t.name)).toEqual([
       "list_apps",
+      "request_app_connection",
       "propose_custom_connection",
     ]);
     expect(connectionsTools[0]?.inputSchema).toMatchObject({ properties: {} });
+  });
+
+  it("request_app_connection is control-plane executed and takes only the app name", () => {
+    const tool = connectionsTools.find(
+      (t) => t.name === "request_app_connection",
+    );
+    expect(tool?.execute).toBeUndefined();
+    expect(tool?.inputSchema).toMatchObject({
+      required: ["app"],
+      additionalProperties: false,
+    });
+    expect(
+      Object.keys(
+        (tool?.inputSchema as { properties: Record<string, unknown> })
+          .properties,
+      ),
+    ).toEqual(["app"]);
+  });
+
+  it("the fragment sends a missing built-in app through request_app_connection, never a token", () => {
+    const body = connectionsFragment(null).body;
+    expect(body).toContain("call request_app_connection");
+    expect(body).toMatch(/Never offer an API key, an API token or a custom/);
   });
 
   it("propose_custom_connection is control-plane executed and has NO field for the key", () => {

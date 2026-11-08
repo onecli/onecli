@@ -1,11 +1,14 @@
 "use client";
 
+import { displayConnectionLabel } from "@onecli/api/lib/connection-display";
 import { useState } from "react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { toast } from "sonner";
-import { MoreVertical, Pencil, Power, PowerOff, RefreshCw } from "lucide-react";
+import { MoreVertical, Pencil, Plug, RefreshCw } from "lucide-react";
 import { getApp } from "@onecli/api/apps/registry";
 import { Button } from "@onecli/ui/components/button";
+import { cn } from "@onecli/ui/lib/utils";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,7 +18,7 @@ import {
 } from "@onecli/ui/components/dropdown-menu";
 import type { Connection } from "@/lib/api";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
-import { WORKSPACE_PATH_RE } from "@/lib/navigation";
+import { WORKSPACE_PATH_RE, connectionsPath } from "@/lib/navigation";
 import { RenameConnectionDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/rename-connection-dialog";
 import { ReconnectWatcher } from "./reconnect-watcher";
 
@@ -23,23 +26,23 @@ export interface ConnectionRowMenuProps {
   connection: Connection;
   /** On for this agent (the switch's state). */
   active: boolean;
-  /** The switch can't change right now (org-granted, org-blocked, busy). */
-  toggleDisabled: boolean;
-  onToggle: (next: boolean) => void;
 }
 
+/** The ⋮'s footprint, flush with the row's edge. Shared with the empty slot
+ * a row with nothing to offer keeps, so every row's switch lines up. */
+const slotClassName = "-mr-1.5 size-7 shrink-0";
+
 /**
- * The row's ⋮ menu on an agent's Connections page: Turn on/off (the row's
- * switch, offered here too), plus Reconnect and Rename for the workspace's
- * own connections. An organization connection is managed on the
- * organization's Connections page, like everywhere else in a workspace, so
- * here it only turns on or off for this agent.
+ * The row's ⋮ menu on an agent's Connections page. Every row opens the app's
+ * page in the workspace's Connections, where its accounts, credentials and
+ * sharing live. The workspace's own connections also Reconnect and Rename;
+ * an organization connection is managed on the organization's Connections
+ * page, like everywhere else in a workspace. Turning a connection on or off
+ * for this agent is the row's switch.
  */
 export const ConnectionRowMenu = ({
   connection,
   active,
-  toggleDisabled,
-  onToggle,
 }: ConnectionRowMenuProps) => {
   const pathname = usePathname();
   const [renameOpen, setRenameOpen] = useState(false);
@@ -56,7 +59,14 @@ export const ConnectionRowMenu = ({
     "manageUrl" in meta &&
     !!meta.manageUrl;
   const canReconnect = manageable && active && !providerManaged && !!app;
-  const displayName = connection.label ?? app?.name ?? connection.provider;
+  const displayName =
+    displayConnectionLabel(connection.label, connection.metadata) ??
+    app?.name ??
+    connection.provider;
+  // Nothing to offer: an organization connection whose app is gone from the
+  // registry (its page would 404). The slot stays, so the switch lines up.
+  if (!manageable && !app)
+    return <span aria-hidden className={slotClassName} />;
 
   const reconnect = () => {
     if (!app) return;
@@ -79,7 +89,7 @@ export const ConnectionRowMenu = ({
           <Button
             variant="ghost"
             size="icon"
-            className="text-muted-foreground -mr-1.5 size-7 shrink-0"
+            className={cn("text-muted-foreground", slotClassName)}
             aria-label={`More actions for ${displayName}`}
           >
             <MoreVertical className="size-4" />
@@ -98,18 +108,20 @@ export const ConnectionRowMenu = ({
               Rename
             </DropdownMenuItem>
           )}
-          {manageable && <DropdownMenuSeparator />}
-          <DropdownMenuItem
-            disabled={toggleDisabled}
-            onClick={() => onToggle(!active)}
-          >
-            {active ? (
-              <PowerOff className="size-4" />
-            ) : (
-              <Power className="size-4" />
-            )}
-            {active ? "Turn off for this agent" : "Turn on for this agent"}
-          </DropdownMenuItem>
+          {manageable && app && <DropdownMenuSeparator />}
+          {app && (
+            <DropdownMenuItem asChild>
+              <Link
+                href={connectionsPath(
+                  { pathname },
+                  `/apps/${encodeURIComponent(app.id)}`,
+                )}
+              >
+                <Plug className="size-4" />
+                Open in Connections
+              </Link>
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
 

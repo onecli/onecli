@@ -101,6 +101,9 @@ impl RequestSummarizer for Gmail {
             if base.ends_with("/messages") {
                 return Some(ApprovalSummary::new("List messages"));
             }
+            if let Some(s) = read_draft_or_thread(req) {
+                return Some(s);
+            }
             if base.contains("/messages/") {
                 let mut s = ApprovalSummary::new("Read email");
                 if let Some(id) = last_segment(base) {
@@ -111,6 +114,56 @@ impl RequestSummarizer for Gmail {
         }
         None
     }
+}
+
+/// Match the documented read endpoints exactly, retaining mailbox and search scope.
+fn read_draft_or_thread(req: &SummaryRequest<'_>) -> Option<ApprovalSummary> {
+    let path = req.base_path().trim_end_matches('/');
+    let rest = path.strip_prefix("/gmail/v1/users/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (user, action, target) = match parts.as_slice() {
+        [user, "drafts"] => (*user, "List drafts", None),
+        [user, "threads"] => (*user, "List email threads", None),
+        [user, "drafts", id] if !id.is_empty() => (*user, "Read draft", Some(("Draft", *id))),
+        [user, "threads", id] if !id.is_empty() => {
+            (*user, "Read email thread", Some(("Thread", *id)))
+        }
+        _ => return None,
+    };
+    let mut s = ApprovalSummary::new(action);
+    if user != "me" {
+        s.push(
+            "Mailbox",
+            super::one_line(&super::decode_segment(user), super::MAX_VALUE_LEN),
+        );
+    }
+    if let Some((label, id)) = target {
+        s.push(
+            label,
+            super::one_line(&super::decode_segment(id), super::MAX_VALUE_LEN),
+        );
+    }
+    for (key, label) in [
+        ("q", "Search"),
+        ("maxResults", "Page size"),
+        ("includeSpamTrash", "Include spam and trash"),
+        ("format", "Format"),
+    ] {
+        if let Some(value) = req.query_param(key) {
+            s.push(label, super::one_line(&value, super::MAX_VALUE_LEN));
+        }
+    }
+    if let Some((_, query)) = req.path.split_once('?') {
+        let labels = form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == "labelIds")
+            .map(|(_, value)| super::one_line(&value, super::MAX_VALUE_LEN))
+            .take(super::MAX_FIELD_ROWS)
+            .collect::<Vec<_>>();
+        if !labels.is_empty() {
+            s.push("Labels (all required)", labels.join(", "));
+        }
+    }
+    Some(s)
 }
 
 /// Map a parsed RFC822 message onto the summary's detail fields. `has_thread_id`
@@ -453,5 +506,45 @@ Content-Type: text/plain\r\n\r\nreply body";
         let s = summarize("POST", "/gmail/v1/users/me/drafts", Some(body.as_bytes()));
         assert_eq!(s.action, "Create draft");
         assert_eq!(detail(&s, "Thread"), Some("\"Q3 report\" (reply)"));
+    }
+
+    #[test]
+    fn new_reads_preserve_mailbox_search_and_format_without_matching_subresources() {
+        let s = summarize("GET", "/gmail/v1/users/alex%40example.com/threads?q=is%3Aunread&maxResults=25&includeSpamTrash=true&labelIds=INBOX&labelIds=UNREAD", None);
+        assert_eq!(s.action, "List email threads");
+        assert_eq!(detail(&s, "Mailbox"), Some("alex@example.com"));
+        assert_eq!(detail(&s, "Search"), Some("is:unread"));
+        assert_eq!(detail(&s, "Page size"), Some("25"));
+        assert_eq!(detail(&s, "Include spam and trash"), Some("true"));
+        assert_eq!(detail(&s, "Labels (all required)"), Some("INBOX, UNREAD"));
+        let s = summarize(
+            "GET",
+            "/gmail/v1/users/me/threads?q=from%3Aalex%0AFAKE%3Ayes",
+            None,
+        );
+        assert!(!detail(&s, "Search").unwrap().contains('\n'));
+        let s = summarize("GET", "/gmail/v1/users/me/drafts/r-1?format=raw", None);
+        assert_eq!(detail(&s, "Format"), Some("raw"));
+        assert!(!s.is_generic());
+        for path in [
+            "/other/threads/18f2",
+            "/gmail/v1/users/me/threads/18f2/unknown",
+            "/gmail/v1/users/me/drafts/r-1/unknown",
+        ] {
+            assert!(summarize("GET", path, None).is_generic(), "{path}");
+        }
+    }
+
+    #[test]
+    fn draft_and_thread_reads_are_named() {
+        let s = summarize("GET", "/gmail/v1/users/me/drafts/r-1a13ea1bc", None);
+        assert_eq!(s.action, "Read draft");
+        assert_eq!(detail(&s, "Draft"), Some("r-1a13ea1bc"));
+        let s = summarize("GET", "/gmail/v1/users/me/threads/18f2", None);
+        assert_eq!(s.action, "Read email thread");
+        assert_eq!(
+            summarize("GET", "/gmail/v1/users/me/drafts", None).action,
+            "List drafts"
+        );
     }
 }

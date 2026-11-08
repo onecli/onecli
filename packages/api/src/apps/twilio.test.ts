@@ -281,8 +281,9 @@ describe("twilio permission catalog", () => {
 
   // Twilio answers the Account resource with the Auth Token (the
   // subaccounts' too, on the list). Matching no tool keeps those requests on
-  // the grant's "everything else" row, which every default grant holds for
-  // approval, so a read-only grant never hands an agent the master credential.
+  // the grant's catch-all rows, which Twilio's default grant holds for
+  // approval (it does not opt into allowing other reads), so a read-only
+  // grant never hands an agent the master credential.
   it("keeps the credential-returning Account resource out of every tool", () => {
     const accountPaths = [`${A}.json`, "/2010-04-01/Accounts.json"];
     for (const host of [

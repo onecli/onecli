@@ -49,6 +49,8 @@ const CONN_WORK = `${P}conn-work`;
 const CONN_PERSONAL = `${P}conn-personal`;
 const CONN_ORG = `${P}conn-orgshared`;
 const CONN_FOREIGN = `${P}conn-foreign`;
+/** A connection on a HELD catalog (no `unlistedReads` opt-in). */
+const CONN_HELD = `${P}conn-cloudflare`;
 const SECRET = `${P}secret`;
 
 const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
@@ -150,6 +152,7 @@ beforeAll(async () => {
     organizationId: ORG,
   });
   await conn(CONN_FOREIGN, { workspaceId: OTHER_WORKSPACE });
+  await conn(CONN_HELD, { provider: "cloudflare" });
   await db.secret.create({
     data: {
       id: SECRET,
@@ -205,10 +208,11 @@ const decide = async (opts: {
   path: string;
   method: string;
   winner?: string;
+  host?: string;
 }) => {
   const rules = await engineRules();
   return evaluator.evaluateNew(rules, {
-    host: GMAIL_HOST,
+    host: opts.host ?? GMAIL_HOST,
     path: opts.path,
     method: opts.method,
     agentId: AGENT,
@@ -226,7 +230,7 @@ const grantRows = (extra: Record<string, unknown> = {}) =>
   });
 
 describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
-  it("default attach: reads allowed, writes and unlisted requests need approval", async () => {
+  it("default attach: reads (listed and unlisted) allowed, writes and unlisted writes need approval", async () => {
     await grants.setConnectionGrant(
       SCOPE,
       AGENT,
@@ -248,12 +252,51 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
         winner: CONN_WORK,
       }),
     ).toMatchObject({ action: "allow", requireApproval: true });
+    // An unlisted read rides on "Other reads", allowed by default.
+    const unlistedRead = await decide({
+      path: "/gmail/v1/users/me/history",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(unlistedRead.action).toBe("allow");
+    expect(unlistedRead.requireApproval).toBeFalsy();
+    // An unlisted write rides on "Other writes", still held for approval.
     expect(
       await decide({
         path: "/gmail/v1/users/me/history",
-        method: "GET",
+        method: "POST",
         winner: CONN_WORK,
       }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
+  it("default attach on a held catalog: unlisted reads need approval, listed reads stay allowed", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_HELD,
+      { access: "default" },
+      null,
+    );
+    expect(
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_HELD,
+      ),
+    ).toMatchObject({ otherReads: "ask", otherWrites: "ask" });
+    const cloudflare = (path: string) =>
+      decide({
+        host: "api.cloudflare.com",
+        path,
+        method: "GET",
+        winner: CONN_HELD,
+      });
+    // A read tool the catalog lists is allowed outright.
+    const listed = await cloudflare("/client/v4/zones");
+    expect(listed.action).toBe("allow");
+    expect(listed.requireApproval).toBeFalsy();
+    // The tunnel token GET is outside the tool list: held for a human.
+    expect(
+      await cloudflare("/client/v4/accounts/a1/cfd_tunnel/t1/token"),
     ).toMatchObject({ action: "allow", requireApproval: true });
   });
 

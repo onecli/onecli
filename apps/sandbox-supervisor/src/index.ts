@@ -15,17 +15,11 @@ import {
 import { createStdioTransport } from "./transport/stdio";
 import { createWsTransport } from "./transport/ws";
 import {
+  registerSignalCleanup,
   runSignalCleanup,
   runSupervisor,
-  registerSignalCleanup,
 } from "./supervisor";
-import {
-  alignChromePolicyProxy,
-  desktopAvailable,
-  publishDisplay,
-  startDesktop,
-} from "./desktop";
-import type { SupervisorAddon } from "./addons";
+import { alignChromePolicyProxy, bootDesktop } from "./desktop";
 
 /**
  * Entrypoint of the in-sandbox supervisor. The ONLY place an adapter id maps
@@ -79,6 +73,12 @@ const selectHarness = (config: SupervisorConfig): Harness => {
 
 const main = async (): Promise<void> => {
   const config = loadConfig();
+  // The runner channel's bootstrap token is single-use and lives in `config`
+  // from here on. Every process this one starts (the harness, the agent's
+  // shells, background processes, a schedule's check) inherits this
+  // environment, and none of them may hold the platform's channel
+  // credential, spent or not.
+  delete process.env.SANDBOX_WS_TOKEN;
   const harness = selectHarness(config);
 
   log("info", "supervisor starting", {
@@ -126,11 +126,17 @@ const main = async (): Promise<void> => {
 
   // The desktop (desktop.ts): a screen with a window manager, for a browser
   // that runs the way it does on a person's computer. Only where the image
-  // has one (probed, never assumed); started BEFORE the harness for the
-  // same reason as the open proxy, so `DISPLAY` is in the environment every
-  // child inherits. Best-effort: a sandbox whose desktop fails to come up
-  // runs without one, as an image without the pieces does. Taken down on
-  // both exits: the signal path (below) and the clean one (after the loop).
+  // has one (probed, never assumed). Best-effort: a sandbox whose desktop
+  // fails to come up runs without one, as an image without the pieces does.
+  // Taken down on both exits: the signal path and the clean one (after the
+  // loop).
+  //
+  // NOT awaited here: it takes seconds, and the runner channel, the ready
+  // signal and the first turn do not need it. The supervisor gets the start
+  // as `pending`; the harness launches at once and its sessions receive the
+  // display through their session environment when the start settles, so
+  // only what must INHERIT `DISPLAY` from this process waits on it (a
+  // scheduled gate's shell, preview relaunches).
   //
   // The hosted platform layers its agent desktop on top (licensed code,
   // loaded only when the hosted runner says so and it can carry the screen).
@@ -139,32 +145,17 @@ const main = async (): Promise<void> => {
       ? (await import("./ee/desktop")).createHostedDesktop(config.homeDir)
       : undefined;
   if (hosted) log("info", "hosted desktop on");
-  let closeDesktop = () => {};
-  let desktopStarted = false;
-  if (desktopAvailable(process.env)) {
-    try {
-      const desktop = await startDesktop(process.env, hosted?.layer);
-      process.env.DISPLAY = desktop.display;
-      if (desktop.dbusAddress) {
-        process.env.DBUS_SESSION_BUS_ADDRESS = desktop.dbusAddress;
-      }
-      publishDisplay(desktop.display);
-      closeDesktop = () => desktop.close();
-      registerSignalCleanup(closeDesktop);
-      desktopStarted = true;
-      log("info", "desktop ready", { display: desktop.display });
-    } catch (error) {
-      log("warn", "desktop did not start", { error: String(error) });
-    }
-  } else {
-    log("info", "desktop not started: this image has no window manager");
-  }
-  const addon: SupervisorAddon | undefined = hosted?.addon(desktopStarted);
+  const desktop = bootDesktop(hosted?.layer, registerSignalCleanup);
+  const pending = desktop.started.then((desktopStarted) => ({
+    addon: hosted?.addon(desktopStarted),
+  }));
 
   try {
-    await runSupervisor(config, harness, selectTransport(config), { addon });
+    await runSupervisor(config, harness, selectTransport(config), {
+      pending,
+    });
   } finally {
-    closeDesktop();
+    desktop.close();
   }
   log("info", "supervisor exited cleanly");
   // END THE PROCESS, explicitly. This process is the sandbox's whole

@@ -15,6 +15,8 @@ import { createHash } from "node:crypto";
 import {
   ATTACHMENT_CHUNK_RAW_BYTES,
   MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_SESSION_REF_CHARS,
+  runnerEventSchema,
   type RunnerAttachmentUploadResponse,
 } from "@onecli/agent-protocol";
 
@@ -34,6 +36,8 @@ interface DriveOptions {
   ) => Promise<RunnerMemoryWriteResponse>;
   /** Step 10: the runner's container map (undefined ⇒ "no record"). */
   containerRefOf?: (sandboxId: string) => string | undefined;
+  /** The runner's node map, from the backend's snapshot. */
+  nodeOf?: (sandboxId: string) => string | undefined;
   uploadAttachment?: (
     sandboxId: string,
     file: OutboundFile,
@@ -62,6 +66,7 @@ const drive = (messages: SupervisorMessage[], options: DriveOptions = {}) => {
       return true;
     },
     containerRefOf: options.containerRefOf ?? (() => "cont-default"),
+    ...(options.nodeOf && { nodeOf: options.nodeOf }),
     ...(options.now && { now: options.now }),
   });
   for (const message of messages) handle("sb-1", message);
@@ -102,6 +107,60 @@ describe("supervisor message handler", () => {
     expect(reported).toEqual([]);
   });
 
+  it("forwards a read-only home as the stop's reasonCode, with the runner's own node", () => {
+    // The one stop the control plane budgets: it needs the code to pick the
+    // storage copy and count the restart, and the node to tell one bad
+    // machine from a fleet-wide problem. The node is the runner's (from the
+    // substrate's snapshot), never anything the supervisor said.
+    const { reported } = drive(
+      [
+        {
+          kind: "unhealthy",
+          reason: "the agent's home is mounted read-only",
+          code: "home_read_only",
+        },
+      ],
+      { nodeOf: () => "node-1.example.test" },
+    );
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        error: "the agent's home is mounted read-only",
+        observedContainerRef: "cont-default",
+        reasonCode: "home_read_only",
+        node: "node-1.example.test",
+      },
+    ]);
+  });
+
+  it("forwards no code and no node for any other unhealthy report", () => {
+    // An unknown code from a newer (or hostile) supervisor must not reach
+    // the control plane's reason slot: only the read-only code is budgeted.
+    const { reported } = drive(
+      [{ kind: "unhealthy", reason: "gone", code: "something_else" }],
+      { nodeOf: () => "node-1.example.test" },
+    );
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        error: "gone",
+        observedContainerRef: "cont-default",
+      },
+    ]);
+  });
+
+  it("sends a read-only stop without a node when the runner has not seen one", () => {
+    const { reported } = drive([
+      { kind: "unhealthy", reason: "ro", code: "home_read_only" },
+    ]);
+    expect(reported[0]).toMatchObject({ reasonCode: "home_read_only" });
+    expect(reported[0]).not.toHaveProperty("node");
+  });
+
   it("relays a progress heartbeat as its own report, never through the collector", () => {
     // Its own single-event post on purpose: an old control plane rejecting
     // the unknown kind must lose one heartbeat, not a transcript batch. And
@@ -119,6 +178,56 @@ describe("supervisor message handler", () => {
       },
     ]);
     expect(added).toEqual([]);
+  });
+
+  it("forwards the heartbeat's session ref verbatim: the control plane's resume handle for a turn whose sandbox may die before it reports", () => {
+    const { reported } = drive([
+      {
+        kind: "progress",
+        turnId: "t1",
+        conversationId: "cv1",
+        sessionRef: "session-abc",
+      },
+    ]);
+
+    expect(reported).toEqual([
+      {
+        kind: "turn.progress",
+        sandboxId: "sb-1",
+        conversationId: "cv1",
+        turnId: "t1",
+        sessionRef: "session-abc",
+      },
+    ]);
+  });
+
+  it("drops a session ref the runner wire would refuse, never the heartbeat or terminal report it rides on", () => {
+    // An oversized ref would fail the control plane's parse of the whole
+    // event. Dropped, not truncated: a cut ref names no real session.
+    const huge = "s".repeat(MAX_SESSION_REF_CHARS + 1);
+    const { reported } = drive([
+      {
+        kind: "progress",
+        turnId: "t1",
+        conversationId: "cv1",
+        sessionRef: huge,
+      },
+      {
+        kind: "turn.result",
+        turnId: "t1",
+        conversationId: "cv1",
+        status: "done",
+        sessionRef: huge,
+      },
+    ]);
+    expect(reported.map((event) => event.kind)).toEqual([
+      "turn.progress",
+      "turn.finished",
+    ]);
+    for (const event of reported) {
+      expect(runnerEventSchema.safeParse(event).success).toBe(true);
+      expect(event).not.toHaveProperty("sessionRef");
+    }
   });
 
   it("flushes the turn's buffered events ahead of its heartbeat", () => {
@@ -624,6 +733,25 @@ describe("the file.part arm (send_file)", () => {
     });
     await settle();
     expect("caption" in uploaded[1]!).toBe(false);
+  });
+
+  it("carries a staged run's purpose through, and omits it for a reply's file", async () => {
+    // A runner that dropped it would attach a send_message file to the
+    // reply instead (the reason `stagedAttachments` is advertised).
+    const bytes = Buffer.from("x");
+    const uploaded: OutboundFile[] = [];
+    const capture = {
+      uploadAttachment: async (_sb: string, file: OutboundFile) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    };
+    drive(partsFor("up-s", bytes, { purpose: "send" }), capture);
+    await settle();
+    expect(uploaded[0]?.purpose).toBe("send");
+    drive(partsFor("up-r", bytes), capture);
+    await settle();
+    expect("purpose" in uploaded[1]!).toBe(false);
   });
 
   it("CHECKSUM: a run whose bytes do not hash to the declared sha is refused and never relayed", async () => {

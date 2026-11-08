@@ -4,6 +4,7 @@ import { KeyRound, Pencil } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
+import { cn } from "@onecli/ui/lib/utils";
 import type { Secret } from "@/lib/api";
 import type { CredentialAccessStatus } from "@/lib/api/policy-visibility";
 import {
@@ -13,6 +14,7 @@ import {
 } from "@/hooks/use-grants";
 import { EffectivePill } from "./effective-pill";
 import { KeyHealthBadge } from "./key-health-badge";
+import { chooserTileClassName } from "./chooser-layout";
 
 interface SecretGrantRowProps {
   agentId: string;
@@ -27,6 +29,9 @@ interface SecretGrantRowProps {
   onEdit?: (secret: Secret) => void;
   /** Called before a toggle writes, so the list can keep this row in place. */
   onBeforeToggle?: () => void;
+  /** The new agent's chooser: a bordered tile. Given no `onEdit` either,
+   * its switch is its only control. */
+  compact?: boolean;
 }
 
 export const SecretGrantRow = ({
@@ -37,6 +42,7 @@ export const SecretGrantRow = ({
   credentialStatus,
   onEdit,
   onBeforeToggle,
+  compact = false,
 }: SecretGrantRowProps) => {
   const attach = useAttachSecret();
   const detach = useDetachSecret();
@@ -45,7 +51,12 @@ export const SecretGrantRow = ({
   const settling = useGrantSettling(agentId, "secret", secret.id);
 
   return (
-    <div className="flex items-center justify-between gap-4 py-3">
+    <div
+      className={cn(
+        "flex items-center justify-between",
+        compact ? chooserTileClassName : "gap-4 py-3",
+      )}
+    >
       <div className="flex min-w-0 items-center gap-3">
         <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
           <KeyRound className="text-muted-foreground size-4" aria-hidden />
@@ -58,7 +69,7 @@ export const SecretGrantRow = ({
             </Badge>
             {secret.scope === "organization" && (
               <Badge variant="outline" className="text-[10px] font-normal">
-                Organization
+                {compact ? "Org" : "Organization"}
               </Badge>
             )}
           </div>

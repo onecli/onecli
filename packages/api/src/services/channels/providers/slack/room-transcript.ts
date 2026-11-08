@@ -17,6 +17,15 @@ import { parseSlackPresenceCredentials } from "./types";
 const NAME_TTL_MS = 60 * 60 * 1000;
 const NAME_CACHE_MAX = 5_000;
 const NAME_PROBE_MS = 700;
+/** Ids named per transcript. 41 lines clamped to `LINE_MAX` can show far
+ * fewer tags than this; the bound keeps a room packed with mentions from
+ * becoming an unbounded `IN` list. */
+const MAX_NAMED_IDS = 1_000;
+/** `users.info` probes per transcript: one per message of a full page.
+ * Ids past it render as "user U…" (a comprehension gap, never a flood of
+ * Slack calls from a message packed with mentions). The caller's own ids
+ * come first, so the speaker being judged is always named. */
+export const MAX_NAME_PROBES = 40;
 const nameCache = new Map<string, { name: string; at: number }>();
 
 /** A rendered line's longest text: a verdict needs the gist. */
@@ -48,15 +57,17 @@ const resolveNames = async (
     if (link.user.name) names.set(link.externalUserId, link.user.name);
   }
   const now = Date.now();
-  const missing = ids.filter((id) => {
-    if (names.has(id)) return false;
-    const hit = nameCache.get(`${integrationId}:${id}`);
-    if (hit && now - hit.at < NAME_TTL_MS) {
-      names.set(id, hit.name);
-      return false;
-    }
-    return true;
-  });
+  const missing = ids
+    .filter((id) => {
+      if (names.has(id)) return false;
+      const hit = nameCache.get(`${integrationId}:${id}`);
+      if (hit && now - hit.at < NAME_TTL_MS) {
+        names.set(id, hit.name);
+        return false;
+      }
+      return true;
+    })
+    .slice(0, MAX_NAME_PROBES);
   await Promise.all(
     missing.map(async (id) => {
       let timer: NodeJS.Timeout | undefined;
@@ -143,7 +154,7 @@ export const readRoomTranscript = async (input: {
         ),
       ].filter((id) => id !== "" && id !== self),
     ),
-  ];
+  ].slice(0, MAX_NAMED_IDS);
   const names = await resolveNames(presence.integrationId, botToken, ids);
   const nameOf = (id: string) =>
     id === self

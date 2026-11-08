@@ -2,17 +2,6 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@onecli/ui/components/button";
-import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@onecli/ui/components/dialog";
-import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import {
   Select,
@@ -21,21 +10,50 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@onecli/ui/components/select";
-import { useDeleteEvalSchedule, useSaveEvalSchedule } from "@/hooks/use-evals";
-import type { EvalSchedule } from "@/lib/api";
 import {
-  composeSchedule,
-  draftFromSchedule,
-  type ScheduleDraft,
-  type SchedulePreset,
-} from "@/lib/agents/eval-schedule";
+  EVAL_REPORT_WHEN,
+  type EvalReportBody,
+  type EvalReportWhen,
+} from "@onecli/api/validations/evals";
+import {
+  useDeleteEvalSchedule,
+  useEvalReportChannels,
+  useSaveEvalSchedule,
+} from "@/hooks/use-evals";
+import type { EvalSchedule } from "@/lib/api";
 import { browserTimezone } from "@/lib/agents/schedule-timezone";
+import {
+  ScheduleWhenField,
+  useScheduleWhen,
+  whenFrom,
+  type ScheduleWhen,
+} from "../../schedules/_components/schedule-when-field";
+import { ScheduleDialogFrame } from "../../schedules/_components/schedule-dialog-frame";
+import { ScheduleAdvanced } from "../../schedules/_components/schedule-advanced";
+import { ScheduleTimezoneField } from "../../schedules/_components/schedule-timezone-field";
+
+/** The "Send results to" value: off, the person's own chat, or a channel
+ * (`channel:<ref>`). */
+type ReportTarget = "none" | "chat" | `channel:${string}`;
+
+const targetOf = (current: EvalSchedule | null): ReportTarget => {
+  const report = current?.report;
+  if (!report) return "none";
+  return report.to === "chat" ? "chat" : `channel:${report.channelRef}`;
+};
+
+const WHEN_LABEL: Record<EvalReportWhen, string> = {
+  always: "Every run",
+  changes: "When results change",
+  failures: "When a test fails",
+};
 
 /**
- * Set, change or remove the agent's eval schedule. Presets compose a cron
- * expression (daily, weekdays, weekly) and "Custom" takes one directly; the
- * server (croner) is the validator and its message surfaces on refusal.
- * The dialog is keyed per open by its parent, so state starts fresh.
+ * Set, change or remove the agent's eval schedule: the same dialog as a
+ * task schedule (`ScheduleDialogFrame`, the shared When and timezone),
+ * plus where its results are sent. The server (croner) is the validator
+ * and its message surfaces on refusal; runs are at most hourly. Keyed per
+ * open by its parent, so state starts fresh.
  */
 export const ScheduleDialog = ({
   agentId,
@@ -50,25 +68,46 @@ export const ScheduleDialog = ({
 }) => {
   const save = useSaveEvalSchedule(agentId);
   const remove = useDeleteEvalSchedule(agentId);
-  const [draft, setDraft] = useState<ScheduleDraft>(() =>
-    draftFromSchedule(current, browserTimezone()),
+  const [when, setWhen] = useState<ScheduleWhen>(() =>
+    whenFrom(current?.schedule ?? null),
   );
-  const update = (patch: Partial<ScheduleDraft>) =>
-    setDraft((d) => ({ ...d, ...patch }));
+  const [timezone, setTimezone] = useState(
+    () => current?.timezone ?? browserTimezone(),
+  );
+  const read = useScheduleWhen(agentId, when, timezone);
+  const [target, setTarget] = useState<ReportTarget>(() => targetOf(current));
+  const [sendWhen, setSendWhen] = useState<EvalReportWhen>(
+    current?.report?.when ?? "always",
+  );
+  const channels = useEvalReportChannels(agentId, open);
+  // The saved channel stays pickable even if the list cannot load now.
+  const savedChannel =
+    current?.report?.to === "channel"
+      ? { ref: current.report.channelRef, name: current.report.channelLabel }
+      : null;
+  const channelOptions = [
+    ...(savedChannel && !channels.data?.some((c) => c.ref === savedChannel.ref)
+      ? [savedChannel]
+      : []),
+    ...(channels.data ?? []),
+  ];
   const busy = save.isPending || remove.isPending;
 
   const submit = () => {
-    const schedule = composeSchedule(draft);
-    if (!schedule) {
-      toast.error(
-        draft.preset === "custom"
-          ? "Enter a cron expression"
-          : "Enter a time like 09:00",
-      );
-      return;
-    }
+    const schedule = read.expression;
+    if (!schedule) return; // Save is disabled until the When is understood.
+    const report: EvalReportBody | null =
+      target === "none"
+        ? null
+        : target === "chat"
+          ? { to: "chat", when: sendWhen }
+          : {
+              to: "channel",
+              channelRef: target.slice("channel:".length),
+              when: sendWhen,
+            };
     save.mutate(
-      { schedule, timezone: draft.timezone.trim(), enabled: true },
+      { schedule, timezone: timezone.trim(), enabled: true, report },
       {
         onSuccess: () => {
           toast.success(current ? "Schedule updated" : "Tests scheduled");
@@ -80,115 +119,98 @@ export const ScheduleDialog = ({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Schedule tests</DialogTitle>
-          <DialogDescription>
-            Run every test question automatically. Each run lands in Results,
-            compared with the run before it, so a change shows up as
-            &ldquo;Broke since last run&rdquo;.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogBody>
-          <fieldset disabled={busy} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="eval-schedule-preset">Runs</Label>
-                <Select
-                  value={draft.preset}
-                  onValueChange={(value: SchedulePreset) =>
-                    update({ preset: value })
-                  }
-                >
-                  <SelectTrigger id="eval-schedule-preset" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="daily">Every day</SelectItem>
-                    <SelectItem value="weekdays">Weekdays</SelectItem>
-                    <SelectItem value="weekly">Every Monday</SelectItem>
-                    <SelectItem value="custom">Custom (cron)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                {draft.preset === "custom" ? (
-                  <>
-                    <Label htmlFor="eval-schedule-cron">Expression</Label>
-                    <Input
-                      id="eval-schedule-cron"
-                      value={draft.custom}
-                      onChange={(e) => update({ custom: e.target.value })}
-                      placeholder="0 9 * * 1-5"
-                      className="font-mono"
-                    />
-                  </>
-                ) : (
-                  <>
-                    <Label htmlFor="eval-schedule-time">At</Label>
-                    <Input
-                      id="eval-schedule-time"
-                      value={draft.time}
-                      onChange={(e) => update({ time: e.target.value })}
-                      placeholder="09:00"
-                    />
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="eval-schedule-tz">Timezone</Label>
-              <Input
-                id="eval-schedule-tz"
-                value={draft.timezone}
-                onChange={(e) => update({ timezone: e.target.value })}
-                placeholder="Asia/Jerusalem"
-              />
-            </div>
-            <p className="text-muted-foreground text-xs">
-              Runs as you, with the agent&apos;s own model key, at most once an
-              hour. A run is skipped when one is already going or there are no
-              test questions yet.
-            </p>
-          </fieldset>
-        </DialogBody>
-        <DialogFooter className="gap-2 sm:justify-between">
-          {current ? (
-            <Button
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              disabled={busy}
-              loading={remove.isPending}
-              onClick={() =>
-                remove.mutate(undefined, {
-                  onSuccess: () => {
-                    toast.success("Schedule removed");
-                    onOpenChange(false);
-                  },
-                  onError: (error) => toast.error(error.message),
-                })
-              }
+    <ScheduleDialogFrame
+      open={open}
+      onOpenChange={onOpenChange}
+      title={current ? "Edit test schedule" : "Schedule tests"}
+      description="Runs all test questions on a schedule, at most once an hour. Each run is compared with the last one."
+      busy={busy}
+      saving={save.isPending}
+      canSave={read.expression !== null}
+      saveLabel={current ? "Save" : "Schedule"}
+      onSave={submit}
+      {...(current && {
+        deleteLabel: "Remove schedule",
+        deleting: remove.isPending,
+        onDelete: () =>
+          remove.mutate(undefined, {
+            onSuccess: () => {
+              toast.success("Schedule removed");
+              onOpenChange(false);
+            },
+            onError: (error) => toast.error(error.message),
+          }),
+      })}
+    >
+      <ScheduleWhenField
+        id="eval-schedule-when"
+        when={when}
+        onChange={setWhen}
+        hint={read.hint}
+        hintIsError={read.hintIsError}
+        expression={read.expression}
+      />
+      <ScheduleAdvanced summary={timezone.replace(/_/g, " ")}>
+        <ScheduleTimezoneField
+          id="eval-schedule-tz"
+          value={timezone}
+          onChange={setTimezone}
+        />
+      </ScheduleAdvanced>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="eval-schedule-report">Send results to</Label>
+        <div className="flex gap-2">
+          <Select
+            value={target}
+            onValueChange={(value: ReportTarget) => setTarget(value)}
+          >
+            <SelectTrigger id="eval-schedule-report" className="min-w-0 flex-1">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Nowhere</SelectItem>
+              <SelectItem value="chat">My chat with the agent</SelectItem>
+              {channelOptions.map((channel) => (
+                <SelectItem key={channel.ref} value={`channel:${channel.ref}`}>
+                  {channel.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {target !== "none" && (
+            <Select
+              value={sendWhen}
+              onValueChange={(value: EvalReportWhen) => setSendWhen(value)}
             >
-              {remove.isPending ? "Removing…" : "Remove schedule"}
-            </Button>
-          ) : (
-            <span />
+              <SelectTrigger aria-label="How often" className="w-44 shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {EVAL_REPORT_WHEN.map((value) => (
+                  <SelectItem key={value} value={value}>
+                    {WHEN_LABEL[value]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button loading={save.isPending} disabled={busy} onClick={submit}>
-              {save.isPending ? "Saving…" : "Save schedule"}
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+        {/* The bot joins a channel from Slack's side only, so this can't add
+            one; it says how, and re-reads the list once it's done. */}
+        <p className="text-muted-foreground text-xs">
+          Channel not listed? Invite the agent to it in Slack, then{" "}
+          <button
+            type="button"
+            className="text-foreground focus-visible:ring-ring/50 rounded-sm underline underline-offset-4 outline-none focus-visible:ring-2 disabled:opacity-50"
+            disabled={channels.isFetching}
+            onClick={() => void channels.refetch()}
+          >
+            {channels.isFetching ? "checking…" : "refresh"}
+          </button>
+          .
+        </p>
+      </div>
+    </ScheduleDialogFrame>
   );
 };

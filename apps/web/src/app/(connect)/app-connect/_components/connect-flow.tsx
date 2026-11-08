@@ -3,7 +3,13 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import type { ConnectNote, OAuthAccessLevels } from "@onecli/api/apps/types";
+import type {
+  AppDefinition,
+  ConnectFileImport,
+  ConnectFormField,
+  ConnectNote,
+  OAuthAccessLevels,
+} from "@onecli/api/apps/types";
 import { Button } from "@onecli/ui/components/button";
 import { IS_CLOUD } from "@/lib/env";
 import { API_ORIGIN, getAuthToken, getWorkspaceId } from "@/lib/api-fetch";
@@ -12,8 +18,10 @@ import { AccessLevelSelect } from "./access-level-select";
 import { ConnectLayout } from "./connect-layout";
 import { ConnectSuccess } from "./connect-success";
 import { CredentialsFlow } from "./credentials-flow";
+import { DatabaseCredentialsFlow } from "./database-credentials-flow";
 import { OrDivider } from "./or-divider";
 import type { MissingPermission } from "@onecli/api/apps/missing-permissions";
+import type { ReconnectPrefill } from "@/lib/actions/reconnect-prefill";
 
 type FlowState = "ready" | "redirecting" | "success" | "error";
 
@@ -24,46 +32,21 @@ interface ConnectFlowProps {
     icon: string;
     darkIcon?: string;
     connectionType: string;
+    database?: AppDefinition["database"];
     labelHint?: string;
     connectNote?: ConnectNote;
     setupGuideUrl?: string;
-    fields?: {
-      name: string;
-      label: string;
-      description?: string;
-      placeholder: string;
-      secret?: boolean;
-      optional?: boolean;
-      group?: string;
-      helpUrl?: string;
-      helpLabel?: string;
-      options?: { value: string; label: string }[];
-      defaultValue?: string;
-    }[];
-    fileImport?: {
-      label: string;
-      accept: string;
-      keyMap: Record<string, string>;
-    };
-    apiKeyFields?: {
-      name: string;
-      label: string;
-      description?: string;
-      placeholder: string;
-      secret?: boolean;
-      optional?: boolean;
-      group?: string;
-      helpUrl?: string;
-      helpLabel?: string;
-      options?: { value: string; label: string }[];
-      defaultValue?: string;
-    }[];
+    fields?: ConnectFormField[];
+    fileImport?: ConnectFileImport;
+    apiKeyFields?: ConnectFormField[];
     accessLevels?: OAuthAccessLevels;
   };
   hasDefaults: boolean;
   status?: "success" | "error";
   errorMessage?: string;
   connectionId?: string;
+  /** A reconnect's previous non-secret values, to start the form from. */
+  prefill?: ReconnectPrefill;
   /** The freshly-CREATED connection (the OAuth callback's `connected` param) —
    * handed to the parent window on success so it can offer agent access.
    * Distinct from `connectionId`, which means "re-authenticate this existing
@@ -88,6 +71,7 @@ export const ConnectFlow = ({
   status,
   errorMessage,
   connectionId,
+  prefill,
   connectedId,
   agentName,
   agentId,
@@ -103,6 +87,9 @@ export const ConnectFlow = ({
   const [countdown, setCountdown] = useState(3);
   const redirectedRef = useRef(false);
   const [mode, setMode] = useState<"oauth" | "apikey">("oauth");
+  const CredentialForm = app.database
+    ? DatabaseCredentialsFlow
+    : CredentialsFlow;
   // The credentials flow reports the connection it created client-side (the
   // OAuth path delivers the same via the `connected` redirect param).
   const [createdConnectionId, setCreatedConnectionId] = useState<
@@ -201,7 +188,7 @@ export const ConnectFlow = ({
   // chose "Use an API key instead".
   if (mode === "apikey" && app.apiKeyFields?.length && state !== "error") {
     return (
-      <CredentialsFlow
+      <CredentialForm
         app={{ ...app, connectionType: "api_key" }}
         fields={app.apiKeyFields}
         method="api_key"
@@ -231,11 +218,12 @@ export const ConnectFlow = ({
     state !== "error"
   ) {
     return (
-      <CredentialsFlow
+      <CredentialForm
         app={app}
         fields={app.fields}
         fileImport={app.fileImport}
         connectionId={connectionId}
+        prefill={prefill}
         preContent={preContent}
         workspaceId={explicitWorkspaceId}
         orgId={orgId}

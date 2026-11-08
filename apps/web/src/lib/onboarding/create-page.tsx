@@ -4,11 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
-  Box,
   Check,
-  KeyRound,
   Loader2,
+  ShieldCheck,
   Sparkles,
+  UserRound,
 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
@@ -19,45 +19,78 @@ import {
   validateDisplayName,
   DISPLAY_NAME_MAX_LEN,
 } from "@onecli/api/validations/display-name";
-import { useCreateHostedAgent } from "@/hooks/use-agents";
+import {
+  useAgentSandboxStatus,
+  useCreateHostedAgent,
+  useRenameOnboardingAgent,
+} from "@/hooks/use-agents";
+import type { SandboxStatus } from "@/lib/api/types";
 import { hostedCreateRefusalCopy } from "@/lib/agents/availability";
-import { nameToIdentifier } from "@/lib/agents/agent-identifier";
 import { agentChatPath } from "@/lib/navigation";
 import { useOnboarding } from "./onboarding-context";
-import { WelcomeVisual } from "./_components/welcome-visual";
+import { DEFAULT_AGENT_NAME, nameStepPassed } from "./steps";
+import { useScreenExit } from "./use-screen-exit";
+import { AppsMarquee } from "./_components/apps-marquee";
 
-/** The field opens filled, so nobody faces an empty required box. */
-const DEFAULT_AGENT_NAME = "Donna";
-
-/** The boot narrative IS the product pitch: while the sandbox provisions,
- * each line lands as a claim being kept, not marketing copy. Timings are
- * presentational — creation has already succeeded when this plays, and the
- * agent page queues turns sent before the sandbox is up. */
-const BOOT_LINES = [
-  { text: "Creating your agent", icon: Sparkles },
-  { text: "Provisioning an isolated sandbox", icon: Box },
+/**
+ * The boot narrative, in plain words for people who are not engineers.
+ * Each line is DONE once the machine has passed its status: the agent
+ * exists (`unprovisioned`), its machine is being carved and started
+ * (`starting`), it is up (`running`). `{name}` is the agent's name.
+ */
+const BOOT_LINES: readonly {
+  text: string;
+  icon: typeof Sparkles;
+  doneAt: SandboxStatus;
+}[] = [
+  { text: "Setting up {name}", icon: Sparkles, doneAt: "starting" },
   {
-    text: "Zero credentials inside: keys stay in the gateway",
-    icon: KeyRound,
+    text: "Giving {name} a safe space of its own",
+    icon: UserRound,
+    doneAt: "running",
   },
+  // Done with the box: there is no later status to wait for, and the line
+  // is the one claim a running machine makes true.
+  { text: "Keeping your passwords safe", icon: ShieldCheck, doneAt: "running" },
 ] as const;
 
-const BOOT_LINE_MS = 900;
+/** The lifecycle, in the order the boot walks it. A status at or past a
+ * line's `doneAt` means that line is done. Terminal and held states sit
+ * where the person should see progress stop rather than a lie. */
+const BOOT_ORDER: readonly SandboxStatus[] = [
+  "unprovisioned",
+  "starting",
+  "running",
+];
 
-/** House entrance for each phase — keyed on the phase so a swap remounts and
- * replays it, instead of the content snapping in place. */
+/**
+ * How long the door waits for the machine before opening anyway. A slow
+ * boot (a node being brought up) must never hold the person hostage: the
+ * chat page shows the greeting as queued and the agent answers when it is
+ * up, exactly as it did before the door learned to wait.
+ */
+export const BOOT_WAIT_MAX_MS = 20_000;
+
+/** Each phase's entrance, keyed on the phase so a swap remounts and replays
+ * it: a soft fade and a short rise, slow enough to read as a transition
+ * rather than a cut (matches FlowChrome). */
 const PHASE_ENTRANCE =
-  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2";
+  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-3 fill-mode-both duration-500 ease-out";
 
-/** The mission and the act of creating the first agent are ONE screen: the
+const bootIndexOf = (status: SandboxStatus | null | undefined): number =>
+  status ? BOOT_ORDER.indexOf(status) : -1;
+
+/** The mission and the act of naming the first agent are ONE screen: the
  * picture makes the claim, the name field cashes it in. Three phases —
  * mission (the pitch + one button), form (name it), booting (watch the
  * claims come true, then walk through the "meet your agent" door — the last
- * click of onboarding). Creation goes through the same POST /v1/agents as the
- * dashboard (same validation, quota and creation-world gates), targeting the
- * boot-resolved default workspace the onboarding URL doesn't carry. A resume
- * with a created agent lands straight on the finished boot screen, where the
- * door is already open. */
+ * click of onboarding). The agent itself was created when the flow opened
+ * (`ensureAgent`, the welcome step), so its machine has been booting the
+ * whole time; the form RENAMES it. Without one (that create was refused),
+ * the form creates on submit as it always did. The boot screen's lines
+ * follow the machine's real status, and the door opens once it is running
+ * (bounded: `BOOT_WAIT_MAX_MS`). A resume with a created agent lands
+ * straight on the boot screen. */
 export default function CreatePage() {
   const router = useRouter();
   const {
@@ -67,19 +100,26 @@ export default function CreatePage() {
     createdAgentName,
     completing,
     handleComplete,
+    progress,
   } = useOnboarding();
   const createAgent = useCreateHostedAgent();
+  const renameAgent = useRenameOnboardingAgent();
 
-  const [name, setName] = useState(DEFAULT_AGENT_NAME);
+  const [name, setName] = useState(createdAgentName ?? DEFAULT_AGENT_NAME);
   const [nameTouched, setNameTouched] = useState(false);
-  // Resume with a created agent skips the pitch and the form — the agent
-  // exists, so the only remaining act is meeting it.
+  // Eases the screen away before the hand-off to the chat.
+  const { leaving, leave } = useScreenExit();
+  // A resume onto a flow whose name step was already passed skips the pitch
+  // and the form; a fresh flow always shows them, created agent or not.
   const [phase, setPhase] = useState<"mission" | "form" | "booting">(
-    createdAgentId ? "booting" : "mission",
+    nameStepPassed(progress) ? "booting" : "mission",
   );
-  const [bootStep, setBootStep] = useState(
-    createdAgentId ? BOOT_LINES.length : 0,
-  );
+  // The first screen arrives with the step itself, and the step frame
+  // (FlowChrome) already fades it in. Only later in-step swaps (logos ->
+  // name -> getting ready) play their own entrance, so the two never stack.
+  const [firstPhase] = useState(phase);
+  const entrance = (p: typeof phase) =>
+    p === firstPhase ? "" : PHASE_ENTRANCE;
   const submittingRef = useRef(false);
   const unmountedRef = useRef(false);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -99,12 +139,23 @@ export default function CreatePage() {
     if (chatDestination) router.prefetch(chatDestination);
   }, [router, chatDestination]);
 
+  // The machine's status, read only while the boot screen waits on it.
+  const booting = phase === "booting";
+  const { data: sandbox } = useAgentSandboxStatus(createdAgentId, {
+    enabled: booting,
+    workspaceId,
+  });
+  const bootIndex = bootIndexOf(sandbox?.status);
+  const running = sandbox?.status === "running";
+
+  // The bound: the door opens `BOOT_WAIT_MAX_MS` after the boot screen is
+  // reached, whatever the machine says. Armed once per entry to the phase.
+  const [waitedOut, setWaitedOut] = useState(false);
   useEffect(() => {
-    if (phase !== "booting") return;
-    if (bootStep >= BOOT_LINES.length) return;
-    const t = setTimeout(() => setBootStep((s) => s + 1), BOOT_LINE_MS);
+    if (!booting) return;
+    const t = setTimeout(() => setWaitedOut(true), BOOT_WAIT_MAX_MS);
     return () => clearTimeout(t);
-  }, [phase, bootStep]);
+  }, [booting]);
 
   // The default opens with the caret parked at its end — Enter accepts it,
   // backspace edits it. Caret, never a selection: selected text is one
@@ -129,20 +180,34 @@ export default function CreatePage() {
     };
   }, []);
 
-  const handleCreate = async () => {
+  const handleSubmit = async () => {
     if (!canSubmit || submittingRef.current) return;
     submittingRef.current = true;
     const trimmed = name.trim();
     setPhase("booting");
-    setBootStep(0);
 
-    let agent;
     try {
-      agent = await createAgent.mutateAsync({
+      if (createdAgentId) {
+        // The agent exists (born at the welcome step): the name is the one
+        // thing left to give it. A same-name submit is a server no-op.
+        if (trimmed !== createdAgentName) {
+          await renameAgent.mutateAsync({
+            agentId: createdAgentId,
+            name: trimmed,
+            workspaceId,
+          });
+          recordCreatedAgent({ agentId: createdAgentId, agentName: trimmed });
+        }
+        return;
+      }
+      // The fallback: the welcome step's create was refused (or never ran),
+      // so create here and report any refusal as before.
+      const agent = await createAgent.mutateAsync({
         name: trimmed,
-        identifier: nameToIdentifier(trimmed),
         workspaceId,
       });
+      // Persist the created agent even if the user already left the page.
+      recordCreatedAgent({ agentId: agent.id, agentName: agent.name });
     } catch (err) {
       if (unmountedRef.current) return;
       toast.error(
@@ -152,47 +217,55 @@ export default function CreatePage() {
       );
       setPhase("form");
       submittingRef.current = false;
-      return;
     }
-    // Persist the created agent even if the user already left the page.
-    recordCreatedAgent({ agentId: agent.id, agentName: agent.name });
   };
 
-  // The timer chain is presentational and can outrun a slow create — hold the
-  // last line in its active (spinner) state until the request actually
-  // settles, so the screen never claims "done" while the POST is in flight.
-  const shownStep = createAgent.isPending
-    ? Math.min(bootStep, BOOT_LINES.length - 1)
-    : bootStep;
+  // The request still in flight (the rename or the fallback create) holds
+  // the first line active: the screen never claims progress it does not
+  // have. Once it settles, the machine's status drives the lines.
+  const settling = createAgent.isPending || renameAgent.isPending;
+  const doneCount = settling
+    ? 0
+    : BOOT_LINES.filter((line) => bootIndex >= BOOT_ORDER.indexOf(line.doneAt))
+        .length;
 
-  // The door opens when the narrative has played out AND the agent truly
-  // exists — never on the timers alone, so a slow create keeps its spinner
-  // and a failed one falls back to the form before this can show.
-  const ready = bootStep >= BOOT_LINES.length && !!chatDestination;
+  // The door opens when the machine is running (every line done) AND the
+  // agent truly exists, or at the bound, so a slow boot never traps the
+  // person. Never while a request is still settling: a failed one falls
+  // back to the form before this can show.
+  const ready = !settling && !!chatDestination && (running || waitedOut);
 
   // The created name is the truth once it exists (resume included); the
   // local field only covers the pre-creation renders of this screen.
   const bootingName = createdAgentName ?? name.trim();
+  const bootLineText = (text: string) => text.replaceAll("{name}", bootingName);
 
   return (
-    <div className="flex w-full flex-col items-center">
+    <div
+      className={cn(
+        "flex w-full flex-col items-center transition-[opacity,transform] duration-300 ease-in",
+        leaving && "pointer-events-none -translate-y-1 opacity-0",
+      )}
+    >
       {phase === "mission" ? (
         <div
           key="mission"
           className={cn(
             "flex w-full flex-col items-center text-center",
-            PHASE_ENTRANCE,
+            entrance("mission"),
           )}
         >
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            A sandboxed agent for every employee
+            Works with <span className="text-brand">all your tools</span>,
+            safely
           </h1>
-          <p className="text-muted-foreground mt-3 text-balance sm:text-lg">
-            It never holds your keys. They stay in the gateway, you stay in
-            control.
-          </p>
 
-          <WelcomeVisual className="mt-8" />
+          <AppsMarquee className="mt-10" />
+
+          <p className="text-muted-foreground mt-8 text-sm text-balance">
+            You decide what your agent can do.{" "}
+            <span className="text-brand font-medium">SOC 2 compliant</span>.
+          </p>
 
           <Button
             variant="brand"
@@ -209,7 +282,7 @@ export default function CreatePage() {
           key="form"
           className={cn(
             "flex w-full flex-col items-center text-center",
-            PHASE_ENTRANCE,
+            entrance("form"),
           )}
         >
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
@@ -224,7 +297,7 @@ export default function CreatePage() {
             className="mt-8 w-full max-w-sm text-left"
             onSubmit={(e) => {
               e.preventDefault();
-              void handleCreate();
+              void handleSubmit();
             }}
           >
             <Label htmlFor="agent-name">Agent name</Label>
@@ -264,10 +337,13 @@ export default function CreatePage() {
           </form>
         </div>
       ) : (
-        <div key="booting" className={cn("w-full max-w-sm", PHASE_ENTRANCE)}>
-          <div role="status" aria-label="Creating your agent">
+        <div
+          key="booting"
+          className={cn("w-full max-w-sm", entrance("booting"))}
+        >
+          <div role="status" aria-label={`Setting up ${bootingName}`}>
             <h1 className="text-center font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
-              {bootingName} is starting up
+              {bootingName} is getting ready
             </h1>
             {/* The visual list conveys progress via opacity only — this text
                 node is what actually changes, so the status region announces
@@ -275,12 +351,15 @@ export default function CreatePage() {
             <p className="sr-only">
               {ready
                 ? `${bootingName} is ready to meet you`
-                : BOOT_LINES[Math.min(shownStep, BOOT_LINES.length - 1)]?.text}
+                : bootLineText(
+                    BOOT_LINES[Math.min(doneCount, BOOT_LINES.length - 1)]
+                      ?.text ?? "",
+                  )}
             </p>
             <ul className="mt-8 space-y-4">
               {BOOT_LINES.map(({ text, icon: Icon }, i) => {
-                const done = shownStep > i;
-                const active = shownStep === i;
+                const done = ready || doneCount > i;
+                const active = !done && doneCount === i;
                 return (
                   <li
                     key={text}
@@ -304,7 +383,7 @@ export default function CreatePage() {
                     <span
                       className={cn("text-sm", done && "text-muted-foreground")}
                     >
-                      {text}
+                      {bootLineText(text)}
                     </span>
                   </li>
                 );
@@ -320,10 +399,12 @@ export default function CreatePage() {
                 variant="brand"
                 size="lg"
                 className={PHASE_ENTRANCE}
-                onClick={() => void handleComplete(chatDestination)}
-                loading={completing}
+                onClick={() =>
+                  leave(() => void handleComplete(chatDestination))
+                }
+                loading={completing || leaving}
               >
-                Meet your agent
+                Meet {bootingName}
                 <ArrowRight className="size-4" aria-hidden />
               </Button>
             )}

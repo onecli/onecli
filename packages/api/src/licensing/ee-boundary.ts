@@ -94,6 +94,12 @@ export const SEAMS: readonly Seam[] = [
     permanent: true,
   },
   {
+    from: "apps/gateway/crates/dbproxy/**",
+    why: "The database front door gates every judged statement on the licensed app-availability allowlist (`gate.rs`), exactly as the HTTP, WebSocket and tunnel lanes do in `proxy`: a restricted workspace reaches only the apps it was granted, on every lane. Unrestricted (a no-op) unlicensed, for open orgs, and when enforcement is off.",
+    count: 1,
+    permanent: true,
+  },
+  {
     from: "apps/gateway/crates/policy-engine/**",
     why: "Connect-time policy assembly reads the licensed group-principal set and app-availability allowlist (`enforce.rs`), and the injection selection intersects the licensed granular-access scopes (`inject_select.rs`). Unlicensed deployments resolve these to empty without querying. (The licensed principal parity test lives in the ee crate and reaches the free twin here through a dev-dependency, so it is not a production crossing.) Was 3 while the crates carried a `gateway-` prefix: the third was `loaders.rs`, which only NAMES the licensed loader in doc comments and calls nothing. The detector now strips whole-line Rust comments, so prose no longer spends the allowance.",
     count: 2,
@@ -145,11 +151,19 @@ export interface DynamicSeam {
 
 export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
   {
-    // Slack's channel-provider UI entry lazily names the licensed "Connect
-    // your Slack" read-grants card; the section renders it only when the
-    // instance is entitled.
-    from: "apps/web/src/lib/agents/channel-providers/slack.tsx",
-    specifiers: ["@/ee/slack-read/slack-read-card"],
+    // The shared approval row (bell + inline chat) lazily names the licensed
+    // "act as you in Slack" access card (Connect / Allow), rendered only for
+    // slack_access_request items, which the server raises only when entitled.
+    from: "apps/web/src/lib/components/approvals/action-approval-row.tsx",
+    specifiers: ["@/ee/slack-read/slack-access-card"],
+  },
+  {
+    // The agent Contacts section lazily names the licensed "acts as you"
+    // layer (the caller's own Slack: read/write grants), which wraps the
+    // free list and hands it a slot (top line, per-row "As you" blocks,
+    // rows for unmatched shares); mounted only when the instance is entitled.
+    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/contacts/_components/contacts-section.tsx",
+    specifiers: ["@/ee/slack-read/act-as-you-contacts"],
   },
   {
     // The Connections Apps tab lazily names the licensed Slack read-access

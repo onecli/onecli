@@ -1,14 +1,18 @@
 "use client";
 
-import { Plus, ChevronDown, Sparkles, KeyRound } from "lucide-react";
+import { Plus, ChevronDown } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
-import type { CreateDoor } from "@/lib/agents/create-door";
+import {
+  isHostedPrimary,
+  isSplitDoor,
+  type CreateDoor,
+} from "@/lib/agents/create-door";
+import { AgentCreateDoorAlternative } from "./agent-create-door-alternative";
 
 /** What the EE wrapper needs to render the primary button itself (it gates on
  *  quota before letting the click through). */
@@ -47,8 +51,8 @@ export const AgentCreateDoor = ({
   onCreateHosted,
   renderPrimary,
 }: AgentCreateDoorProps) => {
-  const split = door === "byo-with-hosted" || door === "hosted-with-byo";
-  const hostedPrimary = door === "hosted" || door === "hosted-with-byo";
+  const split = isSplitDoor(door);
+  const hostedPrimary = isHostedPrimary(door);
   const primary: CreateDoorPrimary = {
     onClick: hostedPrimary ? onCreateHosted : onCreateByo,
     // A new user is never shown the word "agent type": their one button is
@@ -92,19 +96,11 @@ export const AgentCreateDoor = ({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {door === "hosted-with-byo" ? (
-                // The mixed world's second path: BYO creation, named plainly —
-                // this menu only exists for orgs that already know the word.
-                <DropdownMenuItem onSelect={onCreateByo}>
-                  <KeyRound className="size-3.5" aria-hidden />
-                  New BYO agent
-                </DropdownMenuItem>
-              ) : (
-                <DropdownMenuItem onSelect={onCreateHosted}>
-                  <Sparkles className="size-3.5" aria-hidden />
-                  New hosted agent
-                </DropdownMenuItem>
-              )}
+              <AgentCreateDoorAlternative
+                door={door}
+                onCreateByo={onCreateByo}
+                onCreateHosted={onCreateHosted}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </>

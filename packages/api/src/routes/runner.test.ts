@@ -19,7 +19,7 @@ const services = vi.hoisted(() => ({
   heartbeatRunner: vi.fn(),
   listRunners: vi.fn(),
   getRunnerAvailability: vi.fn(),
-  runnerSupportsAttachments: vi.fn(),
+  runnerAttachmentSupport: vi.fn(),
   planTurnAttachments: vi.fn(),
   sweepStalePendingAttachments: vi.fn(),
   getAttachmentBytesForRunner: vi.fn(),
@@ -45,9 +45,12 @@ const services = vi.hoisted(() => ({
   retireReplica: vi.fn(),
   isReplicaRetired: vi.fn(),
   buildTurnContext: vi.fn(),
+  deliveredContextTokens: vi.fn(),
   fireDueCrons: vi.fn(),
   fireDueEvalSchedules: vi.fn(),
   fireDueWatches: vi.fn(),
+  fireDueMemoryReviews: vi.fn(),
+  tidyJobPass: vi.fn(),
   promoteParkedFollowUps: vi.fn(),
   expireWedgedFollowUps: vi.fn(),
   applyProcessState: vi.fn(),
@@ -90,7 +93,7 @@ vi.mock("../services/runner-service", () => ({
   heartbeatRunner: services.heartbeatRunner,
   listRunners: services.listRunners,
   getRunnerAvailability: services.getRunnerAvailability,
-  runnerSupportsAttachments: services.runnerSupportsAttachments,
+  runnerAttachmentSupport: services.runnerAttachmentSupport,
 }));
 
 vi.mock("../services/attachment-service", () => ({
@@ -106,6 +109,7 @@ vi.mock("../services/attachment-service", () => ({
     sizeBytes: true,
     status: true,
   },
+  NOT_IN_REPLY_STATUSES: ["staged", "sent"],
   bindAttachmentsToTurn: services.bindAttachmentsToTurn,
   firstAttachmentName: services.firstAttachmentName,
 }));
@@ -147,6 +151,10 @@ vi.mock("../services/turn-context-service", () => ({
   buildTurnContext: services.buildTurnContext,
 }));
 
+vi.mock("../services/llm-credential-service", () => ({
+  deliveredContextTokens: services.deliveredContextTokens,
+}));
+
 vi.mock("../services/cron-fire-service", () => ({
   fireDueCrons: services.fireDueCrons,
 }));
@@ -176,14 +184,38 @@ vi.mock("../services/watch-fire-service", () => ({
   fireDueWatches: services.fireDueWatches,
 }));
 
+// The memory review job, as `createApiApp` registers it: the real job's name
+// and interval around a mocked pass, so the tests below drive the real
+// registration and the real poll loop.
+vi.mock("../services/memory-review-service", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../services/memory-review-service")>();
+  return {
+    memoryReviewJob: {
+      ...actual.memoryReviewJob,
+      pass: services.fireDueMemoryReviews,
+    },
+  };
+});
+
 vi.mock("../services/sandbox-process-service", () => ({
   applyProcessState: services.applyProcessState,
 }));
 
 const { createApiApp } = await import("../app");
 const { resetPollSweepThrottle } = await import("./runner");
+const { registerPlatformJob } = await import("../services/platform-jobs");
 
 const app = createApiApp({ getSession: async () => null });
+
+// A second platform job beside the memory review one, registered once the
+// way a deployment's boot would add its own: a platform-only pass (no
+// agent runs) on its own 5s interval.
+registerPlatformJob({
+  name: "runner-test-tidy",
+  passIntervalMs: 5_000,
+  pass: services.tidyJobPass,
+});
 
 const RUNNER_AUTH = {
   authorization: `Bearer ${RUNNER_TOKEN}`,
@@ -211,18 +243,27 @@ beforeEach(() => {
   services.replicaUpdateMany.mockResolvedValue({ count: 0 });
   services.claimDueWork.mockResolvedValue([]);
   services.buildTurnContext.mockResolvedValue(null);
+  services.deliveredContextTokens.mockImplementation(
+    (_agentId: string, chosen: number | undefined) => Promise.resolve(chosen),
+  );
   // The sweeps return what they killed so the poll can settle it.
   services.reclaimStaleTurns.mockResolvedValue([]);
   services.failStalledTurns.mockResolvedValue([]);
   services.fireDueCrons.mockResolvedValue(0);
   services.fireDueEvalSchedules.mockResolvedValue(0);
   services.fireDueWatches.mockResolvedValue(0);
+  services.fireDueMemoryReviews.mockResolvedValue(0);
+  services.tidyJobPass.mockResolvedValue(undefined);
   services.promoteParkedFollowUps.mockResolvedValue(0);
   services.expireWedgedFollowUps.mockResolvedValue(0);
   services.applyProcessState.mockResolvedValue(undefined);
   // Attachments default OFF: existing turn-dispatch tests must see the bare
   // turn shape they assert. The attachment path has its own cases below.
-  services.runnerSupportsAttachments.mockResolvedValue(false);
+  // The bound is a sentinel, so a test can see it passed through unchanged.
+  services.runnerAttachmentSupport.mockResolvedValue({
+    supported: false,
+    maxFiles: 3,
+  });
   services.planTurnAttachments.mockResolvedValue({ manifest: [], note: null });
   services.sweepStalePendingAttachments.mockResolvedValue(0);
   services.waitForWork.mockResolvedValue(undefined);
@@ -472,6 +513,51 @@ describe("POST /v1/runner/work", () => {
     expect(services.releaseClaim).toHaveBeenCalledWith("sb-gone", "r-1");
   });
 
+  it("a delivered turn carries the conversation's size, clamped by the credential, and a failed lookup never blocks it", async () => {
+    const due = (turnId: string, contextTokens?: number) => ({
+      kind: "turn" as const,
+      turnId,
+      conversationId: "conv-1",
+      sandboxId: "sb-1",
+      agentId: "ag-1",
+      message: "go",
+      resumeSessionRef: null,
+      ...(contextTokens !== undefined && { contextTokens }),
+    });
+    const deliverOnce = async () => {
+      const res = await app.request("/v1/runner/work", {
+        method: "POST",
+        headers: RUNNER_AUTH,
+        body: JSON.stringify({}),
+      });
+      return ((await res.json()) as { items: Record<string, unknown>[] }).items;
+    };
+
+    // Clamped: the credential's limit wins over the chosen 1M.
+    services.claimDueWork.mockResolvedValueOnce([due("t-1", 1_000_000)]);
+    services.deliveredContextTokens.mockResolvedValueOnce(200_000);
+    expect(await deliverOnce()).toMatchObject([
+      { kind: "turn.deliver", turnId: "t-1", contextTokens: 200_000 },
+    ]);
+    expect(services.deliveredContextTokens).toHaveBeenLastCalledWith(
+      "ag-1",
+      1_000_000,
+    );
+
+    // No size of its own: nothing on the wire.
+    services.claimDueWork.mockResolvedValueOnce([due("t-2")]);
+    const [plain] = await deliverOnce();
+    expect(plain).toMatchObject({ kind: "turn.deliver", turnId: "t-2" });
+    expect(plain).not.toHaveProperty("contextTokens");
+
+    // The lookup throws: the turn still ships, with no size.
+    services.claimDueWork.mockResolvedValueOnce([due("t-3", 1_000_000)]);
+    services.deliveredContextTokens.mockRejectedValueOnce(new Error("db down"));
+    const [shipped] = await deliverOnce();
+    expect(shipped).toMatchObject({ kind: "turn.deliver", turnId: "t-3" });
+    expect(shipped).not.toHaveProperty("contextTokens");
+  });
+
   it("a delivered turn carries the memory context when the builder has one", async () => {
     services.claimDueWork.mockResolvedValueOnce([
       {
@@ -639,7 +725,8 @@ describe("POST /v1/runner/work", () => {
       context: "[new message]\n\nThe user attached files…",
       attachments: manifest,
     });
-    expect(services.planTurnAttachments).toHaveBeenCalledWith("f-1");
+    // Bounded by the claiming runner's own manifest bound, like a turn.
+    expect(services.planTurnAttachments).toHaveBeenCalledWith("f-1", 3);
     expect(services.buildTurnContext).not.toHaveBeenCalled();
   });
 
@@ -754,7 +841,10 @@ describe("POST /v1/runner/work", () => {
         resumeSessionRef: null,
       },
     ]);
-    services.runnerSupportsAttachments.mockResolvedValue(true);
+    services.runnerAttachmentSupport.mockResolvedValue({
+      supported: true,
+      maxFiles: 7,
+    });
     services.buildTurnContext.mockResolvedValue("[memory]");
     const manifest = [
       {
@@ -783,6 +873,9 @@ describe("POST /v1/runner/work", () => {
     expect(item.attachments).toEqual(manifest);
     // Note LEADS the context (the files belong to this message), memory follows.
     expect(item.context).toBe("The user attached files…\n\n[memory]");
+    // The plan is bounded by what this runner's wire parses (an older
+    // runner's smaller bound would otherwise poison its whole poll batch).
+    expect(services.planTurnAttachments).toHaveBeenCalledWith("t-1", 7);
   });
 
   it("ships a turn BARE for a runner that did not advertise attachments — no manifest, no note", async () => {
@@ -797,7 +890,7 @@ describe("POST /v1/runner/work", () => {
         resumeSessionRef: null,
       },
     ]);
-    // Default mock: runnerSupportsAttachments → false.
+    // Default mock: runnerAttachmentSupport → unsupported.
     services.buildTurnContext.mockResolvedValue(null);
 
     const res = await app.request("/v1/runner/work", {
@@ -946,6 +1039,61 @@ describe("the watch fire pass runs on the poll (step 10)", () => {
     expect(res.status).toBe(200);
     expect(services.fireDueWatches).toHaveBeenCalled();
     expect(services.claimDueWork).toHaveBeenCalled();
+  });
+});
+
+describe("platform jobs run on the poll", () => {
+  const poll = () =>
+    app.request("/v1/runner/work", {
+      method: "POST",
+      headers: RUNNER_AUTH,
+      body: JSON.stringify({ wait: 0 }),
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("createApiApp registers the memory review job, and a failing pass never stops dispatch", async () => {
+    services.fireDueMemoryReviews.mockRejectedValue(new Error("pass blip"));
+    const res = await poll();
+    expect(res.status).toBe(200);
+    expect(services.fireDueMemoryReviews).toHaveBeenCalledTimes(1);
+    expect(services.claimDueWork).toHaveBeenCalled();
+  });
+
+  it("keeps its own slower throttle under the once-a-second sweeps", async () => {
+    // The sweeps rerun after a second; the review pass rides them but waits
+    // its own 30s. MUTATION-PROOF: drop the interval check and the second
+    // poll (sweeps due again) fires it again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await poll();
+    vi.setSystemTime(Date.now() + 2_000);
+    await poll();
+    expect(services.reclaimStaleTurns).toHaveBeenCalledTimes(2);
+    expect(services.fireDueMemoryReviews).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + 30_000);
+    await poll();
+    expect(services.fireDueMemoryReviews).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs every registered job on its own interval, and one job's failure never costs another's pass", async () => {
+    // The second job (registered at the top of this file, the way a
+    // deployment's boot would): a platform-only pass on a 5s interval,
+    // behind the memory review job's throw. MUTATION-PROOF: a shared
+    // throttle, or letting the first job's throw escape the loop, breaks
+    // the counts below.
+    services.fireDueMemoryReviews.mockRejectedValue(new Error("pass blip"));
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    await poll();
+    expect(services.fireDueMemoryReviews).toHaveBeenCalledTimes(1);
+    expect(services.tidyJobPass).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(Date.now() + 6_000);
+    await poll();
+    expect(services.tidyJobPass).toHaveBeenCalledTimes(2);
+    expect(services.fireDueMemoryReviews).toHaveBeenCalledTimes(1);
   });
 });
 

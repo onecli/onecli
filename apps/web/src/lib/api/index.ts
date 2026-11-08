@@ -136,9 +136,6 @@ export type {
   SecretAgentAccessEntry,
   SavedSecret,
   GrantResources,
-  AgentGrantsSummary,
-  AgentWithGrantsSummary,
-  GrantsSummaryEntry,
   InstanceInfo,
   OrgInfo,
   SshKey,
@@ -163,7 +160,6 @@ export type {
   AgentChannelPresence,
   AgentChannelsView,
   ActionApprovalStatus,
-  AgentContact,
   AgentPeer,
   ChannelPresenceStatus,
   ChannelProvider,
@@ -171,6 +167,7 @@ export type {
   ChannelSetupMaterial,
   ChannelPersonReach,
   ChannelReachState,
+  ReachDecision,
   ChannelSpaceReach,
   ChannelTransport,
   ChannelUserLink,
@@ -196,13 +193,15 @@ export type {
   MemorySearchHit,
 } from "./memories";
 export type {
+  ImportedSkill,
   Skill,
+  SkillFile,
   SkillFileInput,
+  SkillImportResult,
   SkillInput,
   SkillPatch,
   SkillSummary,
 } from "./skills";
-export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
 export type {
   LibrarySkill,
@@ -219,14 +218,7 @@ export type {
   AppToolGroupSummary,
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
-export {
-  apiGet,
-  apiPost,
-  apiPatch,
-  apiPut,
-  apiDelete,
-  ApiError,
-} from "./client";
+export { apiGet, apiPut, ApiError } from "./client";
 export { queryKeys } from "./keys";
 export type { RunAppCall, RunDetail, RunListItem, RunToolCall } from "./runs";
 export type { AgentRuntimeUsage, OrgRuntimeUsage } from "./usage";

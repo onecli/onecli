@@ -9,6 +9,7 @@ import type { AppPermissionDefinition } from "./types";
 // meeting, update title, create soundbite, …).
 export const firefliesPermissions: AppPermissionDefinition = {
   provider: "fireflies",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

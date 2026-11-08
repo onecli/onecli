@@ -90,8 +90,13 @@ const OUTCOME_BADGE: Record<
     icon: null,
     className: "border-border text-muted-foreground",
   },
-  decided: {
-    label: "Decided elsewhere",
+  unknown: {
+    label: "No longer waiting",
+    icon: null,
+    className: "border-border text-muted-foreground",
+  },
+  cancelled: {
+    label: "Cancelled",
     icon: null,
     className: "border-border text-muted-foreground",
   },
@@ -106,6 +111,7 @@ const OUTCOME_BADGE: Record<
 export const GroupedApprovalRow = ({
   approval,
   layout,
+  ordinal,
   odd,
   busy,
   outcome,
@@ -116,6 +122,10 @@ export const GroupedApprovalRow = ({
 }: {
   approval: PendingApproval;
   layout: GroupRowLayout;
+  /** Its place on the card, for a row with no fields of its own: it reads
+   * "Request 2" rather than the card's title again (an odd row's action
+   * already leads it). */
+  ordinal?: number;
   /** Not the card's main action: flagged so it can't hide in the batch. */
   odd: boolean;
   busy: boolean;
@@ -133,7 +143,8 @@ export const GroupedApprovalRow = ({
   // its record ("Update Contact · Olivia Martinez", not the name twice).
   const oddLabel =
     (layout.ownRecord && approval.summary?.subject?.verb) || action;
-  const name = fields[0]?.value ?? action;
+  const own = ordinal === undefined ? action : `Request ${ordinal}`;
+  const name = fields[0]?.value ?? own;
   const badge = outcome ? OUTCOME_BADGE[outcome] : null;
   // An approval that did not do what it said: the row says so (the short
   // count on the badge, the reason on hover).
@@ -162,7 +173,7 @@ export const GroupedApprovalRow = ({
             <ApprovalLink href={d.url}>{d.value}</ApprovalLink>
           </span>
         ))}
-        {fields.length === 0 && action}
+        {fields.length === 0 && own}
       </p>
       <Button
         variant="ghost"

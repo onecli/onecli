@@ -16,7 +16,8 @@ import { proofDatabaseUrl } from "../../testing/pg-proof.js";
  *    approval settles failed), no turn;
  *  - blocked on either side: the tool refuses up front, no hold, no turn;
  *  - allow/allow: delivered immediately, no hold;
- *  - "approve + always allow" sets the DECIDER's side only;
+ *  - each card asks about the PAIR: Always allow sets the DECIDER's side
+ *    only (both sides in one workspace), Never blocks it;
  *  - the fence: a name resolves inside the sender's workspace only; an id
  *    reaches anywhere; never the sender itself; a foreign workspace cannot
  *    set a link policy for an agent it does not own;
@@ -170,7 +171,7 @@ const turnsOf = (agentId: string) =>
 
 const approve = (
   approvalId: string,
-  decision: "approve" | "approve_always" | "reject" = "approve",
+  decision: "approve" | "reject" = "approve",
 ) =>
   approvals.decideActionApproval({
     approvalId,
@@ -289,7 +290,7 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
       text: "can you check the deploy?",
     });
     expect(mine?.summary).toBe(
-      'Donna wants to talk to Ray: "can you check the deploy?"',
+      'Donna wants to talk to Ray from now on? First message: "can you check the deploy?"',
     );
     expect(await turnsOf(ray.id)).toHaveLength(0);
     // The pair row exists, pristine.
@@ -304,10 +305,11 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect([link.policyA, link.policyB]).toEqual(["ask", "ask"]);
   });
 
-  it("same workspace: the ONE approve delivers; one-sided allow still asks once, on the sender", async () => {
+  it("same workspace: the ONE answer is about the pair: Always allow delivers and both sides flow from now on", async () => {
     const { donna, ray } = await seedPair();
     await message(donna, "Ray", "ping");
     const [mine] = await holdsFor(donna.id);
+    // Even a plain approve (an older client) is the standing answer.
     expect(await approve(mine!.id)).toMatchObject({
       kind: "decided",
       status: "executed",
@@ -315,19 +317,20 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect((await turnsOf(ray.id)).map((t) => t.message)).toEqual([
       "Donna (agent): ping",
     ]);
+    // Remembered: the next message, either direction, goes straight out.
+    expect((await message(donna, "Ray", "again")).kind).toBe("sent");
+    expect((await message(ray, "Donna", "back")).kind).toBe("sent");
+    expect(await holdsFor(donna.id)).toHaveLength(1);
+  });
 
-    // Ray allows Donna; Donna's side still asks: still exactly one card,
-    // and it is the sender's (anchored where the ask was made).
-    await links.setLinkPolicy({
-      workspaceId: WORKSPACE,
-      agentId: ray.id,
-      peerAgentId: donna.id,
-      policy: "allow",
-      deciderUserId: OWNER,
-    });
-    expect((await message(donna, "Ray", "again")).kind).toBe("held");
-    expect(await holdsFor(donna.id)).toHaveLength(2);
-    expect(await holdsFor(ray.id)).toHaveLength(0);
+  it("same workspace: Never on the one card blocks the pair, both sides", async () => {
+    const { donna, ray } = await seedPair();
+    await message(donna, "Ray", "ping");
+    const [mine] = await holdsFor(donna.id);
+    await approve(mine!.id, "reject");
+    expect(await turnsOf(ray.id)).toHaveLength(0);
+    await expect(message(donna, "Ray", "again")).rejects.toThrow(/blocked/);
+    await expect(message(ray, "Donna", "back")).rejects.toThrow(/blocked/);
   });
 
   it("across workspaces, ask/ask: one message opens TWO holds (one per owner group), same frozen payload, nothing lands", async () => {
@@ -377,18 +380,14 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(outbox?.title).toBe("Ray");
     expect(outbox?.appTurnStreak).toBe(0); // its own words never meter it
 
-    // An approve is consent to THIS message, not a person driving the
-    // pair: it never resets the receiver's chain. (A person driving does:
-    // see the cap arms.)
+    // An approve is consent, not a person driving the pair: it never resets
+    // the receiver's chain. (A person driving does: see the cap arms.)
+    // Both owner groups answered Always allow, so the next message flows.
     await db.conversation.update({
       where: { id: inbox!.id },
       data: { appTurnStreak: 3 },
     });
-    await message(donna, ray.id, "again");
-    const [, mine2] = await holdsFor(donna.id);
-    const [, theirs2] = await holdsFor(ray.id);
-    await approve(mine2!.id);
-    await approve(theirs2!.id);
+    expect((await message(donna, ray.id, "again")).kind).toBe("sent");
     expect((await turnsOf(ray.id)).map((t) => t.message)).toEqual([
       "Donna (agent): ping",
       "Donna (agent): again",
@@ -578,10 +577,11 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(await holdsFor(ray.id)).toHaveLength(0);
     // The brake is per DIRECTION: Ray asking Donna is not counted.
     expect((await message(ray, "Donna", "reverse")).kind).toBe("held");
-    // Deciding one frees a slot.
+    // Deciding one frees a slot - and a decision is now the standing
+    // answer: Always allow lets the next message straight through.
     const [first] = await holdsFor(donna.id);
-    await approve(first!.id, "reject");
-    expect((await message(donna, "Ray", "after a decision")).kind).toBe("held");
+    await approve(first!.id);
+    expect((await message(donna, "Ray", "after a decision")).kind).toBe("sent");
   });
 
   it("blocked on either side: the tool refuses up front, no hold, no turn", async () => {
@@ -606,11 +606,11 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     );
   });
 
-  it('same workspace: "approve + always allow" on the one card sets BOTH sides (the decider owns both)', async () => {
+  it("same workspace: Always allow on the one card sets BOTH sides (the decider owns both)", async () => {
     const { donna, ray } = await seedPair();
     await message(donna, "Ray");
     const [mine] = await holdsFor(donna.id);
-    await approve(mine!.id, "approve_always");
+    await approve(mine!.id);
 
     const peersOfDonna = await links.listPeers({
       workspaceId: WORKSPACE,
@@ -624,11 +624,11 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the consent walk", () => {
     expect(await holdsFor(donna.id)).toHaveLength(1);
   });
 
-  it('across workspaces: "approve + always allow" sets the DECIDER\'s side only', async () => {
+  it("across workspaces: Always allow sets the DECIDER's side only", async () => {
     const { donna, ray } = await seedFarPair();
     await message(donna, ray.id);
     const [mine] = await holdsFor(donna.id);
-    await approve(mine!.id, "approve_always");
+    await approve(mine!.id);
 
     const peersOfDonna = await links.listPeers({
       workspaceId: WORKSPACE,
@@ -1712,10 +1712,9 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     expect((await turnsOf(ray.id)).at(-1)?.message).toBe(
       "Donna (agent): Can you ship by Friday?",
     );
-    // Ray's reply from the pair thread while both sides still ask: the
-    // owners already consented to this exchange (the task is open), so it
-    // is delivered with NO new card, as an agent message ON the task (no
-    // second task, the peer's budget spent).
+    // Ray's reply: the owner's answer was Always allow for the pair, so it
+    // flows with NO new card, as an agent message ON the task (no second
+    // task, the peer's budget spent).
     expect(await message(ray, "Donna", "yes")).toEqual({
       kind: "sent",
       to: "Donna",
@@ -1726,17 +1725,17 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     expect(await tasksOn(donna, ray)).toHaveLength(1);
     expect((await tasksOn(donna, ray))[0]).toMatchObject({ peerSent: 1 });
 
-    // Once the task closes, the pair is back to asking: a fresh agent
-    // message is a new question and holds again.
+    // The answer was about the pair, not the task: after the task closes
+    // the two still flow without a card.
     await db.peerTask.updateMany({
       where: { agentId: donna.id },
       data: { status: "done", outcome: "reported", closedAt: new Date() },
     });
-    expect((await message(ray, "Donna", "anything else?")).kind).toBe("held");
-    expect(await holdsFor(ray.id)).toHaveLength(1);
+    expect((await message(ray, "Donna", "anything else?")).kind).toBe("sent");
+    expect(await holdsFor(ray.id)).toHaveLength(0);
   });
 
-  it("across workspaces, an open task is NOT standing consent: the foreign peer's reply still asks both owner groups", async () => {
+  it("across workspaces, each owner group's answer is about the pair: once both said Always allow, the foreign peer's reply flows", async () => {
     const { donna, ray } = await seedFarPair();
     const { outcome } = await openTask(
       donna,
@@ -1750,12 +1749,7 @@ describe.skipIf(!PROOF_URL)("agent links — peer tasks", () => {
     await approve(mine!.id);
     await approve(theirs!.id);
     expect(await tasksOn(donna, ray)).toMatchObject([{ status: "open" }]);
-    // Ray (another tenant) answers: each owner group approved ONE message
-    // crossing its boundary, never the answers after it.
-    const reply = await message(ray, donna.id, "yes");
-    expect(reply.kind).toBe("held");
-    if (reply.kind !== "held") throw new Error("unreachable");
-    expect(reply.approvalIds).toHaveLength(2);
+    expect((await message(ray, donna.id, "yes")).kind).toBe("sent");
   });
 
   it("an open task never outranks a block: the reply is refused up front, no card, no turn", async () => {
@@ -2256,6 +2250,7 @@ describe.skipIf(!PROOF_URL)("agent links (5b) — the routes", () => {
           {
             agentId: ray.id,
             name: "Ray",
+            imageUrl: null,
             workspaceName: null,
             myPolicy: "ask",
             theirPolicy: "ask",

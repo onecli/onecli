@@ -92,17 +92,10 @@ export const resolveMentionNames = async (
 
   const directory = await mentionDirectoryOf(presence.integrationId);
 
-  // The owner's per-recipient BLOCK list (agent_contacts, policy "blocked",
-  // 4e): a blocked ref must neither ping nor send. Read once per resolve —
-  // small by construction (blocks are rare, deliberate acts).
-  const blockedRefs = new Set(
-    (
-      await db.agentContact.findMany({
-        where: { agentId: presence.agentId, policy: "blocked" },
-        select: { externalRef: true },
-      })
-    ).map((c) => c.externalRef),
-  );
+  // The owner's per-recipient block ("Can talk with" = Never) is NOT read
+  // here: it stops DMs both ways and ignores their messages, but the agent
+  // may still @mention a blocked person in a channel. DM sends are refused
+  // by the recipient policy check in send_message.
 
   // The conversation's ANCHORS — find_recipient picks (name → provider user
   // id). Consulted BEFORE the directory: an anchor is the agent's explicit,
@@ -140,12 +133,6 @@ export const resolveMentionNames = async (
     const name = normalizeMentionName(raw);
     const anchored = anchors.get(name);
     if (anchored) {
-      if (blockedRefs.has(anchored.externalUserId)) {
-        // The owner's per-recipient override: a blocked contact must not be
-        // pingable — the token degrades to visible plain text, the same
-        // loud-failure shape as an unknown name.
-        return { kind: "unknown", name };
-      }
       return {
         kind: "resolved",
         name,
@@ -156,9 +143,6 @@ export const resolveMentionNames = async (
     const matches = directory.get(name) ?? [];
     if (matches.length === 1) {
       const match = matches[0]!;
-      if (blockedRefs.has(match.externalUserId)) {
-        return { kind: "unknown", name };
-      }
       return {
         kind: "resolved",
         name,
@@ -198,44 +182,6 @@ const MAX_STORED_FAILURES = 20;
  * transcript read) and idempotent per turn: a mirror retry or an adapter
  * twin racing the report must not stack duplicate notices.
  */
-/**
- * Which of these UNKNOWN-failure names are actually the owner's BLOCK
- * (resolve degrades blocked refs to unknown so nothing pings). Both the
- * failure notice and the next turn's context note must say so, or the
- * model invents its own reason for the plain text (the guy-dev lesson:
- * it blamed the DM). Anchor-scoped to the conversation, agentId-fenced.
- */
-const blockedNamesAmong = async (
-  conversationId: string,
-  agentId: string,
-  unknownNames: string[],
-): Promise<Set<string>> => {
-  const blocked = new Set<string>();
-  const names = unknownNames.map((name) => normalizeMentionName(name));
-  if (names.length === 0) return blocked;
-  const anchors = await db.mentionAnchor.findMany({
-    where: { conversationId, name: { in: names } },
-    select: { name: true, externalUserId: true },
-  });
-  if (anchors.length === 0) return blocked;
-  const blockedRefs = new Set(
-    (
-      await db.agentContact.findMany({
-        where: {
-          agentId,
-          policy: "blocked",
-          externalRef: { in: anchors.map((a) => a.externalUserId) },
-        },
-        select: { externalRef: true },
-      })
-    ).map((c) => c.externalRef),
-  );
-  for (const anchor of anchors) {
-    if (blockedRefs.has(anchor.externalUserId)) blocked.add(anchor.name);
-  }
-  return blocked;
-};
-
 export const recordMentionFailures = async (
   turnId: string,
   failures: MentionFailure[],
@@ -271,17 +217,9 @@ export const recordMentionFailures = async (
     throw new ServiceError("NOT_FOUND", "Turn not found");
   }
 
-  const blockedNames = await blockedNamesAmong(
-    turn.conversationId,
-    turn.conversation.agentId,
-    capped.filter((f) => f.kind === "unknown").map((f) => f.name),
-  );
-
   const lineOf = (failure: MentionFailure): string =>
     failure.kind === "unknown"
-      ? blockedNames.has(normalizeMentionName(failure.name))
-        ? `@[${failure.name}] posted as plain text: the workspace owner has blocked this recipient. Don't retry - say so plainly if asked.`
-        : `@[${failure.name}] didn't match anyone - it posted as plain text. Use find_recipient to get the right form.`
+      ? `@[${failure.name}] didn't match anyone - it posted as plain text. Use find_recipient to get the right form.`
       : failure.kind === "near_miss"
         ? `plain @${failure.name} posted as ordinary text and pinged NOBODY - only the @[${failure.name}] form pings.`
         : `@[${failure.name}] matched ${failure.candidates.length} people (${failure.candidates.join(", ")}) - it posted as plain text.`;
@@ -406,11 +344,6 @@ export const buildMentionContext = async (
     }),
     mentionFailuresOfPreviousTurn(conversationId, turnCreatedAt),
   ]);
-  const blockedNames = await blockedNamesAmong(
-    conversationId,
-    link.agentChannel.agentId,
-    failures.filter((f) => f.kind === "unknown").map((f) => f.name),
-  );
 
   const entries = [...directory.values()].flat();
   // One name per normalized key: an anchor and a directory entry for the
@@ -461,9 +394,7 @@ export const buildMentionContext = async (
   for (const failure of failures.slice(0, MAX_STORED_FAILURES)) {
     lines.push(
       failure.kind === "unknown"
-        ? blockedNames.has(normalizeMentionName(failure.name))
-          ? `Note: in your last reply, @[${failure.name}] posted as plain text because the workspace owner has BLOCKED this recipient. Don't retry - say so plainly if asked why.`
-          : `Note: in your last reply, @[${failure.name}] didn't match anyone - it posted as plain text and pinged nobody.`
+        ? `Note: in your last reply, @[${failure.name}] didn't match anyone - it posted as plain text and pinged nobody.`
         : failure.kind === "near_miss"
           ? `Note: in your last reply, plain @${failure.name} pinged NOBODY - write @[${failure.name}] to actually ping them.`
           : `Note: in your last reply, @[${failure.name}] was ambiguous (${failure.candidates.join(", ")}) - it posted as plain text and pinged nobody. Use the full name.`,

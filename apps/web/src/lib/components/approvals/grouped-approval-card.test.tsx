@@ -385,6 +385,36 @@ describe("GroupedApprovalCard", () => {
     expect(screen.getByText(/3 waiting/).textContent).toMatch(/expires in/);
   });
 
+  it("a row with nothing of its own reads as its place, never the title again", () => {
+    // Live: three paged reads ("List lead lists", no fields beside the
+    // title) printed the card's title on every row, and their buttons all
+    // read "Approve List lead lists".
+    const read = () =>
+      contact("x", {
+        batch: undefined,
+        summary: { action: "List lead lists", details: [] },
+      });
+    const rows = [read(), read(), read()];
+    card(rows);
+    expect(screen.getAllByText("List lead lists")).toHaveLength(1);
+    expect(screen.getByText("Request 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve Request 3" }));
+    expect(state.mutate).toHaveBeenCalledWith(
+      { ids: [rows[2]!.id], decision: "approve" },
+      expect.anything(),
+    );
+  });
+
+  it("the bell's preview of rows with nothing of their own names them apart", () => {
+    const read = () =>
+      contact("x", {
+        batch: undefined,
+        summary: { action: "List lead lists", details: [] },
+      });
+    card([read(), read(), read()], { compact: true });
+    expect(screen.getByText(/Request 1 · Request 2/)).toBeInTheDocument();
+  });
+
   it("disables every decision while one is in flight", () => {
     state.isPending = true;
     card([contact("Ada"), contact("Ben")]);

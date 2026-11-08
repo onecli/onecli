@@ -87,22 +87,24 @@ export const useApprovalCards = (
         settledAt: lastSeen,
         // This browser's own click is recorded precisely (useDecideApproval
         // notes it on mutate, forgets it on rollback). Otherwise: left the
-        // set at/near its deadline → the gateway's auto-deny; earlier → a
-        // decision from some other surface.
+        // set at/near its deadline → the gateway's auto-deny; earlier → we
+        // don't know yet. It may be another surface's decision, or the agent
+        // may have stopped waiting and no one decided it: the API's record
+        // says which.
         settled:
           takeLocalDecision(id) ??
           (replaced.has(id)
             ? "replaced"
             : new Date(approval.expiresAt).getTime() - 15_000 <= now
               ? "expired"
-              : "decided"),
+              : "unknown"),
       });
     }
     setSettled((prev) => {
       const rows = (prev[agentId] ?? []).map((c) =>
-        // The notice can land a beat after the card left the poll: a
-        // "decided" record the transcript now names is a replacement.
-        c.settled === "decided" && replaced.has(c.approval.id)
+        // The notice can land a beat after the card left the poll: an
+        // "unknown" record the transcript now names is a replacement.
+        c.settled === "unknown" && replaced.has(c.approval.id)
           ? { ...c, settled: "replaced" as const }
           : c,
       );
@@ -123,14 +125,14 @@ export const useApprovalCards = (
   }, [agent?.id, mine.map((a) => a.id).join(","), [...replaced].join(",")]);
 
   // Departures the API's record can say more about: one this browser only
-  // guessed at ("decided" somewhere else) gets its real outcome, place and
-  // time; an approved one (here or anywhere) gets what it actually did.
+  // saw leave ("unknown") gets its real outcome, place and time; an
+  // approved one (here or anywhere) gets what it actually did.
   // The most recent ones only: the read answers at most MAX_OUTCOME_IDS (it
   // refuses more), and a long session's oldest cards keep their reading.
   const asked = agent
     ? (settled[agent.id] ?? [])
         .flatMap((c) =>
-          c.settled === "decided" || c.settled === "approved"
+          c.settled === "unknown" || c.settled === "approved"
             ? [c.approval.id]
             : [],
         )
@@ -159,8 +161,8 @@ export const useApprovalCards = (
 };
 
 /**
- * A settled card completed by the API's record. A guessed ending ("decided"
- * somewhere else) takes the real outcome, where it was decided, and WHEN,
+ * A settled card completed by the API's record. An ending this browser only
+ * saw ("unknown") takes the real outcome, where it was decided, and WHEN,
  * on the server's clock, so a request the agent sends right after a decision
  * starts its own card rather than joining the decided one. An approval takes
  * its result: what the upstream actually did with it.
@@ -170,7 +172,7 @@ const withRecord = (
   outcome: ApprovalOutcome | undefined,
 ): ApprovalCard => {
   if (!outcome) return card;
-  if (card.settled === "decided") {
+  if (card.settled === "unknown") {
     return {
       ...card,
       settled: outcome.outcome,

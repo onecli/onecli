@@ -216,18 +216,17 @@ pub(crate) async fn refresh_oauth_token(
             Some((id, secret)) => (Some(id.as_str()), Some(secret.as_str())),
             None => (None, None),
         };
-        let token_url = current.get("token_endpoint").and_then(Value::as_str);
         let (access_token, expires_at, rotated) = match apps::refresh_access_token(
             config,
             &refresh_token,
             byoc_id,
             byoc_secret,
-            token_url,
+            &current,
         )
         .await
         {
             Ok(minted) => minted,
-            Err(e) if e.is::<apps::RefreshRevoked>() => {
+            Err(e) if e.is::<apps::CredentialRevoked>() => {
                 return flag_refused(tx, &connection_id, &provider, &stored).await;
             }
             Err(e) => {
@@ -278,7 +277,7 @@ async fn flag_refused(
             }
             warn!(
                 connection_id,
-                provider, "refresh token refused (invalid_grant); connection needs reconnect"
+                provider, "refresh token refused for good; connection needs reconnect"
             );
             RefreshOutcome::NeedsReconnect
         }
@@ -293,6 +292,42 @@ async fn flag_refused(
         Err(e) => {
             warn!(connection_id, provider, error = %e, "token refresh: recording needs-reconnect failed");
             RefreshOutcome::NeedsReconnect
+        }
+    }
+}
+
+/// Record that the provider refused a key-minted credential for good (a
+/// GitHub App installation that is gone, a deleted service-account key, a
+/// rotated client secret), the counterpart of [`flag_refused`] for credentials
+/// that re-mint from a long-lived key and so spend nothing under a lock.
+/// Conditional on `expected` (the ciphertext the mint read) still being
+/// stored, so a reconnect that landed meanwhile is never flagged.
+///
+/// Returns whether the refusal stands for this request: `false` only when
+/// the credential changed meanwhile, and the request then falls back like
+/// any failed mint. A failed write leaves the refusal true.
+pub(crate) async fn flag_revoked_key(
+    pool: &sqlx::PgPool,
+    connection_id: &str,
+    provider: &str,
+    expected: &str,
+    revoked: &apps::CredentialRevoked,
+) -> bool {
+    match db::mark_app_connection_reauth_required(pool, connection_id, expected).await {
+        Ok(true) => {
+            warn!(connection_id, provider, detail = %revoked.detail, "credential refused for good; connection needs reconnect");
+            true
+        }
+        Ok(false) => {
+            debug!(
+                connection_id,
+                provider, "credential refused, but it changed meanwhile; not flagging"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(connection_id, provider, detail = %revoked.detail, error = %e, "credential refused for good; recording needs-reconnect failed");
+            true
         }
     }
 }

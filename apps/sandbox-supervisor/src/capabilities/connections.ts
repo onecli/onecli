@@ -9,6 +9,7 @@ import {
 } from "@onecli/agent-protocol";
 import type { CapabilityFragment } from "../home/renderer";
 import type { PlatformToolDefinition } from "../platform-tools";
+import { pgServices } from "../databases";
 
 /** The fragment the renderer appends the connected-apps block to. */
 export const CONNECTIONS_FRAGMENT_ID = "connections";
@@ -63,8 +64,10 @@ export const connectionsFragment = (
   "records": [{"attributes": {"type": "Contact"}, "id": "<id>", "<Field>":
   "<new>"}, ...]}): one request, one approval for the whole list, and the
   card shows every record's current and new value and flags overwrites.
-  One record type and the same fields per call. For more than 200, one
-  call per 200, each tagged X-OneCLI-Batch: <new id per call>,
+  One record type per call. Each record sets only its own fields, so
+  records needing different fields still go in ONE call, never one call
+  per set of fields. For more than 200, one call per 200, each tagged
+  X-OneCLI-Batch: <new id per call>,
   X-OneCLI-Batch-Label: <task> (2 of 3), X-OneCLI-Batch-Total: 1, the next
   sent only after this one is decided. Read each record's success/errors
   in the response, report failures by name, and stop if they all failed.
@@ -85,7 +88,9 @@ export const connectionsFragment = (
   whole list (the card waits for the total it was told). The reviewer then
   sees one card per group with Approve all. Send one group's requests in
   parallel, all at once, and wait until it is decided before sending the
-  next; never one after another waiting on each approval. Before you wait,
+  next; never one after another waiting on each approval. Set a total only
+  when you send that many at once: if your calls run one at a time, use
+  ONE bulk call where the API has one, or no total. Before you wait,
   check the number you started equals the group's size (a shell while-read
   loop skips a file's last line without a trailing newline: loop over an
   array instead). When they finish, read the records back and confirm each
@@ -127,13 +132,23 @@ export const connectionsFragment = (
   for someone who wants a different account. Never ask them to connect the
   service again. Relay these links like any other below: bare, on their own
   line, and only when they point at the OneCLI dashboard.
+- credential_unavailable means you HAVE the credential but OneCLI could not
+  read its stored value: show the error's manage_url, where they re-enter
+  it. Never ask them to connect or attach it.
 - For other errors, on a 401, 403, or a JSON error such as app_not_connected:
   show the error's connect_url (or manage_url) to the person you work with as
   a bare URL on its own line — no angle brackets, no markdown link — and retry
   once they say they have connected. Legitimate connect and manage links point
   at the OneCLI dashboard, never at the service itself; if the URL looks like
   anything else, do not relay it. If the error carries no URL, point them
-  to the dashboard.`,
+  to the dashboard.
+- A task needs an app you do not hold (not under Connected apps, nor in
+  list_apps): call request_app_connection with the app's name BEFORE saying
+  it is not connected. If it is a built-in OneCLI app, show the connect (or
+  manage) URL it returns, bare on its own line: the OneCLI chat turns it
+  into a Connect button. Never offer an API key, an API token or a custom
+  connection for a built-in app. Only when it answers no_builtin_app may you
+  propose a custom connection.`,
   };
 };
 
@@ -162,6 +177,12 @@ export const connectedAppsBlock = (
   connections: readonly AgentConnectionWire[],
 ): string => {
   if (connections.length === 0) return "";
+  const databaseServices = new Map(
+    pgServices(connections).map((service) => [
+      service.connection,
+      service.name,
+    ]),
+  );
   let anyCatalog = false;
   const lines = connections.map((c) => {
     const name = displayName(c);
@@ -173,6 +194,12 @@ export const connectedAppsBlock = (
       : "";
     const host = c.host && isBareHostname(c.host) ? c.host : null;
     const who = label ? ` — account \`${label}\`` : "";
+    const service = databaseServices.get(c);
+    if (service) {
+      // A database is not an HTTP API: name the one way in. The service
+      // name is the supervisor's own (libpq-safe characters only).
+      return `- ${name}${who}: a database. Connect with \`psql "service=${service}"\` (or any PostgreSQL driver using that service); every statement is checked against your rules`;
+    }
     const base = host
       ? `- ${name}${who}: call https://${host} — the only host its credential works on`
       : `- ${name}${who}`;
@@ -296,13 +323,34 @@ export const connectionsTools: PlatformToolDefinition[] = [
     },
   },
   {
+    // Control-plane executed: the platform resolves the app against its
+    // catalog and this agent's grants, and mints the same connect / manage
+    // link the gateway's refusals carry, so the chat renders the Connect
+    // card even when no API call was made.
+    name: "request_app_connection",
+    description:
+      'Ask the user to connect a built-in OneCLI app you do not hold yet (e.g. "jira", "Confluence", "Google Calendar"). Returns connected (use it now), connect (a connectUrl to show), attach (a manageUrl to show: it exists but is off for you), or no_builtin_app (only then propose a custom connection). Call it instead of telling anyone an app is not connected.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        app: {
+          type: "string",
+          description:
+            'The app\'s name or id, e.g. "jira" or "Google Calendar".',
+        },
+      },
+      required: ["app"],
+      additionalProperties: false,
+    },
+  },
+  {
     // Control-plane executed (no `execute`): the platform validates the
     // proposal and holds it for the user, who reviews it in the chat card
     // and types the key there. There is deliberately NO argument for the
     // key: it never passes through the agent.
     name: "propose_custom_connection",
     description:
-      "Propose a custom API connection for a service that has no built-in OneCLI app (check list_apps first; if the service is a built-in app, ask the user to connect it instead). Research the service's API docs first: the exact API host, the header the key goes in, and its format. The user reviews your proposal in the OneCLI chat and enters the key there; you never see the key. Never ask the user to paste a key into the chat.",
+      "Propose a custom API connection for a service that has no built-in OneCLI app (call request_app_connection first; use this only when it answers no_builtin_app). Research the service's API docs first: the exact API host, the header the key goes in, and its format. The user reviews your proposal in the OneCLI chat and enters the key there; you never see the key. Never ask the user to paste a key into the chat.",
     inputSchema: {
       type: "object",
       properties: {

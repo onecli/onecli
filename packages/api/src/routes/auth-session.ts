@@ -214,11 +214,7 @@ export const authSessionRoutes = () => {
           !defaultWorkspace &&
           _hooks.shouldBootstrapOrg(c.req.raw, { isNewUser: !existingUser })
         ) {
-          const result = await ensureUserOrganization(
-            dbUser.id,
-            dbUser.email,
-            dbUser.name ?? undefined,
-          );
+          const result = await ensureUserOrganization(dbUser.id, dbUser.email);
           defaultWorkspace = result.workspace;
           bootstrappedOrg = result.created;
         }

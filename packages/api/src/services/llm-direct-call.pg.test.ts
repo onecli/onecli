@@ -206,7 +206,7 @@ describe.skipIf(!PROOF_URL)("server-side LLM key over real PostgreSQL", () => {
     });
     expect(outcome).toEqual({
       ok: true,
-      judgement: { ...VERDICT, model: "claude-sonnet-5" },
+      judgement: { ...VERDICT, model: "claude-sonnet-5-5" },
     });
     const [sent] = seen;
     expect(sent?.path).toBe("/v1/messages");

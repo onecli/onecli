@@ -200,6 +200,6 @@ export const proposalRefusalMessage = (refusal: ProposalRefusal): string => {
     case "llm_host":
       return "That host is an AI model provider. Its key is a model key, not a custom connection: ask the user to add it on your Models page in the OneCLI dashboard.";
     case "catalog_app":
-      return `${refusal.appName} is a built-in OneCLI app. Don't create a custom connection for it: ask the user to connect ${refusal.appName} in the OneCLI dashboard (Connections), then call list_apps.`;
+      return `${refusal.appName} is a built-in OneCLI app. Don't create a custom connection for it: call request_app_connection with "${refusal.appId}" and show the user the link it returns, then call list_apps once they have connected it.`;
   }
 };

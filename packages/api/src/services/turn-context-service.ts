@@ -14,6 +14,7 @@ import { buildMentionContext } from "./channels/mention-resolution-service";
 import { buildSentContext } from "./channels/send-message-service";
 import { buildPointOfContactNote } from "./channels/agent-reach-service";
 import { buildFailedRepliesNote } from "./channels/turn-failure-notice-service";
+import { platformJobRunsOf } from "./platform-jobs";
 import { buildContinuityBridge, buildOpenPromiseNote } from "./turn-service";
 
 const log = logger.child({ service: "turn-context" });
@@ -169,6 +170,23 @@ export const buildTurnContext = async (
     select: { createdAt: true, source: true },
   });
   const isHuman = turn !== null && !isAutomationSource(turn.source);
+  // A platform job's run gets memory plus the job's own block, composed
+  // here and never stored (platform-jobs, rule 4). Memory is the index
+  // alone: a run's stored message is platform instruction, not a person's
+  // words to retrieve against.
+  const jobRuns = turn ? platformJobRunsOf(turn.source) : undefined;
+  if (turn && jobRuns) {
+    const [memory, jobBlock] = await Promise.all([
+      buildMemoryContext(agentId, ""),
+      jobRuns.context({ conversationId, createdAt: turn.createdAt }),
+    ]);
+    return (
+      [memory, jobBlock]
+        .filter((block): block is string => block !== null)
+        .join("\n\n")
+        .slice(0, MAX_TURN_CONTEXT_CHARS) || null
+    );
+  }
 
   // The two are mirror images, and exactly one applies. A HUMAN turn needs
   // the bridge: what landed while they were away, which they may be

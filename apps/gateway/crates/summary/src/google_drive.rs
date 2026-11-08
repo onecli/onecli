@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(s.action, "Remove access to file");
         assert_eq!(s.ref_ids().count(), 0);
         let s = drive("PATCH", &format!("/drive/v3/files/{FILE_ID}"), Some("{}"));
-        assert_eq!(s.action, "PATCH request");
+        assert!(s.is_generic());
     }
 
     #[test]

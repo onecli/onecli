@@ -183,6 +183,51 @@ export const resolveAgentLlmCredential = async (
 };
 
 /**
+ * The most context, in tokens, this agent's conversations may run at given
+ * the credential it runs on, or null for no limit. Only the platform's trial
+ * credit has one (`PlatformLlmProvider.trialMaxContextTokens`); an agent on
+ * a key of its own is unlimited, and the harness still clamps every size to
+ * the model's own window. Resolved through `resolveAgentLlmCredential`, so
+ * "on the trial credit" means exactly what every other door means by it.
+ * Short-circuits with no query when no deployment limit exists (every
+ * self-host): the common case pays nothing.
+ */
+export const agentContextTokenLimit = async (
+  agentId: string,
+): Promise<number | null> => {
+  const limit = getPlatformLlm()?.trialMaxContextTokens;
+  if (limit === undefined) return null;
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      id: true,
+      workspaceId: true,
+      workspace: { select: { organizationId: true } },
+    },
+  });
+  if (!agent) return null;
+  const credential = await resolveAgentLlmCredential(
+    agent,
+    agent.workspace.organizationId,
+  );
+  return credential?.secretId === PLATFORM_LLM_SECRET_ID ? limit : null;
+};
+
+/**
+ * The context size a turn of this agent ships with: the conversation's
+ * chosen size, never above the agent's credential limit. Undefined when the
+ * conversation has no size of its own (the harness default stands).
+ */
+export const deliveredContextTokens = async (
+  agentId: string,
+  chosen: number | undefined,
+): Promise<number | undefined> => {
+  if (chosen === undefined) return undefined;
+  const limit = await agentContextTokenLimit(agentId);
+  return limit === null ? chosen : Math.min(chosen, limit);
+};
+
+/**
  * Load an agent with what the resolver needs, or null if it is not this
  * workspace's. One query, fenced in the `where` per the house rule.
  */

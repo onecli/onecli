@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   title: "Global Policy",
 };
 
-// The org-wide guardrails console — EE only (OSS has no org scope).
+// The org-wide guardrails console.
 export default function OrgPolicyPage() {
   return (
     <div className="flex flex-1 flex-col gap-6">

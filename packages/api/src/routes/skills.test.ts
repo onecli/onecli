@@ -20,6 +20,24 @@ const services = vi.hoisted(() => ({
   createSkill: vi.fn(),
   updateSkill: vi.fn(),
   deleteSkill: vi.fn(),
+  importAgentSkills: vi.fn(),
+}));
+
+// The audit rows the routes write, as the database receives them.
+const audits = vi.hoisted(() => ({
+  create: vi.fn<(args: { data: Record<string, unknown> }) => Promise<unknown>>(
+    async () => ({}),
+  ),
+}));
+
+// The zip reader is unit-tested on its own (skill-import.test.ts); here it
+// hands the route one readable skill so the import door's contract shows.
+vi.mock("../services/skill-import", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/skill-import")>()),
+  importSkillZip: async () => ({
+    skills: [{ name: "notes", description: "d", content: "c", files: [] }],
+    problems: [],
+  }),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -49,7 +67,7 @@ vi.mock("@onecli/db", () => ({
       findFirst: async ({ where }: { where: { id: string } }) =>
         where.id === "p1" ? { id: "p1" } : null,
     },
-    auditLog: { create: async () => ({}) },
+    auditLog: { create: audits.create },
   },
 }));
 
@@ -59,7 +77,9 @@ vi.mock("../services/skill-service", () => ({
   createSkill: services.createSkill,
   updateSkill: services.updateSkill,
   deleteSkill: services.deleteSkill,
+  importAgentSkills: services.importAgentSkills,
   // Real co-importers of the mocked module still need these named exports.
+  importOrgSkills: vi.fn(),
   listOrgSkills: vi.fn(),
   getOrgSkill: vi.fn(),
   createOrgSkill: vi.fn(),
@@ -218,5 +238,59 @@ describe("the workspace door", () => {
       },
     });
     expect(fenced.status).toBe(401);
+  });
+});
+
+describe("the zip import door", () => {
+  const outcome = (id: string, name: string, replaced: boolean) => ({
+    id,
+    name,
+    description: "d",
+    files: 2,
+    bytes: 10,
+    groups: { files: 1 },
+    skipped: [],
+    replaced,
+  });
+
+  it("returns each saved skill's id and audits it by id", async () => {
+    services.importAgentSkills.mockResolvedValue([
+      outcome("sk-new", "notes", false),
+      outcome("sk-held", "tone", true),
+    ]);
+    const response = await app.request("/v1/skills/import?agentId=ag-1", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ORG_KEY}`,
+        "x-workspace-id": "p1",
+        "content-type": "application/zip",
+      },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      imported: { id: string; name: string }[];
+    };
+    expect(body.imported.map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: "sk-new", name: "notes" },
+      { id: "sk-held", name: "tone" },
+    ]);
+    const rows = audits.create.mock.calls.map(([args]) => args.data);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: "create",
+        service: "skill",
+        metadata: expect.objectContaining({
+          skillId: "sk-new",
+          name: "notes",
+          agentId: "ag-1",
+          source: "zip",
+        }),
+      }),
+      expect.objectContaining({
+        action: "update",
+        metadata: expect.objectContaining({ skillId: "sk-held", name: "tone" }),
+      }),
+    ]);
   });
 });

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const todoistPermissions: AppPermissionDefinition = {
   provider: "todoist",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

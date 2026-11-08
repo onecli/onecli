@@ -37,11 +37,13 @@ export const EmptyThreadWelcome = ({
   const needsKey = models !== undefined && models.provider === null;
 
   return (
-    <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 py-10 text-center">
+    <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 py-10">
       <div className="bg-brand/10 flex size-10 items-center justify-center rounded-full">
         <Sparkles className="text-brand size-5" aria-hidden />
       </div>
-      <div>
+      {/* Only the greeting is centered. The card below is a list, and a
+          list reads from the start edge (its rows would center otherwise). */}
+      <div className="text-center">
         <p className="text-sm font-medium text-balance">
           {agentName} is ready when you are
         </p>
@@ -52,8 +54,11 @@ export const EmptyThreadWelcome = ({
         </p>
       </div>
       {/* The same first-connection picks the greeting card offers — a new
-          thread is a new thread whether or not the agent could speak in it. */}
-      <GreetingConnectCard />
+          thread is a new thread whether or not the agent could speak in it.
+          Stretched to the column so it keeps one width across states. */}
+      <div className="w-full">
+        <GreetingConnectCard variant="welcome" />
+      </div>
     </div>
   );
 };

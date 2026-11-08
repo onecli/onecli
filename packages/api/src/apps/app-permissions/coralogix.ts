@@ -1,4 +1,4 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import { toolFactory, type AppPermissionDefinition } from "./types";
 
 // Coralogix APIs (coralogix.com/docs/api-reference), paths from the v5
 // OpenAPI at `api.<domain>/mgmt/openapi/5/openapi.yaml`, plus the DataPrime
@@ -34,23 +34,7 @@ const HOST_ALIASES = [
 ];
 const MGMT = "/mgmt/openapi/*";
 
-const tool = (
-  id: string,
-  name: string,
-  description: string,
-  pathPattern: string,
-  methods: string[],
-  aliasPatterns?: string[],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  hostAliasPatterns: HOST_ALIASES,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+const tool = toolFactory(HOST, HOST_ALIASES);
 
 export const coralogixPermissions: AppPermissionDefinition = {
   provider: "coralogix",

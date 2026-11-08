@@ -14,6 +14,8 @@ import { agentRunsPath } from "@/lib/navigation";
 import { CronRow } from "./cron-row";
 import { CronDialog } from "./cron-dialog";
 import { EvalScheduleRow } from "./eval-schedule-row";
+import { SCHEDULE_GRID } from "./schedule-grid";
+import { cn } from "@onecli/ui/lib/utils";
 
 /**
  * The agent's Schedules section (step 7). Reports land in the chat the
@@ -28,7 +30,12 @@ export const SchedulesSection = () => {
   const view = useCrons(agent.id);
   // Best-effort: the eval row is extra context, so an evals failure never
   // blocks the crons list (it only leaves that row out).
-  const evalSchedule = useEvals(agent.id).data?.schedule ?? null;
+  const evalsView = useEvals(agent.id);
+  const evals = evalsView.data;
+  const evalSchedule = evals?.schedule ?? null;
+  // The newest eval run, scheduled or started by hand: its row shows it
+  // running like a cron's.
+  const latestEvalRun = evals?.runs[0] ?? null;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<AgentCron | null>(null);
 
@@ -72,8 +79,7 @@ export const SchedulesSection = () => {
         <div>
           <h2 className="text-base font-semibold">Schedules</h2>
           <p className="text-muted-foreground text-sm">
-            Tasks this agent runs on its own, on a repeating schedule or once at
-            a set time. Each run reports back to the chat the schedule was
+            Tasks the agent runs on a schedule. Results go to the chat they were
             created from.
           </p>
         </div>
@@ -86,7 +92,7 @@ export const SchedulesSection = () => {
               <Button asChild size="sm" variant="ghost">
                 <Link href={agentRunsPath(pathname, agent.id, "cron")}>
                   <History className="size-4" />
-                  View scheduled runs
+                  Run history
                 </Link>
               </Button>
             )}
@@ -117,8 +123,25 @@ export const SchedulesSection = () => {
         </Card>
       ) : (
         <div className="divide-y rounded-md border">
+          <div
+            className={cn(
+              SCHEDULE_GRID,
+              "text-muted-foreground hidden px-4 py-2 text-xs font-medium md:grid",
+            )}
+          >
+            <span>Name</span>
+            <span>When</span>
+            <span>Next run</span>
+            <span>Last run</span>
+            <span />
+          </div>
           {evalSchedule && (
-            <EvalScheduleRow agentId={agent.id} schedule={evalSchedule} />
+            <EvalScheduleRow
+              agentId={agent.id}
+              schedule={evalSchedule}
+              latestRun={latestEvalRun}
+              refetch={evalsView.refetch}
+            />
           )}
           {crons.map((cron) => (
             <CronRow

@@ -6,9 +6,8 @@ import { useOrgMembersList } from "@/hooks/use-org-members";
 
 /**
  * The policy editor's org-level chrome: directory name resolution for the
- * identities org rules target, and the org-guardrails flag the evaluation
- * explainer reads. Both editions serve the org page, so this runs everywhere;
- * the directory reads are org-admin-gated server-side.
+ * identities org rules target. Both editions serve the org page, so this runs
+ * everywhere; the directory reads are org-admin-gated server-side.
  */
 
 // Stable empty fallback: the admin-gated reads leave `data` permanently
@@ -29,7 +28,3 @@ export const useDirectoryNames = (): ((id: string) => string | undefined) => {
   }, [groups, members]);
   return useCallback((id: string) => names.get(id), [names]);
 };
-
-/** The EE editions evaluate org guardrails above workspace rules — the
- * explainer describes the two-level model. The OSS arm exports `false`. */
-export const ORG_GUARDRAILS_AVAILABLE = true;

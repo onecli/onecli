@@ -14,8 +14,9 @@
 //!
 //! 1. the refused token goes into the single-flight refresh
 //!    ([`crate::refresh`]) as `rejected`, so it is replaced exactly once
-//!    across instances however many requests were refused with it, and a
-//!    refresh-token refusal still flags the connection for reconnect;
+//!    across instances however many requests were refused with it. A
+//!    refresh-token refusal still flags the connection, and the agent is
+//!    answered `connection_needs_reconnect`;
 //! 2. the cached injection rules and connect responses that still hold the
 //!    refused token are dropped, so the next request resolves the new one;
 //! 3. a request without a body is sent once more with the new token. The
@@ -29,7 +30,9 @@
 //! token minted by the refresh flow at once (Salesforce known issue
 //! W-18029118). Unguarded, every request would spend the refresh token and be
 //! sent twice. So a refusal of the token a recovery just obtained is not
-//! recovered again for ten minutes: the 401 goes back as is.
+//! recovered again for ten minutes: the agent is answered
+//! `connection_needs_reconnect` (without flagging the connection), so it asks
+//! the user instead of retrying into the same refusal.
 
 use tracing::{info, warn};
 
@@ -130,9 +133,27 @@ pub fn is_stale(
             .is_some_and(|body| config.is_stale_token_error(&body))
 }
 
+/// What a stale-token refusal comes to.
+#[derive(Debug)]
+pub enum Recovery {
+    /// A new token: a request without a body is sent once more with it.
+    Token(String),
+    /// Only the user can fix it: the refresh token was refused (the
+    /// connection is flagged), or the provider refused even the token a
+    /// refresh just obtained (a session policy, an admin revoking sessions).
+    /// The agent is answered `connection_needs_reconnect` instead of the
+    /// provider's raw 401, so it asks the user rather than retrying. The
+    /// connection is not flagged for the second case: a policy the org
+    /// relaxes later fixes it without one.
+    Reconnect,
+    /// Nothing obtained this time (the refresh failed transiently, or this
+    /// 401 is not one recovery handles): the provider's 401 goes back as is.
+    Unavailable,
+}
+
 /// Handle a 401 that is one of the provider's stale-token refusals of
 /// `rejected`: replace it (once, across instances), drop the cached rules
-/// that still hold it, and return the new token when there is one.
+/// that still hold it, and say what the refusal comes to ([`Recovery`]).
 pub async fn recover(
     engine: &PolicyEngine,
     cache: &dyn CacheStore,
@@ -140,7 +161,7 @@ pub async fn recover(
     rejected: &str,
     organization_id: &str,
     workspace_id: &str,
-) -> Option<String> {
+) -> Recovery {
     let Recoverable {
         connection_id,
         provider,
@@ -156,7 +177,7 @@ pub async fn recover(
             provider,
             "provider refused the token a refresh just obtained; a refresh does not fix this refusal"
         );
-        return None;
+        return Recovery::Reconnect;
     }
 
     let outcome = refresh_oauth_token(
@@ -200,21 +221,21 @@ pub async fn recover(
                     RECOVERED_TOKEN_TTL_SECS,
                 )
                 .await;
-            Some(access_token)
+            Recovery::Token(access_token)
         }
         RefreshOutcome::NeedsReconnect => {
             warn!(
                 connection_id,
                 provider, "provider refused the access token and its refresh token"
             );
-            None
+            Recovery::Reconnect
         }
         _ => {
             warn!(
                 connection_id,
                 provider, "provider refused the access token; no new token was obtained"
             );
-            None
+            Recovery::Unavailable
         }
     }
 }

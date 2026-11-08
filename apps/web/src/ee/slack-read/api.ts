@@ -6,7 +6,8 @@ import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api/client";
  * `packages/api/src/ee/slack-read/service.ts` (dates as ISO strings).
  */
 
-export type ReadAudience = "anyone" | "granter_only";
+/** Per-conversation read/write decision, the Contacts tri-state. */
+export type GrantMode = "allow" | "ask" | "never";
 export type ConversationKind =
   | "channel"
   | "private_channel"
@@ -24,12 +25,18 @@ export interface SlackReadConnection {
   connected: boolean;
   available: boolean;
   profile: SlackProfile | null;
+  /** The connection carries the scopes to post as the user. */
+  canWrite: boolean;
+  /** The viewer's own Slack user id (null when not connected). */
+  slackUserId: string | null;
 }
 
 export interface MyConversation {
   ref: string;
   kind: ConversationKind;
   name: string;
+  /** DM only: the other person's Slack user id. */
+  counterpartRef: string | null;
 }
 
 export interface ReadGrant {
@@ -37,9 +44,12 @@ export interface ReadGrant {
   subjectKind: ConversationKind;
   externalRef: string;
   subjectLabel: string | null;
-  audience: ReadAudience;
+  /** DM only: the other person's Slack user id (null for older shares). */
+  counterpartRef: string | null;
+  readMode: GrantMode;
+  writeMode: GrantMode;
   grantedBy: { id: string; name: string | null; email: string };
-  /** The viewer made this grant (only they may change its audience). */
+  /** The viewer made this grant (only they may change it). */
   mine: boolean;
 }
 
@@ -60,24 +70,24 @@ export const listMyConversations = (agentId: string) =>
 export const listGrants = (agentId: string) =>
   apiGet<{ grants: ReadGrant[] }>(`${base(agentId)}/grants`);
 
+export interface GrantPatch {
+  readMode?: GrantMode;
+  writeMode?: GrantMode;
+}
+
 export const setGrant = (
   agentId: string,
   externalRef: string,
-  audience: ReadAudience,
+  patch: GrantPatch,
 ) =>
   apiPut<ReadGrant>(
     `${base(agentId)}/grants/${encodeURIComponent(externalRef)}`,
-    { audience },
+    patch,
   );
 
-export const shareMany = (
-  agentId: string,
-  externalRefs: string[],
-  audience: ReadAudience,
-) =>
+export const shareMany = (agentId: string, externalRefs: string[]) =>
   apiPost<{ grants: ReadGrant[] }>(`${base(agentId)}/grants`, {
     externalRefs,
-    audience,
   });
 
 export const deleteGrant = (agentId: string, grantId: string) =>

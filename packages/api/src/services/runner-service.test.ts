@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from "@onecli/agent-protocol";
 
 /**
  * Registration is the runner plane's front door: it is the ONE place a token
@@ -46,6 +50,7 @@ const {
   getRunnerAvailability,
   resetRunnerAvailabilityCache,
   listRunners,
+  runnerAttachmentSupport,
 } = await import("./runner-service");
 
 const CAPABILITIES = {
@@ -104,6 +109,68 @@ describe("registerRunner", () => {
     expect(mocks.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "r-existing" } }),
     );
+  });
+});
+
+describe("runnerAttachmentSupport", () => {
+  const supportFor = (capabilities: unknown) => {
+    mocks.findUnique.mockResolvedValue(
+      capabilities === undefined ? null : { capabilities },
+    );
+    return runnerAttachmentSupport("r-1");
+  };
+
+  it.each([
+    ["no runner row", undefined, false, LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE],
+    [
+      "a blob that fails the schema",
+      { attachments: true },
+      false,
+      LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+    ],
+    [
+      "attachments, no advertised bound (predates the field)",
+      { ...CAPABILITIES, attachments: true },
+      true,
+      LEGACY_RUNNER_ATTACHMENTS_PER_MESSAGE,
+    ],
+    [
+      "the current cap advertised",
+      {
+        ...CAPABILITIES,
+        attachments: true,
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
+      },
+      true,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    ],
+    [
+      "a smaller bound advertised",
+      { ...CAPABILITIES, attachments: true, maxAttachmentsPerMessage: 3 },
+      true,
+      3,
+    ],
+    [
+      "more than the control plane's cap (a newer runner)",
+      {
+        ...CAPABILITIES,
+        attachments: true,
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE + 40,
+      },
+      true,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    ],
+    [
+      "a bound without the attachments flag",
+      {
+        ...CAPABILITIES,
+        maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
+      },
+      false,
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    ],
+  ])("%s", async (_label, capabilities, supported, maxFiles) => {
+    expect(await supportFor(capabilities)).toEqual({ supported, maxFiles });
   });
 });
 

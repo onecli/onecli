@@ -20,6 +20,7 @@ import { channelProvider, isChannelProviderId } from "./registry";
 import {
   listPersonGrants,
   listSpaceGrants,
+  workspaceOwnerRefs,
   type ReachState,
 } from "./agent-reach-service";
 import {
@@ -108,7 +109,13 @@ export const channelPresencesForRender = async (
       status: true,
       identityName: true,
       integration: { select: { name: true } },
-      userTokens: { select: { _count: { select: { grants: true } } } },
+      userTokens: {
+        select: {
+          _count: {
+            select: { grants: { where: { readMode: { not: "never" } } } },
+          },
+        },
+      },
     },
     orderBy: { provider: "asc" },
     // One presence per (agent, provider) by constraint, so this cap is
@@ -252,6 +259,93 @@ const hydrateSpaceLabels = async (input: {
   );
 };
 
+/**
+ * Person profiles (name + photo), memoized in process: a profile is
+ * display-only and changes rarely, so each person costs one provider lookup
+ * per TTL, not one per page view. Only answered lookups are cached: a
+ * person with no photo is not re-asked every load, but a failed lookup (a
+ * rate limit, a dead token) is, so a transient error never hides a photo for
+ * the whole TTL. Bounded, least recently used out first. One view looks up
+ * at most PROFILE_LOOKUPS_PER_VIEW people: a long list fills in over a few
+ * views instead of bursting the provider's per-method rate limit.
+ */
+const PROFILE_TTL_MS = 6 * 60 * 60 * 1000;
+const PROFILE_CACHE_MAX = 5000;
+const PROFILE_LOOKUPS_PER_VIEW = 20;
+const profileCache = new Map<
+  string,
+  { name: string | null; avatarUrl: string | null; at: number }
+>();
+
+/**
+ * Fill each person's photo, and a name a row was saved without (e.g.
+ * decided before the bot read the profile), which is written back so a
+ * missing name costs one lookup, ever (the `hydrateSpaceLabels` rule).
+ * Best-effort throughout: a row that cannot be resolved keeps its ref and
+ * initials.
+ */
+const hydratePeople = async (input: {
+  reach: NonNullable<ReturnType<typeof channelProvider>["reach"]>;
+  people: {
+    externalRef: string;
+    label: string | null;
+    avatarUrl: string | null;
+  }[];
+  agentId: string;
+  /** The presence's cache scope and its OWN stored credentials (the bot
+   * token the person lane already reads profiles with). */
+  presenceId: string;
+  presenceCredentials: string | null;
+}): Promise<void> => {
+  const personProfile = input.reach.personProfile?.bind(input.reach);
+  if (!personProfile || input.people.length === 0) return;
+  const now = Date.now();
+  const keyOf = (ref: string) => `${input.presenceId}:${ref}`;
+  const misses = input.people.filter((person) => {
+    const hit = profileCache.get(keyOf(person.externalRef));
+    if (!hit || now - hit.at >= PROFILE_TTL_MS) return true;
+    profileCache.delete(keyOf(person.externalRef));
+    profileCache.set(keyOf(person.externalRef), hit);
+    person.avatarUrl = hit.avatarUrl;
+    person.label ||= hit.name;
+    return false;
+  });
+  if (misses.length === 0 || !input.presenceCredentials) return;
+  const credentialsJson = await getCrypto()
+    .decrypt(input.presenceCredentials)
+    .catch(() => null);
+  if (!credentialsJson) return;
+
+  await Promise.all(
+    misses.slice(0, PROFILE_LOOKUPS_PER_VIEW).map(async (person) => {
+      const profile = await personProfile({
+        credentialsJson,
+        externalRef: person.externalRef,
+      }).catch(() => null);
+      if (!profile) return;
+      if (profileCache.size >= PROFILE_CACHE_MAX) {
+        const oldest = profileCache.keys().next().value;
+        if (oldest !== undefined) profileCache.delete(oldest);
+      }
+      profileCache.set(keyOf(person.externalRef), { ...profile, at: now });
+      person.avatarUrl = profile.avatarUrl;
+      if (person.label || !profile.name) return;
+      person.label = profile.name;
+      await db.agentReachGrant
+        .updateMany({
+          where: {
+            agentId: input.agentId,
+            subjectKind: "external_user",
+            externalRef: person.externalRef,
+            OR: [{ subjectLabel: null }, { subjectLabel: "" }],
+          },
+          data: { subjectLabel: profile.name },
+        })
+        .catch(() => undefined);
+    }),
+  );
+};
+
 /** The agent fence every entry point shares — workspace-scoped, hosted-only. */
 const requireHostedAgent = async (workspaceId: string, agentId: string) => {
   const agent = await db.agent.findFirst({
@@ -294,26 +388,33 @@ export interface AgentChannelStatus {
   /** Group threads the presence is live in (direct DMs stay private). */
   groupThreads: { externalThreadId: string; createdAt: Date }[];
   /** Per-space reach: every channel the presence is in or was asked about,
-   * with its grant state. `members_only` = no grant row (today's default).
+   * with its grant state (`pending` when no decision exists yet).
    * The union of grant rows and the live thread links' spaces, so a channel
    * the agent merely sits in still gets a row the toggle can act on. */
   spaces: {
     externalRef: string;
     label: string | null;
-    state: ReachState | "members_only";
+    state: ReachState;
     decidedAt: Date | null;
     /** What the agent hears here: "all" = the channel's point of contact. */
     listen: ListenMode;
   }[];
-  /** Per-PERSON reach: everyone who knocked by direct message, with their
-   * standing. Only ever grant rows - unlike spaces there is nothing to
-   * union in, because a DM leaves no "the agent merely sits here" trace. */
-  people: {
-    externalRef: string;
-    label: string | null;
-    state: ReachState;
-    decidedAt: Date | null;
-  }[];
+  /** Per-PERSON reach: everyone who knocked by direct message or was
+   * messaged by the agent, with their one setting, plus every workspace
+   * owner (always, first). */
+  people: PersonReachRow[];
+}
+
+/** One Direct messages row: a person and their one setting. */
+interface PersonReachRow {
+  externalRef: string;
+  label: string | null;
+  state: ReachState;
+  decidedAt: Date | null;
+  /** Their profile photo (provider CDN, https), when the provider has one. */
+  avatarUrl: string | null;
+  /** A workspace owner: a fixed Always allow, not a setting. */
+  isOwner: boolean;
 }
 
 export interface AgentChannelsView {
@@ -430,22 +531,53 @@ export const getAgentChannels = async (
         const provider = p.provider as ChannelProviderId;
         // The per-space reach rows: grant rows first (they carry state and
         // label), then any live thread's space with no row yet, shown as
-        // today's default (`members_only`) so the toggle can act on it.
+        // `pending` so the toggle can act on it.
         const reach = channelProvider(provider).reach;
         const grants = reach ? await listSpaceGrants(agent.id, provider) : [];
-        // The People section's rows. Same ledger, different subject kind.
-        const people = reach
-          ? (await listPersonGrants(agent.id, provider)).map((g) => ({
-              externalRef: g.externalRef,
-              label: g.subjectLabel,
-              state: g.state,
-              decidedAt: g.decidedAt,
-            }))
+        // The Direct message rows. Same ledger, different subject kind.
+        // Every workspace OWNER with a linked account always appears, first,
+        // as a fixed Always allow (`isOwner`): not a setting, so the
+        // dashboard locks it.
+        const ownerRefs = reach
+          ? await workspaceOwnerRefs(agent.workspace.id, p.integration.id)
+          : new Set<string>();
+        const grantRows = reach
+          ? await listPersonGrants(agent.id, provider)
           : [];
+        const toPerson = (
+          externalRef: string,
+          row?: (typeof grantRows)[number],
+        ): PersonReachRow => {
+          const isOwner = ownerRefs.has(externalRef);
+          return {
+            externalRef,
+            label: row?.subjectLabel ?? null,
+            state: isOwner || !row ? "approved" : row.state,
+            decidedAt: row?.decidedAt ?? null,
+            avatarUrl: null,
+            isOwner,
+          };
+        };
+        const listed = new Set(grantRows.map((g) => g.externalRef));
+        const people = [
+          ...[...ownerRefs]
+            .filter((ref) => !listed.has(ref))
+            .map((ref) => toPerson(ref)),
+          ...grantRows.map((g) => toPerson(g.externalRef, g)),
+        ].sort((a, b) => Number(b.isOwner) - Number(a.isOwner));
+        if (reach) {
+          await hydratePeople({
+            reach,
+            people,
+            agentId: agent.id,
+            presenceId: p.id,
+            presenceCredentials: p.credentials,
+          });
+        }
         const spaces = grants.map((g) => ({
           externalRef: g.externalRef,
           label: g.subjectLabel,
-          state: g.state as ReachState,
+          state: g.state,
           decidedAt: g.decidedAt,
           listen: g.listen,
         }));
@@ -459,8 +591,7 @@ export const getAgentChannels = async (
               externalRef: space,
               label: null,
               // Not yet settled: this channel has live threads but no
-              // decision, which is exactly `pending` under the precondition
-              // model - never silently "members_only".
+              // decision, which is exactly `pending`.
               state: "pending",
               decidedAt: null,
               listen: "mentions",

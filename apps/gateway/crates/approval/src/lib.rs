@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, warn};
 
+pub mod hold;
+pub mod similar;
+
 // ── Constants ──────────────────────────────────────────────────────────
 
 /// How long a pending approval lives before it expires (seconds).
@@ -81,6 +84,12 @@ pub struct PendingApproval {
     /// its own. From the `X-OneCLI-Batch*` headers, which are never forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<ApprovalBatch>,
+    /// What "Approve similar" would also allow, when the gateway offers it
+    /// for this request (a documented update of one record, see [`similar`]).
+    /// Built by the gateway from the request itself; the decision reads it
+    /// from here, never from the client. Its key is never sent to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar: Option<similar::SimilarScope>,
     pub created_at: u64,
     pub expires_at: u64,
 }
@@ -743,6 +752,13 @@ pub fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
         "rawBody": a.raw_body,
         "app": a.app,
         "batch": a.batch,
+        // What the window covers and its bounds; its key stays inside the
+        // gateway.
+        "similar": a.similar.as_ref().map(|s| serde_json::json!({
+            "label": s.label,
+            "windowMinutes": similar::SIMILAR_WINDOW_SECS / 60,
+            "maxRequests": similar::SIMILAR_WINDOW_MAX_REQUESTS,
+        })),
         "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
         "createdAt": format_unix_ts(a.created_at),
         "expiresAt": format_unix_ts(a.expires_at),
@@ -946,6 +962,7 @@ mod tests {
             raw_body: None,
             app: None,
             batch: None,
+            similar: None,
             created_at: now,
             expires_at: now + APPROVAL_TIMEOUT_SECS,
         }
@@ -969,6 +986,7 @@ mod tests {
             raw_body: None,
             app: None,
             batch: None,
+            similar: None,
             created_at: 0,
             expires_at: 1, // expired long ago
         }

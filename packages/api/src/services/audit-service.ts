@@ -171,6 +171,21 @@ export type AuditService = (typeof AUDIT_SERVICES)[keyof typeof AUDIT_SERVICES];
 export type AuditStatus = (typeof AUDIT_STATUS)[keyof typeof AUDIT_STATUS];
 export type AuditSource = (typeof AUDIT_SOURCE)[keyof typeof AUDIT_SOURCE];
 
+/**
+ * Truthful actor representation. A platform service that acts on its own
+ * authority is a `service` actor, named by its stable identifier
+ * (`AuditServiceActor`, a kebab-case name the service's own code owns); it
+ * is never a fabricated human and never whoever ran SQL.
+ */
+export const AUDIT_ACTOR_KIND = {
+  USER: "user",
+  SERVICE: "service",
+} as const;
+export type AuditActorKind =
+  (typeof AUDIT_ACTOR_KIND)[keyof typeof AUDIT_ACTOR_KIND];
+/** A service's stable kebab-case name, e.g. `scim-provisioner`. */
+export type AuditServiceActor = `${Lowercase<string>}`;
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export interface AuditEventParams {
@@ -184,6 +199,10 @@ export interface AuditEventParams {
   source?: AuditSource;
   metadata?: Prisma.InputJsonValue;
 }
+// `actorKind` / `serviceActor` are deliberately NOT on this type: a human
+// row is always `user`, and the only writer of `service` rows is
+// `recordServiceAuditEvent`, so no `withAudit` / `recordAuditEvent` caller
+// can label a human action as a service's or the reverse.
 
 const log = logger.child({ component: "audit" });
 
@@ -271,4 +290,55 @@ export const recordAuditEvent = async (
     },
     options.failClosed,
   );
+};
+
+/**
+ * Record an audit event performed by a platform SERVICE, not a person.
+ * The row's required user columns are filled
+ * with the organization owner, the org's fixed-point identity (the SCIM
+ * precedent), and `actorKind = service` + `serviceActor` make the actual
+ * actor unambiguous to every reader. Without an owner there is no identity
+ * the FK may name and the event is dropped, logged, never forged.
+ */
+export const recordServiceAuditEvent = async (
+  tx: Prisma.TransactionClient,
+  params: Omit<
+    AuditEventParams,
+    "userId" | "userEmail" | "actorKind" | "serviceActor" | "status"
+  > & {
+    organizationId: string;
+    serviceActor: AuditServiceActor;
+    status?: AuditStatus;
+  },
+): Promise<void> => {
+  const owner = await tx.organizationMember.findFirst({
+    where: { organizationId: params.organizationId, role: "owner" },
+    select: { userId: true, userEmail: true },
+  });
+  if (!owner) {
+    log.error(
+      {
+        organizationId: params.organizationId,
+        serviceActor: params.serviceActor,
+      },
+      "service audit event dropped: organization has no owner to anchor the row",
+    );
+    return;
+  }
+  const { metadata, source = AUDIT_SOURCE.APP, status } = params;
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      organizationId: params.organizationId,
+      action: params.action,
+      service: params.service,
+      serviceActor: params.serviceActor,
+      userId: owner.userId,
+      userEmail: owner.userEmail,
+      actorKind: AUDIT_ACTOR_KIND.SERVICE,
+      status: status ?? AUDIT_STATUS.SUCCESS,
+      source,
+      metadata: metadata ?? Prisma.JsonNull,
+    },
+  });
 };

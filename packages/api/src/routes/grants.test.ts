@@ -23,6 +23,9 @@ const services = vi.hoisted(() => ({
   listAgents: vi.fn(),
 }));
 
+/** Every audit row the routes write, in order. */
+const auditCreate = vi.hoisted(() => vi.fn(async () => ({})));
+
 vi.mock("@onecli/db", () => ({
   Prisma: {},
   db: {
@@ -47,7 +50,7 @@ vi.mock("@onecli/db", () => ({
       findFirst: async ({ where }: { where: { id: string } }) =>
         where.id === "p1" ? { id: "p1" } : null,
     },
-    auditLog: { create: async () => ({}) },
+    auditLog: { create: auditCreate },
   },
 }));
 
@@ -91,6 +94,7 @@ const GRANTS = {
 
 beforeEach(() => {
   for (const fn of Object.values(services)) fn.mockReset();
+  auditCreate.mockClear();
   services.getAgentGrants.mockResolvedValue(GRANTS);
   services.setConnectionGrant.mockResolvedValue({
     grants: GRANTS,
@@ -331,5 +335,227 @@ describe("GET /v1/agents include projection", () => {
       headers: AUTH,
     });
     expect(res.status).toBe(422);
+  });
+});
+
+describe("connection grant writes, from either side", () => {
+  // The agent side (/v1/agents/:agentId/grants/connections/:connectionId) and
+  // the connection side (/v1/connections/:connectionId/grants/agents/:agentId)
+  // are the same write: the same service call, the same response, the same
+  // audit row. Each case runs against both paths.
+  const SIDES = [
+    ["agent side", "/v1/agents/a1/grants/connections/c1"],
+    ["connection side", "/v1/connections/c1/grants/agents/a1"],
+  ] as const;
+
+  const auditRow = (action: string, metadata: Record<string, unknown>) => ({
+    data: {
+      workspaceId: "p1",
+      userId: "user-1",
+      userEmail: "admin@example.com",
+      service: "grant",
+      source: "api",
+      action,
+      status: "success",
+      metadata,
+    },
+  });
+
+  const put = (path: string, body: unknown, headers = AUTH) =>
+    app.request(path, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  describe.each(SIDES)("%s", (_side, path) => {
+    it("PUT without auth is 401 and writes nothing", async () => {
+      const res = await app.request(path, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ access: "full" }),
+      });
+      expect(res.status).toBe(401);
+      expect(services.setConnectionGrant).not.toHaveBeenCalled();
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("PUT for a workspace outside the caller's org is refused and writes nothing", async () => {
+      const res = await put(
+        path,
+        { access: "full" },
+        { ...AUTH, "x-workspace-id": "other-org-ws" },
+      );
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+      expect(services.setConnectionGrant).not.toHaveBeenCalled();
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("PUT with an invalid body is 422 and writes nothing", async () => {
+      const res = await put(path, { access: "custom", allow: [], ask: [] });
+      expect(res.status).toBe(422);
+      expect(await res.json()).toMatchObject({
+        error: {
+          type: "validation_error",
+          message: expect.stringContaining("detach instead"),
+        },
+      });
+      expect(services.setConnectionGrant).not.toHaveBeenCalled();
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("PUT with a body that is not JSON is 422 and writes nothing", async () => {
+      const res = await app.request(path, {
+        method: "PUT",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: "{not json",
+      });
+      expect(res.status).toBe(422);
+      expect(services.setConnectionGrant).not.toHaveBeenCalled();
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("PUT returns the grants and audits the write, resources preserved", async () => {
+      const res = await put(path, { access: "full" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(GRANTS);
+      expect(services.setConnectionGrant).toHaveBeenCalledWith(
+        SCOPE,
+        "a1",
+        "c1",
+        { access: "full" },
+        "user-1",
+      );
+      expect(auditCreate.mock.calls).toEqual([
+        [
+          auditRow("update", {
+            agentId: "a1",
+            connectionId: "c1",
+            access: "full",
+            resources: "preserved",
+            changed: true,
+            ruleIds: ["r1"],
+          }),
+        ],
+      ]);
+    });
+
+    it("PUT audits a cleared resources restriction", async () => {
+      services.setConnectionGrant.mockResolvedValueOnce({
+        grants: GRANTS,
+        changed: false,
+        ruleIds: [],
+        generation: 4,
+      });
+      const res = await put(path, { access: "default", resources: null });
+      expect(res.status).toBe(200);
+      expect(services.setConnectionGrant).toHaveBeenCalledWith(
+        SCOPE,
+        "a1",
+        "c1",
+        { access: "default", resources: null },
+        "user-1",
+      );
+      expect(auditCreate.mock.calls).toEqual([
+        [
+          auditRow("update", {
+            agentId: "a1",
+            connectionId: "c1",
+            access: "default",
+            resources: "cleared",
+            changed: false,
+            ruleIds: [],
+          }),
+        ],
+      ]);
+    });
+
+    it("PUT audits a set resources restriction, never its values", async () => {
+      const custom = {
+        access: "custom",
+        allow: ["t"],
+        ask: [],
+        resources: { repositories: ["acme/secret-repo"] },
+      };
+      const res = await put(path, custom);
+      expect(res.status).toBe(200);
+      expect(services.setConnectionGrant).toHaveBeenCalledWith(
+        SCOPE,
+        "a1",
+        "c1",
+        custom,
+        "user-1",
+      );
+      expect(auditCreate.mock.calls).toEqual([
+        [
+          auditRow("update", {
+            agentId: "a1",
+            connectionId: "c1",
+            access: "custom",
+            resources: "set",
+            changed: true,
+            ruleIds: ["r1"],
+          }),
+        ],
+      ]);
+    });
+
+    it("PUT maps a service refusal to its status and writes no audit row", async () => {
+      const { ServiceError } = await import("../services/errors");
+      services.setConnectionGrant.mockRejectedValueOnce(
+        new ServiceError("NOT_FOUND", "Connection not found"),
+      );
+      const res = await put(path, { access: "full" });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({
+        error: { message: "Connection not found" },
+      });
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("DELETE detaches with an empty 204 and audits the removal", async () => {
+      services.removeConnectionGrant.mockResolvedValueOnce({
+        grants: GRANTS,
+        changed: false,
+        ruleIds: ["ignored"],
+        generation: 3,
+      });
+      const res = await app.request(path, { method: "DELETE", headers: AUTH });
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+      expect(services.removeConnectionGrant).toHaveBeenCalledWith(
+        SCOPE,
+        "a1",
+        "c1",
+        "user-1",
+      );
+      expect(auditCreate.mock.calls).toEqual([
+        [
+          auditRow("delete", {
+            agentId: "a1",
+            connectionId: "c1",
+            changed: false,
+          }),
+        ],
+      ]);
+    });
+
+    it("DELETE without auth is 401 and writes nothing", async () => {
+      const res = await app.request(path, { method: "DELETE" });
+      expect(res.status).toBe(401);
+      expect(services.removeConnectionGrant).not.toHaveBeenCalled();
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
+
+    it("DELETE maps a service refusal to its status and writes no audit row", async () => {
+      const { ServiceError } = await import("../services/errors");
+      services.removeConnectionGrant.mockRejectedValueOnce(
+        new ServiceError("NOT_FOUND", "Agent not found"),
+      );
+      const res = await app.request(path, { method: "DELETE", headers: AUTH });
+      expect(res.status).toBe(404);
+      expect(auditCreate).not.toHaveBeenCalled();
+    });
   });
 });

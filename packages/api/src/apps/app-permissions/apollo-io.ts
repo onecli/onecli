@@ -11,6 +11,7 @@ const HOST = "api.apollo.io";
 
 export const apolloIoPermissions: AppPermissionDefinition = {
   provider: "apollo-io",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

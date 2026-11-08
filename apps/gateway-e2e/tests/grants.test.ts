@@ -168,6 +168,42 @@ describe("grant-driven injection (attach-model step 7)", () => {
   );
 
   scenario(
+    "a granted key that cannot be read answers credential_unavailable, never access_restricted",
+    async (cx) => {
+      // The agent HAS the key; its stored value just cannot be decrypted (a
+      // rotated encryption key, a corrupted row). "Attach the key to this
+      // agent" would send the person to a grant they already hold.
+      const upstream = await cx.upstream();
+      upstream.respond({ status: 401, body: '{"error":"missing api key"}' });
+      await cx.seed({
+        grantAll: true,
+        secrets: [
+          { type: "anthropic", hostPattern: "127.0.0.1", value: "sk-ant-e2e" },
+        ],
+      });
+      await cx.db.prisma.secret.update({
+        where: { id: `${cx.ids.workspace}-sec-0` },
+        data: { encryptedValue: "AAAA:BBBB:CCCC" },
+      });
+      const gw = await cx.startGateway();
+
+      const res = await throughProxy(gw.origin, {
+        url: upstream.url("/v1/messages"),
+        token: cx.ids.agentToken,
+      });
+
+      expect(res.status).toBe(401);
+      const body = res.json() as { error: string; manage_url: string };
+      expect(body.error).toBe("credential_unavailable");
+      expect(body.manage_url).toBe(
+        `${GATEWAY_APP_URL}/w/${cx.ids.workspace}/agents/${cx.ids.agent}/models`,
+      );
+      const seen = await upstream.waitForRequests(1);
+      expect(seen[0]?.header("x-api-key")).toBeUndefined();
+    },
+  );
+
+  scenario(
     "a grant-less agent resolves no app connections — ambiguity included",
     async (cx) => {
       await cx.seed({

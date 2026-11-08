@@ -42,6 +42,7 @@ export const useDesktopSession = (agentId: string, agentName: string) => {
   }, [take]);
 
   const onStop = useCallback(() => {
+    view.current?.cancelClipboard();
     release.mutate(undefined, {
       onSuccess: () => toast.success(`${agentName} is back on it.`),
       onError: () => toast.error("Couldn’t stop. Try again."),

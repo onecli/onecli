@@ -129,14 +129,14 @@ const SECRET = "sk-e2e-deny-default";
 
 /**
  * The Default Rule is terminal only under the `enforce_deny` carve —
- * `has_injections && !is_llm_host` (`policy_engine/types.rs:106`). The rule
+ * `has_injections && !is_llm_host` (`policy-engine/src/types.rs`). The rule
  * itself is identical in both tests; only whether a credential was injected
  * differs, which is the entire carve.
  *
  * Nothing else in the repo covers the wiring: the corpus proves the logic given
- * a `PolicyRequest`, but `has_injections` is populated at `forward.rs:200`, and
- * if that ever went false every Default-Rule Block would stop enforcing while
- * every other test stayed green.
+ * a `PolicyRequest`, but `has_injections` is populated in `forward.rs`
+ * (`rules.injects()`), and if that ever went false every Default-Rule Block
+ * would stop enforcing while every other test stayed green.
  */
 const DEFAULT_DENY_RULE = {
   name: "org-default-deny",
@@ -190,13 +190,13 @@ describe("deny-by-default", () => {
 });
 
 /**
- * A `body contains` condition, which only the EE engine evaluates.
+ * A `body contains` condition.
  *
- * This pair discriminates three distinct failures at once, which is why both
- * halves are needed: if `needs_body_buffer` (`ee/policy_engine/enforce.rs:37`)
- * stops requesting a buffer the matcher sees `None` and never matches, so the
- * block half fails; if the OSS no-op `condition_match` is compiled in by
- * mistake every condition matches unconditionally, so the allow half fails.
+ * This pair discriminates distinct failures, which is why both halves are
+ * needed: if `needs_body_buffer` (`policy-engine/src/enforce.rs`) stops
+ * requesting a buffer the matcher sees no body and never matches, so the block
+ * half fails; if condition matching ever matched unconditionally, the allow
+ * half fails.
  */
 const CONDITION_WORLD = {
   rules: [

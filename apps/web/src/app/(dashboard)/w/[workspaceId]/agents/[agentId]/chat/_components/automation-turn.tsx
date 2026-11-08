@@ -2,6 +2,7 @@
 
 import {
   AlarmClock,
+  Brain,
   CalendarClock,
   MessagesSquare,
   Webhook,
@@ -31,6 +32,9 @@ const AUTOMATION_ICON: Record<AutomationSource, LucideIcon> = {
   // agent, so the two-bubbles mark - the same family the Contacts page uses
   // for a pair conversation.
   peer_task: MessagesSquare,
+  // Never rendered (a review delivers nothing); the Memory page's icon, for
+  // exhaustiveness.
+  memory_review: Brain,
 };
 
 export const AutomationTurnHeader = ({

@@ -38,9 +38,10 @@ import {
   LIBRARY_SYNC_BUDGET_BYTES,
   bumpHomeForAgent,
   bumpHomeForAgents,
-  libraryManifestBytes,
   librarySyncBytes,
+  skillManifestBytes,
 } from "./home-sync-service";
+import { cleanSkillDescription } from "../validations/skills";
 
 const log = logger.child({ component: "skill-library" });
 
@@ -880,7 +881,8 @@ const parseSkipped = (value: Prisma.JsonValue | null): SkippedFile[] =>
 const toLibraryView = (row: LibraryRow): LibrarySkillView => ({
   id: row.id,
   name: row.name,
-  description: row.description,
+  // Read clean too: rows stored before the frontmatter reader cleaned.
+  description: cleanSkillDescription(row.description),
   plugin: row.plugin,
   path: row.path,
   commitSha: row.commitSha,
@@ -949,7 +951,7 @@ const fetchFolder = async (
 /** What a fetched folder costs an agent's home sync. */
 const costOf = (name: string, files: FetchedSkillFile[]) => ({
   syncBytes: librarySyncBytes(name, files),
-  manifestBytes: libraryManifestBytes(
+  manifestBytes: skillManifestBytes(
     name,
     files.map((f) => f.path),
   ),
