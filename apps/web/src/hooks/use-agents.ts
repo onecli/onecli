@@ -13,6 +13,7 @@ import type {
 } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { squareCrop } from "@/lib/agents/square-crop";
+import { agentFaceFile } from "@/lib/agents/agent-faces";
 import { deleteAgent, renameAgent } from "@/lib/actions/agents";
 import { invalidateGatewayCache } from "@/lib/api/cache";
 
@@ -120,6 +121,24 @@ export const useCreateHostedAgent = () => {
       invalidateGatewayCache();
     },
   });
+};
+
+/**
+ * Give a just-created agent the picture picked in the New agent dialog.
+ * Best effort and silent: the agent already exists, and a failed upload only
+ * leaves the default mark, which the agent header can change at any time.
+ * `workspaceId` is for callers outside a workspace URL (onboarding): without
+ * it the upload carries no workspace and is refused.
+ */
+export const useSetStarterFace = () => {
+  const qc = useQueryClient();
+  return (agentId: string, face: number, workspaceId?: string) => {
+    void agentFaceFile(face)
+      .then(squareCrop)
+      .then((file) => agents.uploadImage(agentId, file, { workspaceId }))
+      .then(() => qc.invalidateQueries({ queryKey: queryKeys.agents.root() }))
+      .catch(() => undefined);
+  };
 };
 
 export const useDeleteAgent = () => {
@@ -270,10 +289,11 @@ export const useUpdateAgentImage = () => {
 
 /**
  * "Restart agent": every conversation starts fresh and the sandbox stops.
- * Only the agent list is invalidated (it carries the status pill). The
- * conversations namespace is deliberately left alone: its direct-thread key
- * is backed by a PUT that must never be swept, and the open thread's turns
- * poll already picks up the turns the restart ended.
+ * Only the agents namespace is invalidated (the machine's status, which the
+ * restart stops, reads under it). The conversations namespace is
+ * deliberately left alone: its direct-thread key is backed by a PUT that
+ * must never be swept, and the open thread's turns poll already picks up
+ * the turns the restart ended.
  */
 export const useRestartAgent = () => {
   const qc = useQueryClient();

@@ -11,6 +11,7 @@ export default function OrgPolicyPage() {
   return (
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
+        character="cloud-wait"
         title="Global Policy"
         description="These guardrails apply to every workspace in your organization. The strictest matching rule decides each request."
       />

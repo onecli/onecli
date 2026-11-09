@@ -68,6 +68,14 @@ const isPageLoad = (method: string): boolean =>
   method === "GET" || method === "HEAD";
 
 /**
+ * The header Next stamps on a server-function call, which it POSTs to the
+ * page the caller is on. The sign-in and sign-up screens make one (the
+ * landing lookup that sends a new session straight to its agent), and that
+ * POST is the dashboard's own business: forwarded, the api answers 404.
+ */
+const SERVER_FUNCTION_HEADER = "next-action";
+
+/**
  * The api shares its path namespace with the dashboard's pages under
  * `/auth`: better-auth answers `POST /auth/reset-password` while the
  * dashboard renders `GET /auth/reset-password`. Every edge in front of a
@@ -83,10 +91,12 @@ const isPageLoad = (method: string): boolean =>
  * Only the exact page paths are forwarded, never their subroutes: a
  * subroute under a page (`/auth/login/sso`) is also a dashboard page, and
  * the api's own `/auth/reset-password/<token>` is not a page at all (it is
- * routed to the api by `isProxiedApiPath` before this is consulted).
+ * routed to the api by `isProxiedApiPath` before this is consulted). Nor is
+ * a server-function call, which the page itself answers.
  */
 const apiFormSubmitOnPagePath = (request: NextRequest): URL | null => {
   if (IS_CLOUD || isPageLoad(request.method)) return null;
+  if (request.headers.has(SERVER_FUNCTION_HEADER)) return null;
   const { pathname } = request.nextUrl;
   if (!WEB_AUTH_PAGES.includes(pathname)) return null;
   const target = new URL(getApiInternalUrl());

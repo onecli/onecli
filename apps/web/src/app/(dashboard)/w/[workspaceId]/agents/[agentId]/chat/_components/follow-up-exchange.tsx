@@ -9,9 +9,9 @@ import {
   isJoiningTurn,
   isPlatformAuthoredTurn,
 } from "@/lib/chat/turns";
+import { useWasLive } from "@/lib/chat/use-was-live";
 import { AgentAnswer } from "./agent-answer";
 import { AutomationTurnHeader } from "./automation-turn";
-import { NarrationText } from "./narration-text";
 import { originLabel } from "./origin-label";
 import { SendNowAction } from "./send-now-action";
 import { UserBubble } from "./user-bubble";
@@ -61,6 +61,9 @@ export const FollowUpExchange = ({
 }) => {
   const liveReply =
     targetActive && rendered?.liveText.trim() ? rendered.liveText : "";
+  const replyText = rendered?.text || liveReply;
+  // Watched while the run worked: its reply arrives (flows in), even whole.
+  const watched = useWasLive(targetActive);
   const joining = isJoiningTurn(followUp);
   return (
     <>
@@ -83,6 +86,7 @@ export const FollowUpExchange = ({
           origin={originLabel(followUp.source)}
           conversationId={followUp.conversationId}
           attachments={followUp.attachments}
+          sentAt={followUp.createdAt}
           // Steering into the live run: received, being folded in. The hint
           // drops once the run consumes it (`joined`): the quiet mark's whole
           // lifetime is the in-between.
@@ -100,16 +104,17 @@ export const FollowUpExchange = ({
             })}
         />
       )}
-      {rendered?.text ? (
-        <Message align="start">
+      {/* One element from the reply's first streamed word to its stored
+          text: the draft settles in place, never a swap. */}
+      {replyText ? (
+        <Message align="start" className="group/msg">
           <MessageContent className="min-w-0">
-            <AgentAnswer text={rendered.text} />
-          </MessageContent>
-        </Message>
-      ) : liveReply ? (
-        <Message align="start">
-          <MessageContent className="min-w-0">
-            <NarrationText text={liveReply} live />
+            <AgentAnswer
+              text={replyText}
+              draft={!rendered?.text}
+              live={watched}
+              sentAt={followUp.finishedAt}
+            />
           </MessageContent>
         </Message>
       ) : null}

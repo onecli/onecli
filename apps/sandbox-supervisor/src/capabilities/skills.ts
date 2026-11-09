@@ -55,7 +55,9 @@ as loose files — a skill outside ${skillsDir}/ is invisible to the platform
 and does not survive this machine — unless the person explicitly asks for a
 file at some other location. Organization skills are managed by the people
 you work with in the dashboard; creating your own skill with the same name
-overrides one for you.`,
+overrides one for you. When a person asks you to change one of YOUR skills,
+change it yourself with skill_update (edits for a long skill) rather than
+sending them text to paste.`,
 });
 
 export const skillsTools: PlatformToolDefinition[] = [
@@ -103,7 +105,7 @@ export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_update",
     description:
-      "Update one of your own agent skills by name: description, content, or enabled (false pauses it — its files leave your skills directory until re-enabled). Organization skills are managed in the dashboard by the people you work with.",
+      "Update one of your own agent skills by name: description, enabled (false pauses it — its files leave your skills directory until re-enabled), or its body. Change the body IN PLACE with edits (each find must match exactly one spot in the current body, copied exactly) and/or append (added at the end): this works on a skill of any length and sends only the change, so prefer it. content replaces the whole body and suits only a short skill. Organization skills are managed in the dashboard by the people you work with.",
     inputSchema: {
       type: "object",
       properties: {
@@ -117,9 +119,39 @@ export const skillsTools: PlatformToolDefinition[] = [
           description: "New one-line when-it-applies description.",
           maxLength: 1024,
         },
+        edits: {
+          type: "array",
+          description:
+            "Changes in place, applied in order. Each find must occur exactly once in the body as the previous edit left it; nothing is saved if any edit misses.",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              find: {
+                type: "string",
+                description: "Exact text from the current body.",
+                maxLength: 24_000,
+              },
+              replace: {
+                type: "string",
+                description: "What replaces it (empty deletes it).",
+                maxLength: 24_000,
+              },
+            },
+            required: ["find", "replace"],
+            additionalProperties: false,
+          },
+        },
+        append: {
+          type: "string",
+          description: "Markdown added at the end of the body.",
+          maxLength: 24_000,
+        },
         content: {
           type: "string",
-          description: "New Markdown body.",
+          description:
+            "The whole new Markdown body (not with edits or append). For a long skill use edits instead.",
           maxLength: 24_000,
         },
         enabled: {

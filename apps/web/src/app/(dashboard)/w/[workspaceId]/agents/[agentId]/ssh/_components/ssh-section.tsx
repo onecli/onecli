@@ -19,7 +19,13 @@ import { SshConnectSteps } from "./ssh-connect-steps";
  * entry is simply absent, so the quiet empty state below is reachable only
  * by hand-typed URL.
  */
-export const SshSection = () => {
+export const SshSection = ({
+  /** The block heading. Off on the merged Agent settings page, which
+   *  titles the block itself. */
+  heading = true,
+}: {
+  heading?: boolean;
+} = {}) => {
   const agent = useAgentPageAgent();
   const instance = useInstance();
   const mint = useMintSshCertificate();
@@ -44,7 +50,7 @@ export const SshSection = () => {
   return (
     <div className="max-w-2xl space-y-6">
       <div>
-        <h2 className="text-base font-semibold">SSH</h2>
+        {heading && <h2 className="text-base font-semibold">SSH</h2>}
         <p className="text-muted-foreground text-sm">
           Open a shell on this agent&apos;s computer with the tools you already
           use: ssh, scp, sftp, or VS Code Remote SSH. Your private key never

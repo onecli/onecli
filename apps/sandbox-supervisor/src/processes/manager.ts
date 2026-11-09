@@ -51,7 +51,7 @@ export const MAX_WATCHES_PER_PROCESS = 3;
  * nothing but its own row. */
 export const MAX_OBSERVED_TASKS = 20;
 /** In-memory interleaved stdout+stderr ring, chars (≈ the 64k result cap). */
-export const TAIL_BUFFER_CHARS = 64_000;
+const TAIL_BUFFER_CHARS = 64_000;
 /** The rolling window a pattern is matched against (joined with each chunk,
  * so a match split across chunk boundaries is still seen). */
 const PATTERN_WINDOW_CHARS = 4_096;

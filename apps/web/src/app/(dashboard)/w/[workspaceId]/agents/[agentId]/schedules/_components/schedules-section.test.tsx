@@ -321,7 +321,7 @@ describe("the eval schedule", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]).toHaveAttribute(
       "href",
-      "/w/ws-1/activity?tab=runs&agent=ag-1&view=cron",
+      "/w/ws-1/agents/ag-1/activity?view=cron",
     );
   });
 

@@ -378,8 +378,8 @@ const RecordSkeleton = () => (
         <Skeleton className="h-4 w-64 max-w-full" />
       </div>
       <div className="mt-6 flex gap-3 border-t px-6 py-4">
-        <Skeleton className="h-9 w-36" />
-        <Skeleton className="h-9 w-32" />
+        <Skeleton className="h-8 w-36" />
+        <Skeleton className="h-8 w-32" />
       </div>
     </div>
   </Frame>

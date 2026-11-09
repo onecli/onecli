@@ -341,8 +341,9 @@ export const notifyOwnersOfFailedTurn = async (
  * already know about:
  *  - the conversation's OWN failures (the person re-asking in the thread
  *    that failed them should hear the agent acknowledge the miss);
- *  - in a workspace OWNER's direct thread with the agent, also the agent's
- *    other channel failures, by where, when and why: the owner is the
+ *  - in a workspace OWNER's private thread with the agent (their direct
+ *    thread, or a DM thread of theirs), also the agent's other channel
+ *    failures, by where, when and why: the owner is the
  *    alert's audience, so an owner who answers the alert in that DM ("what
  *    happened in #ops?") gets an agent that knows. Never their words: the
  *    owner already has them in the alert, and someone else's text has no
@@ -363,14 +364,13 @@ export const buildFailedRepliesNote = async (
   const reader = await db.conversation.findFirst({
     where: { id: conversationId, agentId },
     select: {
-      direct: true,
       userId: true,
       agent: { select: { workspaceId: true } },
     },
   });
   if (!reader) return null;
   const ownersThread =
-    reader.direct && reader.userId !== null
+    reader.userId !== null
       ? (await db.workspaceAccess.findFirst({
           where: {
             workspaceId: reader.agent.workspaceId,

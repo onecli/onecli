@@ -1,8 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-// The legacy last resort: lib/env.ts's defaulted APP_URL. Pinned here so the
-// tests below assert against a known value rather than the ambient environment.
-vi.mock("./env", () => ({ APP_URL: "http://localhost:10254" }));
+import { afterEach, describe, expect, it } from "vitest";
 
 import { dashboardUrl } from "./dashboard-url";
 

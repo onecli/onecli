@@ -1,4 +1,5 @@
 import { db } from "@onecli/db";
+import { escapeSlackText, postEphemeral } from "@onecli/channels/slack";
 import {
   ingestDirectMessage,
   ingestGroupMessage,
@@ -12,13 +13,28 @@ import {
 } from "../../channel-ingestion-service";
 import {
   markPresenceRemoved,
+  noteOutboundFailure,
   revokePresenceUserTokens,
 } from "../../agent-channel-service";
 import {
   attachFollowUpReceipt,
   attachTurnReceipt,
 } from "../../turn-receipt-service";
+import { decryptCached } from "../../channel-decrypt-cache";
+import {
+  MAX_PERSON_TURNS_PER_AGENT,
+  personTurnsAhead,
+} from "../../../due-work";
+import { parseSlackPresenceCredentials } from "./types";
 import { interpretSlackEvent, type SlackDoorCall } from "./interpret";
+import {
+  directThreadId,
+  groupThreadId,
+  messageByTs,
+  type SlackHistoryMessage,
+} from "@onecli/channels/slack";
+import { isPlainReply } from "./own-replies";
+import { reactionNote } from "./reaction";
 import { isNoReply } from "@onecli/agent-protocol/text";
 import { resolveLlmCallKey } from "../../../llm-direct-call";
 import {
@@ -43,7 +59,9 @@ export type SlackDispatchResult =
   | { kind: "ignored"; reason: string }
   | {
       kind: "message";
-      call: Extract<SlackDoorCall, { door: "direct" | "group" }>;
+      call:
+        | Extract<SlackDoorCall, { door: "direct" | "group" }>
+        | ReactionReply;
       outcome: IngestOutcome;
     }
   | {
@@ -56,6 +74,15 @@ export type SlackDispatchResult =
       call: Extract<SlackDoorCall, { door: "stop" }>;
       outcome: SessionStopOutcome;
     };
+
+/** A reaction note that reached the DM or joined-thread door. Only the
+ * reply address rides it: nothing was typed, so it has no text, files or
+ * message of its own to put a receipt on. */
+interface ReactionReply {
+  door: "reaction";
+  replyChannel: string;
+  replyThreadTs: string | null;
+}
 
 export const dispatchSlackEvent = async (input: {
   presenceId: string;
@@ -70,6 +97,8 @@ export const dispatchSlackEvent = async (input: {
   if (call.door === "ignore") {
     return { kind: "ignored", reason: call.reason };
   }
+
+  if (call.door === "reaction") return ingestReaction(input, call);
 
   // No `email` is threaded through: the ingestion doors resolve the speaker
   // control-plane-side (existing link, else a provider-verified lookup with
@@ -149,10 +178,11 @@ export const dispatchSlackEvent = async (input: {
       externalThreadId: call.externalThreadId,
       text: call.text,
       files: call.files,
-      // The DM thread this was typed in, when it was typed in one. The
-      // conversation stays the DM's single row; only the answer's address
-      // narrows to the thread.
+      // The DM thread this was typed in, when it was typed in one: the
+      // answer's address, and (`threadExternalId`) the thread's own
+      // conversation, run beside the DM's top level.
       sourceThreadId: call.replyThreadTs,
+      threadExternalId: call.threadExternalId,
       eventId: input.eventId,
     });
     receiptForAcceptedTurn(input.presenceId, call, outcome);
@@ -227,6 +257,7 @@ const receiptForAcceptedTurn = (
     return;
   }
   if (outcome.kind !== "turn" || outcome.turn.errorCode) return;
+  void noteQueuedBehindCap(presenceId, call, outcome.turn.id);
   void attachTurnReceipt({
     presenceId,
     turnId: outcome.turn.id,
@@ -259,6 +290,49 @@ const receiptForAcceptedTurn = (
 };
 
 /**
+ * "QUEUED BEHIND N": a new turn the per-agent cap will hold gets one short
+ * private note (an ephemeral, in the thread the person typed in) saying
+ * so, beside its loader. Without it, a thread opened while the agent has
+ * three person turns going looks received (the loader is up) yet nothing
+ * moves for minutes, which reads as ignored: the exact silence this
+ * feature exists to end. Private because it is bookkeeping for the one
+ * who asked, not an answer the room needs; said once, at accept, because
+ * the position changes as turns finish and a running tally would be noise.
+ *
+ * Detached and best-effort like the receipt: a refused post costs the
+ * note, never the turn. A dead credential still flips the presence.
+ */
+const noteQueuedBehindCap = async (
+  presenceId: string,
+  call: Extract<SlackDoorCall, { door: "direct" | "group" }>,
+  turnId: string,
+): Promise<void> => {
+  try {
+    const ahead = await personTurnsAhead(turnId);
+    if (ahead < MAX_PERSON_TURNS_PER_AGENT) return;
+    const presence = await db.agentChannel.findUnique({
+      where: { id: presenceId },
+      select: { credentials: true },
+    });
+    const botToken = await botTokenOf(presence?.credentials);
+    if (!botToken) return;
+    await postEphemeral(botToken, {
+      channel: call.replyChannel,
+      user: call.externalUserId,
+      ...(call.replyThreadTs && { threadTs: call.replyThreadTs }),
+      text: escapeSlackText(queuedBehindText(ahead)),
+    });
+  } catch (err) {
+    void noteOutboundFailure(presenceId, err);
+    log.info({ err: String(err), turnId }, "queued-behind note skipped");
+  }
+};
+
+/** The note's one line. Exported for the test that pins the copy. */
+export const queuedBehindText = (ahead: number): string =>
+  `Got it. I'm on ${ahead} other ${ahead === 1 ? "task" : "tasks"} right now, so this one is queued and starts when one finishes.`;
+
+/**
  * `app_mention` events always pass (they are addressed to the agent). A plain
  * thread message passes only when the thread is already linked.
  */
@@ -268,16 +342,7 @@ const isMentionOrJoinedThread = async (
 ): Promise<boolean> => {
   const type = (input.event as { type?: string }).type;
   if (type === "app_mention") return true;
-  const link = await db.channelThreadLink.findUnique({
-    where: {
-      agentChannelId_externalThreadId: {
-        agentChannelId: input.presenceId,
-        externalThreadId: call.externalThreadId,
-      },
-    },
-    select: { id: true },
-  });
-  return link !== null;
+  return isJoinedThread(input.presenceId, call.externalThreadId);
 };
 
 /**
@@ -600,3 +665,167 @@ export const callsByName = (
     ).test(hay);
   });
 };
+
+/**
+ * A reaction on what may be the agent's own message, entering through the
+ * SAME door a typed message would: the person's DM, or a channel thread the
+ * agent already joined. Identity, grants, dedupe (by event id) and the
+ * per-agent turn cap are therefore unchanged; a 👍 carries exactly the weight
+ * of typing "yes". Order matters for cost: every fence that needs no Slack
+ * call runs first, so a busy channel's reactions on other apps' posts never
+ * spend a `conversations.replies` call.
+ *
+ * Silent on refusal: a reaction is not a message, so a person the agent may
+ * not answer hears nothing (a refusal posted per emoji would invite another
+ * emoji under it, and another refusal).
+ */
+const ingestReaction = async (
+  input: { presenceId: string; eventId: string },
+  call: ReactionCall,
+): Promise<SlackDispatchResult> => {
+  if (
+    !call.inDm &&
+    !(await hasJoinedThreadIn(input.presenceId, call.channel))
+  ) {
+    return { kind: "ignored", reason: "reaction:unjoined-channel" };
+  }
+  const presence = await db.agentChannel.findUnique({
+    where: { id: input.presenceId },
+    select: { externalId: true, identityRef: true, credentials: true },
+  });
+  const botToken = await botTokenOf(presence?.credentials);
+  if (!presence?.identityRef || !botToken) {
+    return { kind: "ignored", reason: "reaction:no-presence" };
+  }
+
+  let message: SlackHistoryMessage | null;
+  try {
+    message = await messageByTs(botToken, call.channel, call.itemTs);
+  } catch (err) {
+    // A refused read costs this reaction, never the presence's health
+    // beyond the shared dead-credential rule.
+    void noteOutboundFailure(input.presenceId, err);
+    log.info(
+      { err: String(err), presenceId: input.presenceId },
+      "reaction: message lookup failed",
+    );
+    return { kind: "ignored", reason: "reaction:lookup-failed" };
+  }
+  // The agent's own PLAIN answer, by the rule its own-reply tools use: the
+  // app id when Slack names one (an icon-posted answer has no user), never
+  // a card (a 👍 on an approval card is not a decision) and never the web
+  // mirror's copy of what a person typed.
+  if (
+    !message ||
+    !isPlainReply(message, {
+      externalId: presence.externalId,
+      identityRef: presence.identityRef,
+    })
+  ) {
+    return { kind: "ignored", reason: "reaction:not-on-agent-message" };
+  }
+  const text = reactionNote(call.reaction, message.text ?? "");
+  // The thread the message is a REPLY in. A thread's parent carries its own
+  // ts as `thread_ts`, yet it sits at the top level, where it was answered.
+  const threadTs =
+    message.thread_ts && message.thread_ts !== message.ts
+      ? message.thread_ts
+      : null;
+
+  if (call.inDm) {
+    const outcome = await ingestDirectMessage({
+      agentChannelId: input.presenceId,
+      externalUserId: call.externalUserId,
+      externalThreadId: call.channel,
+      text,
+      // Inside a DM thread, the thread's own conversation (as a typed reply
+      // there would land), else the person's one direct conversation.
+      sourceThreadId: threadTs,
+      threadExternalId: threadTs
+        ? directThreadId(call.channel, threadTs)
+        : null,
+      eventId: input.eventId,
+    });
+    return reactionResult(call.channel, threadTs, outcome);
+  }
+
+  const root = threadTs ?? call.itemTs;
+  const externalThreadId = groupThreadId(call.channel, root);
+  if (!(await isJoinedThread(input.presenceId, externalThreadId))) {
+    return { kind: "ignored", reason: "reaction:unjoined-thread" };
+  }
+  const outcome = await ingestGroupMessage({
+    agentChannelId: input.presenceId,
+    externalUserId: call.externalUserId,
+    speakerKind: "person",
+    externalThreadId,
+    title: null,
+    text,
+    // An unlinked stranger is ignored quietly, like a passer-by the agent
+    // overhears, instead of being told to link an account.
+    overheard: true,
+    eventId: input.eventId,
+  });
+  return reactionResult(call.channel, root, outcome);
+};
+
+type ReactionCall = Extract<SlackDoorCall, { door: "reaction" }>;
+
+/** The reaction's outcome on the wire. A refusal becomes a quiet ignore
+ * (see `ingestReaction`); an accepted note answers where the reacted
+ * message lives, like any turn. */
+const reactionResult = (
+  channel: string,
+  threadTs: string | null,
+  outcome: IngestOutcome,
+): SlackDispatchResult =>
+  outcome.kind === "refused"
+    ? { kind: "ignored", reason: "reaction:refused" }
+    : {
+        kind: "message",
+        call: {
+          door: "reaction",
+          replyChannel: channel,
+          replyThreadTs: threadTs,
+        },
+        outcome,
+      };
+
+/** The bot token in a presence's stored credentials, or null. */
+const botTokenOf = async (
+  credentials: string | null | undefined,
+): Promise<string | null> =>
+  credentials
+    ? (parseSlackPresenceCredentials(await decryptCached(credentials))
+        .botToken ?? null)
+    : null;
+
+/** A thread link the agent holds for this group thread. */
+const isJoinedThread = async (
+  presenceId: string,
+  externalThreadId: string,
+): Promise<boolean> =>
+  (await db.channelThreadLink.findUnique({
+    where: {
+      agentChannelId_externalThreadId: {
+        agentChannelId: presenceId,
+        externalThreadId,
+      },
+    },
+    select: { id: true },
+  })) !== null;
+
+/** Any group thread link in this channel: the cheap pre-check before the
+ * Slack read (the exact thread is only known after it). */
+const hasJoinedThreadIn = async (
+  presenceId: string,
+  channel: string,
+): Promise<boolean> =>
+  (await db.channelThreadLink.findFirst({
+    where: {
+      agentChannelId: presenceId,
+      kind: "group",
+      externalThreadId: { startsWith: groupThreadId(channel, "") },
+    },
+    select: { id: true },
+  })) !== null;

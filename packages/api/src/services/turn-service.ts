@@ -19,6 +19,7 @@ import {
   requireDirectWakeConversation,
   requireSystemConversation,
 } from "./conversation-service";
+import { visibleTo } from "./conversation-visibility";
 import { findAgentLlmBlocker } from "./llm-credential-service";
 import { CRON_FAILURE_DISABLE_THRESHOLD } from "./agent-cron-service";
 import { webhookRunOutcome } from "../validations/webhooks";
@@ -234,18 +235,20 @@ export interface TurnOrigin {
   /**
    * The speaker — or `null` for a turn the PLATFORM creates (a cron fire,
    * step 7; watch fires). Null is not "anonymous": it routes through
-   * `requireSystemConversation`, which fences by workspace and refuses direct
-   * threads outright — the platform speaks only into sourced conversations,
-   * never into someone's private thread through this door.
+   * `requireSystemConversation`, which fences by workspace and refuses
+   * private threads outright (a direct thread, or a DM thread opened inside
+   * one: any owned conversation) — the platform speaks only into unowned
+   * conversations, never into someone's private thread through this door.
    */
   userId: string | null;
   /**
-   * The ONE sanctioned exception to the direct-thread refusal above: a watch
-   * wake running in the direct conversation the watched work belongs to, so
-   * the report is the turn itself. Honored only with `userId: null`, routed
-   * through `requireDirectWakeConversation` (agent + direct fences in the
-   * WHERE), and stamped exclusively by watch-fire-service after its
-   * creator/owner check — no route ever populates TurnOrigin from a client.
+   * The ONE sanctioned exception to the private-thread refusal above: a
+   * platform wake running in the private conversation the work belongs to
+   * (a watch fire, an approval resume, a desktop hand-back), so the report
+   * is the turn itself. Honored only with `userId: null`, routed through
+   * `requireDirectWakeConversation` (agent + owner fences in the WHERE), and
+   * stamped exclusively server-side after the caller's creator/owner check
+   * — no route ever populates TurnOrigin from a client.
    */
   directWake?: { agentId: string };
   /**
@@ -271,12 +274,12 @@ export interface TurnOrigin {
 /**
  * THE ONE FENCE for who may write into a conversation, keyed on the origin:
  * a person must be able to read it (`requireConversation`); the platform
- * (`userId: null`) may write only into sourced conversations
- * (`requireSystemConversation`, refuses direct threads) - unless it is the
- * sanctioned `directWake`, which admits ONLY the named agent's own direct
- * thread. Shared by `createTurn` and the send door's follow-up arm, so the
+ * (`userId: null`) may write only into unowned conversations
+ * (`requireSystemConversation`, refuses private threads) - unless it is the
+ * sanctioned `directWake`, which admits ONLY the named agent's own private
+ * threads. Shared by `createTurn` and the send door's follow-up arm, so the
  * two arms can never disagree about the same origin (a follow-up landing in
- * a busy direct thread is fenced exactly like the turn it joins).
+ * a busy private thread is fenced exactly like the turn it joins).
  *
  * A platform job's conversation takes that job's own runs and nothing else,
  * and the job's source is refused anywhere else (platform-jobs, rule 3):
@@ -1137,14 +1140,14 @@ export const abortTurn = async (
   // cancel is never reported for a write that changed nothing.
   for (let attempt = 0; attempt < 2; attempt += 1) {
     // The privacy fence rides turn → conversation → owner: aborting is a
-    // write into the thread, so a foreign direct thread's turn reads
+    // write into the thread, so a foreign private thread's turn reads
     // NOT_FOUND.
     const turn = await db.turn.findFirst({
       where: {
         id: turnId,
         conversation: {
           agent: { workspaceId },
-          OR: [{ direct: false }, { userId: viewerUserId }],
+          ...visibleTo(viewerUserId),
         },
       },
       select: { id: true, status: true, conversationId: true },
@@ -1285,7 +1288,7 @@ export const requestSendNow = async (
       id: followUpId,
       conversation: {
         agent: { workspaceId },
-        OR: [{ direct: false }, { userId: viewerUserId }],
+        ...visibleTo(viewerUserId),
       },
     },
     select: {
