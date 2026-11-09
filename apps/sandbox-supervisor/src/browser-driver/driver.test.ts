@@ -1,10 +1,17 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser } from "patchright";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { Driver } from "./driver";
+import { ACTION_TIMEOUT_MS, Driver } from "./driver";
 import { DEVTOOLS_PORT } from "./launch";
 import type { Reply } from "./protocol";
 
@@ -112,6 +119,40 @@ const ROWS = `<!doctype html><html><head><title>Rows</title></head><body>
 <dialog id="d"><h2>Delete the project?</h2><button onclick="document.getElementById('out').textContent = 'dialog cancel'; document.getElementById('d').close()">Cancel</button></dialog>
 </body></html>`;
 
+/**
+ * The shapes the newer verbs answer: a confirm and a prompt, a masked field
+ * that keeps digits only and a guarded one that keeps nothing, a checkbox,
+ * a file input and a button that opens the picker, a cookie banner over a
+ * button, and a long page.
+ */
+const FORMS = `<!doctype html><html><head><title>Forms</title></head><body>
+<form aria-label="Sign up">
+<h2>Sign up</h2>
+<input aria-label="Email" placeholder="you@example.com">
+<input aria-label="Password" type="password">
+<input aria-label="Short PIN" type="password" oninput="this.value=this.value.slice(0,4)">
+<input aria-label="PIN" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,4)">
+<input aria-label="Guarded" onbeforeinput="event.preventDefault()">
+<input type="checkbox" aria-label="Agree to terms">
+<input type="file" aria-label="Attach" onchange="document.getElementById('out').textContent = 'files:' + [...this.files].map(f => f.name).join(',')">
+<button type="button" onclick="document.getElementById('hidden').click()">Pick a file</button>
+<button type="button" onclick="document.getElementById('out').textContent = 'noop'">Do nothing</button>
+<input type="file" id="hidden" style="display:none" onchange="document.getElementById('out').textContent = 'picked:' + this.files[0].name">
+</form>
+<button onclick="document.getElementById('out').textContent = String(confirm('Delete everything?'))">Delete</button>
+<button onclick="document.getElementById('out').textContent = String(confirm('One?')) + String(confirm('Two?'))">Twice</button>
+<button onclick="document.getElementById('out').textContent = prompt('Your name?', 'anon') ?? 'null'">Rename</button>
+<a href="/second" id="doc">Read the docs</a>
+<p id="out"></p>
+<button id="buy" style="position:fixed;bottom:40px;right:40px" onclick="document.getElementById('out').textContent = 'bought'">Buy</button>
+<div id="banner" style="position:fixed;bottom:0;right:0;width:300px;height:160px;background:rgba(0,0,0,.3)"><p>We use cookies</p><button onclick="document.getElementById('banner').remove()">Accept all</button></div>
+<div style="height:3000px"></div>
+<p>The very end</p>
+</body></html>`;
+
+/** A page that alerts as it loads: one answer, given on the spot. */
+const ALERTING = `<!doctype html><html><head><title>Alerting</title></head><body><h1>Alerted</h1><script>alert('Heads up')</script></body></html>`;
+
 const ok = (reply: Reply): Extract<Reply, { ok: true }> => {
   if (!reply.ok) throw new Error(`expected ok, got: ${reply.error}`);
   return reply;
@@ -186,6 +227,14 @@ describe.skipIf(!EXECUTABLE)("Driver (real browser)", () => {
       }
       if (req.url === "/rows") {
         res.end(ROWS);
+        return;
+      }
+      if (req.url === "/forms") {
+        res.end(FORMS);
+        return;
+      }
+      if (req.url === "/alerting") {
+        res.end(ALERTING);
         return;
       }
       res.end(req.url === "/second" ? SECOND : PAGE);
@@ -317,9 +366,11 @@ describe.skipIf(!EXECUTABLE)("Driver (real browser)", () => {
       target: { ref: behind },
     });
     expect(Date.now() - t).toBeLessThan(5_000);
+    // Named as its line reads, not by the ref the agent typed: the agent
+    // learns which element it was reaching for.
     expect(refused).toEqual({
       ok: false,
-      error: `${behind} is behind the open dialog "Quota Exceeded"; answer it first: ${dismiss} "Dismiss"`,
+      error: `link "Second page" is behind the open dialog "Quota Exceeded"; answer it first: ${dismiss} "Dismiss"`,
     });
     // The modal's own control is reachable, and answering it clears the way.
     const after = ok(
@@ -658,18 +709,400 @@ describe.skipIf(!EXECUTABLE)("Driver (real browser)", () => {
     expect(after.snapshot).toContain('button "Appeared"');
   });
 
-  it("answers a confirm dialog and reports it once", async () => {
-    const page = ok(await driver.handle({ verb: "open", url: `${origin}/` }));
-    const after = ok(
+  it("accepts an alert on the spot and reports it once", async () => {
+    const page = ok(
+      await driver.handle({ verb: "open", url: `${origin}/alerting` }),
+    );
+    expect(page.dialog).toBe("alert: Heads up");
+    expect(page.snapshot).toContain('heading "Alerted"');
+    const again = ok(await driver.handle({ verb: "snapshot" }));
+    expect(again.dialog).toBeUndefined();
+  });
+
+  it("holds a confirm for the agent: the click answers with the question, every other verb is refused, and the answer runs the page on", async () => {
+    const page = ok(
+      await driver.handle({ verb: "open", url: `${origin}/forms` }),
+    );
+    const started = Date.now();
+    const asked = ok(
       await driver.handle({
         verb: "click",
-        target: { ref: refOf(page.snapshot, '"Ask"') },
+        target: { ref: refOf(page.snapshot, 'button "Delete"') },
       }),
     );
-    expect(after.dialog).toBe("confirm: Sure?");
+    // Answered at once, not after the action timeout: the page is stopped
+    // and the click can never complete until the agent speaks.
+    expect(Date.now() - started).toBeLessThan(ACTION_TIMEOUT_MS);
+    expect(asked.pending).toEqual({
+      type: "confirm",
+      message: "Delete everything?",
+    });
+    expect(asked.snapshot).toBeUndefined();
+    expect(asked.url).toBe(`${origin}/forms`);
+    for (const request of [
+      { verb: "snapshot" },
+      { verb: "read" },
+      { verb: "click", target: { role: "button", name: "Buy" } },
+      { verb: "open", url: `${origin}/` },
+    ] as const) {
+      const refused = await driver.handle(request);
+      expect(refused.ok).toBe(false);
+      if (!refused.ok)
+        expect(refused.error).toBe(
+          'the page is stopped on a confirm: "Delete everything?"; answer it first: dialog accept | dialog dismiss',
+        );
+    }
+    const after = ok(await driver.handle({ verb: "dialog", answer: "accept" }));
+    expect(after.dialog).toBe("confirm: Delete everything? (accepted)");
+    expect(after.pending).toBeUndefined();
+    expect(after.snapshot).toContain('button "Delete"');
     const text = ok(await driver.handle({ verb: "read" }));
-    expect(text.text).toContain("false"); // dismissed
+    expect(text.text).toContain("true");
     expect(text.dialog).toBeUndefined();
+  }, 20_000);
+
+  it("holds a prompt with its prefilled answer, and types the agent's answer into it", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    const asked = ok(
+      await driver.handle({
+        verb: "click",
+        target: { role: "button", name: "Rename" },
+      }),
+    );
+    expect(asked.pending).toEqual({
+      type: "prompt",
+      message: "Your name?",
+      defaultValue: "anon",
+    });
+    ok(await driver.handle({ verb: "dialog", answer: "accept", text: "Alex" }));
+    expect(ok(await driver.handle({ verb: "read" })).text).toContain("Alex");
+    // Dismissed: the page sees null, and says so.
+    ok(
+      await driver.handle({
+        verb: "click",
+        target: { role: "button", name: "Rename" },
+      }),
+    );
+    ok(await driver.handle({ verb: "dialog", answer: "dismiss" }));
+    expect(ok(await driver.handle({ verb: "read" })).text).toContain("null");
+    // Nothing held: the verb says so instead of pretending.
+    const none = await driver.handle({ verb: "dialog", answer: "accept" });
+    expect(none.ok).toBe(false);
+    if (!none.ok) expect(none.error).toContain("no dialog is open");
+  }, 20_000);
+
+  it("a page that asks twice: answering the first holds the second, and a close() with a dialog held leaves the browser attachable", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    const first = ok(
+      await driver.handle({
+        verb: "click",
+        target: { role: "button", name: "Twice" },
+      }),
+    );
+    expect(first.pending?.message).toBe("One?");
+    const second = ok(
+      await driver.handle({ verb: "dialog", answer: "accept" }),
+    );
+    expect(second.pending?.message).toBe("Two?");
+    expect(second.dialog).toBe("confirm: One? (accepted)");
+    // Detach with the second still held (what `stop` does). Observed live:
+    // a dialog left open under a dead client wedged every later attach at
+    // 30 s. close() must answer it on the way out.
+    await driver.close();
+    const started = Date.now();
+    const back = ok(await driver.handle({ verb: "read" }));
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(back.text).toContain("truefalse");
+  }, 30_000);
+
+  it("holds a confirm raised by a key press too", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    // A focused button and Enter: how a keyboard-driven agent triggers it.
+    await driver.handle({
+      verb: "eval",
+      js: "document.querySelector('button[onclick*=confirm]').focus()",
+    });
+    const asked = ok(await driver.handle({ verb: "press", key: "Enter" }));
+    expect(asked.pending?.type).toBe("confirm");
+    ok(await driver.handle({ verb: "dialog", answer: "dismiss" }));
+    expect(ok(await driver.handle({ verb: "read" })).text).toContain("false");
+  });
+
+  it("refuses a type the field did not keep, naming what it reads, and never echoing a secret", async () => {
+    const page = ok(
+      await driver.handle({ verb: "open", url: `${origin}/forms` }),
+    );
+    const masked = await driver.handle({
+      verb: "type",
+      target: { ref: refOf(page.snapshot, 'textbox "PIN"') },
+      text: "12ab34",
+    });
+    expect(masked.ok).toBe(false);
+    if (!masked.ok)
+      expect(masked.error).toBe(
+        'textbox "PIN" did not take the text: the field reads "1234"; the page may filter input (try the shape it expects) or need the field clicked first',
+      );
+    const guarded = await driver.handle({
+      verb: "type",
+      target: { role: "textbox", name: "Guarded" },
+      text: "hunter2",
+      secret: true,
+    });
+    expect(guarded.ok).toBe(false);
+    if (!guarded.ok) {
+      expect(guarded.error).toBe(
+        'textbox "Guarded" did not take the text (the field reads something else)',
+      );
+      expect(guarded.error).not.toContain("hunter2");
+    }
+    // A password field reads back fine: the mask is visual only.
+    ok(
+      await driver.handle({
+        verb: "type",
+        target: { role: "textbox", name: "Password" },
+        text: "hunter2",
+        secret: true,
+      }),
+    );
+    // A password field that filters is refused without the value, even
+    // when the agent typed it on argv (no `secret` flag).
+    const pin = await driver.handle({
+      verb: "type",
+      target: { role: "textbox", name: "Short PIN" },
+      text: "123456",
+    });
+    expect(pin.ok).toBe(false);
+    if (!pin.ok) {
+      expect(pin.error).toBe(
+        'textbox "Short PIN" did not take the text (the field reads something else)',
+      );
+      expect(pin.error).not.toContain("1234");
+    }
+    // The shape the mask wants lands, and is accepted.
+    ok(
+      await driver.handle({
+        verb: "type",
+        target: { role: "textbox", name: "PIN" },
+        text: "4321",
+      }),
+    );
+  });
+
+  it("names what covers a button the page never called a dialog, instead of a bare timeout", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    const started = Date.now();
+    const covered = await driver.handle({
+      verb: "click",
+      target: { role: "button", name: "Buy" },
+    });
+    expect(covered.ok).toBe(false);
+    if (!covered.ok)
+      expect(covered.error).toBe(
+        'button "Buy" is covered by <div id="banner">; dismiss or close that first, then take a snapshot',
+      );
+    // Still the full action timeout: the cover may be an animation that
+    // ends. The gain is the message, not the wait.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(ACTION_TIMEOUT_MS);
+    ok(
+      await driver.handle({
+        verb: "click",
+        target: { role: "button", name: "Accept all" },
+      }),
+    );
+    ok(
+      await driver.handle({
+        verb: "click",
+        target: { role: "button", name: "Buy" },
+      }),
+    );
+    expect(ok(await driver.handle({ verb: "read" })).text).toContain("bought");
+  }, 40_000);
+
+  it("check and uncheck set a checkbox and are no-ops when it already is", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    const box = { role: "checkbox", name: "Agree to terms" } as const;
+    let page = ok(await driver.handle({ verb: "check", target: box }));
+    expect(page.snapshot).toMatch(/checkbox "Agree to terms" \[checked/);
+    page = ok(await driver.handle({ verb: "check", target: box }));
+    expect(page.snapshot).toMatch(/checkbox "Agree to terms" \[checked/);
+    page = ok(await driver.handle({ verb: "uncheck", target: box }));
+    expect(page.snapshot).not.toContain("checked");
+  }, 20_000);
+
+  it("uploads files from the home onto a file input or the button that opens the picker, and nothing from outside it", async () => {
+    const inside = join(dir, "report.pdf");
+    writeFileSync(inside, "pdf");
+    const outsideDir = mkdtempSync(join(tmpdir(), "onecli-outside-"));
+    const outside = join(outsideDir, "secret.txt");
+    writeFileSync(outside, "s");
+    symlinkSync(outside, join(dir, "innocent.txt"));
+    try {
+      ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+      // The aria tree shows a file input as a button named by its label.
+      const page = ok(
+        await driver.handle({
+          verb: "upload",
+          target: { role: "button", name: "Attach" },
+          paths: [inside],
+        }),
+      );
+      expect(page.snapshot).toBeDefined();
+      expect(ok(await driver.handle({ verb: "read" })).text).toContain(
+        "files:report.pdf",
+      );
+      ok(
+        await driver.handle({
+          verb: "upload",
+          target: { role: "button", name: "Pick a file" },
+          paths: [inside],
+        }),
+      );
+      expect(ok(await driver.handle({ verb: "read" })).text).toContain(
+        "picked:report.pdf",
+      );
+      // The command resolves paths against the shell's cwd before they reach
+      // the daemon; what arrives here is absolute, and containment is on it.
+      for (const [path, reason] of [
+        [outside, "only files under your home directory"],
+        [join(dir, "innocent.txt"), "only files under your home directory"],
+        [join(dir, "..", "x.pdf"), "only files under your home directory"],
+        [join(dir, "missing.pdf"), "no file at that path"],
+      ] as const) {
+        const refused = await driver.handle({
+          verb: "upload",
+          target: { role: "button", name: "Attach" },
+          paths: [path],
+        });
+        expect(refused.ok).toBe(false);
+        if (!refused.ok) expect(refused.error).toContain(reason);
+      }
+      // A button that opens no picker: said so, not a bare timeout.
+      const notAField = await driver.handle({
+        verb: "upload",
+        target: { role: "button", name: "Do nothing" },
+        paths: [inside],
+      });
+      expect(notAField.ok).toBe(false);
+      if (!notAField.ok)
+        expect(notAField.error).toContain(
+          'button "Do nothing" is not a file field and clicking it opened no file picker',
+        );
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("get reads one thing off an element: text, a field's value, a link's href", async () => {
+    const page = ok(
+      await driver.handle({ verb: "open", url: `${origin}/forms` }),
+    );
+    const email = refOf(page.snapshot, 'textbox "Email"');
+    ok(
+      await driver.handle({
+        verb: "type",
+        target: { ref: email },
+        text: "a@b.c",
+      }),
+    );
+    const value = ok(
+      await driver.handle({
+        verb: "get",
+        property: "value",
+        target: { ref: email },
+      }),
+    );
+    expect(value).toEqual({ ok: true, url: "", title: "", got: "a@b.c" });
+    const href = ok(
+      await driver.handle({
+        verb: "get",
+        property: "href",
+        target: { role: "link", name: "Read the docs" },
+      }),
+    );
+    expect(href.got).toBe(`${origin}/second`);
+    const text = ok(
+      await driver.handle({
+        verb: "get",
+        property: "text",
+        target: { role: "heading", name: "Sign up" },
+      }),
+    );
+    expect(text.got).toBe("Sign up");
+    const none = ok(
+      await driver.handle({
+        verb: "get",
+        property: "value",
+        target: { role: "heading", name: "Sign up" },
+      }),
+    );
+    expect(none.got).toBeNull();
+    // A password's value never comes back out through get.
+    ok(
+      await driver.handle({
+        verb: "type",
+        target: { role: "textbox", name: "Password" },
+        text: "hunter2",
+        secret: true,
+      }),
+    );
+    const secret = await driver.handle({
+      verb: "get",
+      property: "value",
+      target: { role: "textbox", name: "Password" },
+    });
+    expect(secret.ok).toBe(false);
+    if (!secret.ok) {
+      expect(secret.error).toContain("password field is not read back");
+      expect(secret.error).not.toContain("hunter2");
+    }
+  });
+
+  it("screenshot --full captures the whole page, not just the viewport", async () => {
+    ok(await driver.handle({ verb: "open", url: `${origin}/forms` }));
+    const viewport = ok(
+      await driver.handle({ verb: "screenshot", path: join(dir, "v.png") }),
+    );
+    const full = ok(
+      await driver.handle({
+        verb: "screenshot",
+        path: join(dir, "f.png"),
+        full: true,
+      }),
+    );
+    const height = (path: string): number =>
+      readFileSync(path).readUInt32BE(20); // PNG IHDR height
+    expect(height(full.path ?? "")).toBeGreaterThan(
+      height(viewport.path ?? "") * 2,
+    );
+  });
+
+  it("snapshot <el> lists one element's subtree, with the same refs as the whole page", async () => {
+    const page = ok(
+      await driver.handle({ verb: "open", url: `${origin}/forms` }),
+    );
+    const email = refOf(page.snapshot, 'textbox "Email"');
+    const form = ok(
+      await driver.handle({
+        verb: "snapshot",
+        within: { role: "form", name: "Sign up" },
+      }),
+    );
+    expect(form.snapshot).toContain(`${email} textbox "Email"`);
+    expect(form.snapshot).toContain('checkbox "Agree to terms"');
+    expect(form.snapshot).not.toContain('button "Buy"');
+    // Elements outside the scope are still nameable afterwards.
+    ok(
+      await driver.handle({
+        verb: "type",
+        target: { ref: email },
+        text: "x@y.z",
+      }),
+    );
+    const outside = await driver.handle({
+      verb: "snapshot",
+      within: { ref: "e999" },
+    });
+    expect(outside.ok).toBe(false);
   });
 
   it("selects an option and evaluates JavaScript", async () => {

@@ -21,6 +21,10 @@ vi.mock("@/lib/env", async (importOriginal) => ({
 vi.mock("../payment-issue-actions", () => ({
   getPaymentIssue: state.getPaymentIssue,
 }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/ag-1/chat",
+  useSearchParams: () => new URLSearchParams("draft=hi"),
+}));
 
 import { PaymentIssueBanner } from "./payment-issue-banner";
 
@@ -74,7 +78,7 @@ describe("PaymentIssueBanner", () => {
     expect(alert.getAttribute("rel")).toContain("noopener");
   });
 
-  it("ended: links to the org billing page to resubscribe", async () => {
+  it("ended: opens Billing in the Settings modal to resubscribe", async () => {
     state.issue = {
       kind: "ended",
       plan: "pro",
@@ -90,6 +94,9 @@ describe("PaymentIssueBanner", () => {
       "Your Pro subscription ended because the payment failed",
     );
     expect(alert.textContent).toContain("Resubscribe");
-    expect(alert.getAttribute("href")).toBe("/org/org-1/billing");
+    // Over the page the admin is on, not a hop through the old /billing route.
+    expect(alert.getAttribute("href")).toBe(
+      "/w/ws-1/agents/ag-1/chat?draft=hi&settings=billing",
+    );
   });
 });

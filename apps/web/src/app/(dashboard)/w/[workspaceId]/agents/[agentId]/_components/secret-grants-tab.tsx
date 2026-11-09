@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { KeyRound, Loader2, TriangleAlert } from "lucide-react";
+import { KeyRound, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
@@ -17,6 +17,7 @@ import { SecretGrantRow } from "./secret-grant-row";
 import { InactiveConnections } from "./inactive-connections";
 import { sortSecretsForChooser } from "./chooser-order";
 import { chooserEmptyClassName, chooserGridClassName } from "./chooser-layout";
+import { GrantRowsSkeleton } from "./grant-rows-skeleton";
 
 interface SecretGrantsTabProps {
   agentId: string;
@@ -86,15 +87,7 @@ export const SecretGrantsTab = ({
     grantsQuery.isPending ||
     credentialsQuery.isPending
   ) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2
-          className="text-muted-foreground size-5 animate-spin"
-          aria-hidden
-        />
-        <span className="sr-only">{copy.loading}</span>
-      </div>
-    );
+    return <GrantRowsSkeleton label={copy.loading} chooser={chooser} />;
   }
   // Credentials feed the org-lock derivation — a failed load must not render
   // toggles over unknown org-grant state (the same blind-toggle rule AppsTab

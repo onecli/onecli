@@ -1,1 +1,1 @@
-export { default } from "@/lib/account/ssh-keys-page";
+export { default, metadata } from "@/lib/account/account-page";

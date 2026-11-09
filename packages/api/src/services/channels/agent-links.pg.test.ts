@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+import { grantModelKey } from "../../testing/model-key-grant.js";
 
 /**
  * Agent-to-agent messaging (PR 5b) — proofs against a real DB:
@@ -77,39 +78,6 @@ const startFake = (): Promise<string> =>
 
 // ── Seeds ───────────────────────────────────────────────────────────────────
 
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
-
 const seedAgent = async (name: string, workspaceId = WORKSPACE) => {
   const suffix = `${name.toLowerCase().replace(/\s+/g, "-")}-${workspaceId}`;
   const agent = await db.agent.create({
@@ -123,7 +91,11 @@ const seedAgent = async (name: string, workspaceId = WORKSPACE) => {
     },
     select: { id: true, name: true, workspaceId: true },
   });
-  await grantLlmKey(agent.id, suffix);
+  await grantModelKey(db, {
+    workspaceId: WORKSPACE,
+    agentId: agent.id,
+    name: `${P}${suffix}`,
+  });
   return agent;
 };
 

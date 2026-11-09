@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, Loader2 } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import {
   activityForToolCall,
   bareToolName,
@@ -12,19 +12,25 @@ import {
 } from "@onecli/ui/components/collapsible";
 import { toolInputPreview } from "@/lib/chat/tool-display";
 import type { ToolCall } from "@/lib/chat/transcript";
+import { cn } from "@onecli/ui/lib/utils";
 import { ToolInput } from "./tool-input";
 import { ToolOutput } from "./tool-output";
 
+/** One timeline row: the same height as a note, so the dots line up. */
+const ROW =
+  "flex min-w-0 items-center gap-1.5 py-1 text-[0.8125rem] leading-[1.125rem]";
+
 /**
- * One step inside a tool group's card, modeled on Claude's run view:
+ * One step in the work timeline, modeled on Claude's run view:
  *
- *   Ran a command  ls -la /data >          (done; click for request + output)
- *   Ran a command  grep x  exit 1 >        (the command exited non-zero)
- *   Ran a command  Failed >                (the tool failed, "Failed" in red)
- *   ⟳ Running a command                    (still going)
+ *   • Ran a command  ls -la /data >          (done; click for request + output)
+ *   • Ran a command  grep x  exit 1 >        (the command exited non-zero)
+ *   • Ran a command  Failed >                (the tool failed: red dot, "Failed")
+ *   ● Running a command                      (still going: the dot pulses)
  *
- * No status icons on finished rows: the words carry the state, and red is
- * reserved for the one thing worth noticing, a step whose TOOL failed. A
+ * No status icons: the timeline's dot carries the state (WorkTimeline reads
+ * `toolStepState`), the words carry the rest, and red is reserved for the
+ * one thing worth noticing, a step whose TOOL failed. A
  * command that ran and exited non-zero is not that: `grep` exits 1 when it
  * finds nothing, which is often the answer. Its status shows as a muted
  * `exit N`. The label comes from the shared phrase table, never the raw tool
@@ -36,6 +42,19 @@ import { ToolOutput } from "./tool-output";
  * SECURITY: `tool.name`, `tool.input` and `tool.output` are untrusted
  * sandbox text. All render as text, never as markup or markdown.
  */
+
+/** Where a step stands: still going, its tool failed, or done. A finished
+ *  turn can't still be running a tool, so an orphan reads as done. */
+export const toolStepState = (
+  tool: ToolCall,
+  turnEnded: boolean,
+): "running" | "failed" | "done" =>
+  tool.output === undefined && !turnEnded
+    ? "running"
+    : tool.isError === true
+      ? "failed"
+      : "done";
+
 export const ToolCallRow = ({
   tool,
   turnEnded,
@@ -44,18 +63,13 @@ export const ToolCallRow = ({
   /** A finished turn can't still be running a tool: render the orphan done. */
   turnEnded: boolean;
 }) => {
-  const running = tool.output === undefined && !turnEnded;
-  const failed = !running && tool.isError === true;
+  const state = toolStepState(tool, turnEnded);
+  const running = state === "running";
+  const failed = state === "failed";
   const preview = toolInputPreview(tool.input);
 
   const label = (
     <>
-      {running && (
-        <Loader2
-          className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
-          aria-hidden
-        />
-      )}
       <span className="shrink-0">
         {activityForToolCall(tool.name, tool.input, running, tool)}
       </span>
@@ -85,23 +99,24 @@ export const ToolCallRow = ({
   );
 
   if (!tool.input && !tool.output) {
-    return (
-      <div className="text-muted-foreground flex items-center gap-1.5 px-3 py-2 text-sm">
-        {label}
-      </div>
-    );
+    return <div className={cn(ROW, "text-muted-foreground")}>{label}</div>;
   }
 
   return (
     <Collapsible>
-      <CollapsibleTrigger className="text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 group flex w-full items-center gap-1.5 px-3 py-2 text-start text-sm transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-inset">
+      <CollapsibleTrigger
+        className={cn(
+          ROW,
+          "text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 group w-full rounded-md text-start transition-colors outline-none focus-visible:ring-[3px]",
+        )}
+      >
         {label}
         <ChevronRight
           className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90"
           aria-hidden
         />
       </CollapsibleTrigger>
-      <CollapsibleContent className="px-3 pb-3">
+      <CollapsibleContent className="pt-1 pb-2">
         <p
           translate="no"
           className="text-muted-foreground mb-1 truncate font-mono text-xs"

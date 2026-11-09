@@ -71,10 +71,6 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/w/p1/agents/ag-1/channels",
 }));
 
-vi.mock("@/hooks/use-instance", () => ({
-  useInstance: () => ({ entitled: true }),
-}));
-
 const { ChannelsSection } = await import("./channels-section");
 
 // The section reads `useQueryClient` for the install-return invalidation.
@@ -277,7 +273,7 @@ describe("no org credential", () => {
 
     expect(
       screen.getByRole("link", { name: "Set up Slack for the organization" }),
-    ).toHaveAttribute("href", "/org/org-1/channels");
+    ).toHaveAttribute("href", "/w/p1/agents/ag-1/channels?settings=slack");
     // The scary manual arm is gone from the events posture entirely.
     expect(
       screen.queryByText("Create a Slack app from this manifest"),
@@ -392,20 +388,19 @@ describe("no org credential", () => {
   });
 });
 
-describe("act-as-you moved to Contacts", () => {
-  it("no longer renders the read card, only a link to Contacts", () => {
+describe("act-as-you lives on Contacts", () => {
+  it("renders neither the read card nor a link to Contacts (the section sits on Contacts)", () => {
     state.view = view({ presences: [activePresence()] });
     renderSection();
 
+    expect(screen.getByText("@donna")).toBeInTheDocument();
     expect(screen.queryByText(/can read$/)).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Connect your Slack" }),
     ).toBeNull();
     expect(
-      screen.getByRole("link", {
-        name: /Manage what Support Triage reads and sends as you in Contacts/,
-      }),
-    ).toHaveAttribute("href", "/w/p1/agents/ag-1/contacts");
+      screen.queryByRole("link", { name: /reads and sends as you/ }),
+    ).toBeNull();
   });
 });
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Loader2, Plug, TriangleAlert } from "lucide-react";
+import { Plug, TriangleAlert } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { cn } from "@onecli/ui/lib/utils";
@@ -18,6 +18,7 @@ import { ConnectionGrantRow } from "./connection-grant-row";
 import { InactiveConnections } from "./inactive-connections";
 import { sortConnectionsForChooser } from "./chooser-order";
 import { chooserEmptyClassName, chooserGridClassName } from "./chooser-layout";
+import { GrantRowsSkeleton } from "./grant-rows-skeleton";
 import dynamic from "next/dynamic";
 import { useInstance } from "@/hooks/use-instance";
 
@@ -77,13 +78,7 @@ export const AppsTab = ({
     credentialsQuery.isPending
   ) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2
-          className="text-muted-foreground size-5 animate-spin"
-          aria-hidden
-        />
-        <span className="sr-only">Loading app connections…</span>
-      </div>
+      <GrantRowsSkeleton label="Loading app connections…" chooser={chooser} />
     );
   }
   // Never render toggle rows over a failed load — a blind toggle would write

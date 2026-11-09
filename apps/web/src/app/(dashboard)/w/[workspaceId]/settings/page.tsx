@@ -1,13 +1,13 @@
-import { redirect } from "next/navigation";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
 interface Props {
   params: Promise<{ workspaceId: string }>;
 }
 
-/** The settings index has no content of its own — General is the first pane.
- *  General itself forwards anyone who can't manage the workspace on to
- *  Install, so a member landing here still reaches a pane they can open. */
+/** An old URL: the settings index opened General, now Settings > Workspace
+ *  > Settings. Straight there, not through `settings/general` (a second
+ *  redirect). */
 export default async function WorkspaceSettingsIndex({ params }: Props) {
   const { workspaceId } = await params;
-  redirect(`/w/${workspaceId}/settings/general`);
+  await redirectToSettingsModal({ workspaceId }, "workspace");
 }

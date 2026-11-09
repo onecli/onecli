@@ -1261,10 +1261,11 @@ export const resumeAfterApprovalMessage = (summary: string): string =>
 
 /**
  * Wake the origin conversation after an executed approval: a platform turn
- * (no user) through the direct-wake door, so ONLY the agent's own direct
- * thread with the verified reader qualifies (a shared conversation has no
- * reader and is never woken). A live turn there gets it as a follow-up
- * instead. Best-effort: the outcome notice is already the durable record.
+ * (no user) through the direct-wake door, so ONLY the agent's own private
+ * thread with the verified reader qualifies (their direct thread, or a DM
+ * thread of theirs; a shared conversation has no reader and is never
+ * woken). A live turn there gets it as a follow-up instead. Best-effort:
+ * the outcome notice is already the durable record.
  */
 const resumeOriginConversation = async (
   approval: {
@@ -1281,7 +1282,6 @@ const resumeOriginConversation = async (
       where: {
         id: approval.conversationId,
         agentId: approval.agentId,
-        direct: true,
         userId: { not: null },
       },
       select: { id: true, agent: { select: { workspaceId: true } } },

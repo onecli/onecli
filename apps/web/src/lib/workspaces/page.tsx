@@ -4,7 +4,7 @@ import { PageHeader } from "@dashboard/page-header";
 import { getWorkspaces, getWorkspaceQuotaAction } from "./actions";
 import { CreateWorkspaceButton } from "./_components/create-workspace-button";
 import { EmptyWorkspaces } from "./_components/empty-workspaces";
-import { WorkspaceCard } from "./_components/workspace-card";
+import { WorkspaceRow } from "./_components/workspace-row";
 
 export const metadata: Metadata = {
   title: "Workspaces",
@@ -18,19 +18,22 @@ export default async function OrgWorkspacesPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-6">
-      <div className="flex items-start justify-between gap-4">
-        <PageHeader
-          title="Workspaces"
-          description="Each workspace has its own agents, secrets, connections, and rules."
-        />
-        {workspaces.length > 0 && <CreateWorkspaceButton quota={quota} />}
-      </div>
+      <PageHeader
+        title="Workspaces"
+        character="cloud"
+        description="Each workspace has its own agents, secrets, connections, and rules."
+        action={
+          workspaces.length > 0 && <CreateWorkspaceButton quota={quota} />
+        }
+      />
       {workspaces.length === 0 ? (
         <EmptyWorkspaces quota={quota} />
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        // One box of quiet rows: each workspace's facts on a single line
+        // under its name.
+        <section className="bg-card divide-y overflow-hidden rounded-lg border">
           {workspaces.map((workspace) => (
-            <WorkspaceCard
+            <WorkspaceRow
               key={workspace.id}
               id={workspace.id}
               name={workspace.name}
@@ -43,7 +46,7 @@ export default async function OrgWorkspacesPage() {
               plan={normalizePlan(quota.plan)}
             />
           ))}
-        </div>
+        </section>
       )}
     </div>
   );

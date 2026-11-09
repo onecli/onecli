@@ -1,13 +1,15 @@
 "use client";
 
+import { PageHeader } from "@dashboard/page-header";
 import { useState } from "react";
-import { Loader2, Plus, Webhook } from "lucide-react";
+import { Plus, Webhook } from "lucide-react";
 import { MAX_WEBHOOKS_PER_AGENT } from "@onecli/api/validations/webhooks";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { useWebhooks } from "@/hooks/use-webhooks";
 import type { AgentWebhook } from "@/lib/api";
+import { SectionSkeleton } from "@/lib/dashboard/shell/section-skeleton";
 import { WebhookRow } from "./webhook-row";
 import { WebhookDialog } from "./webhook-dialog";
 
@@ -29,17 +31,7 @@ export const WebhooksSection = () => {
     setDialogOpen(true);
   };
 
-  if (view.isPending) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2
-          className="text-muted-foreground size-5 animate-spin"
-          aria-hidden
-        />
-        <span className="sr-only">Loading webhooks</span>
-      </div>
-    );
-  }
+  if (view.isPending) return <SectionSkeleton label="Loading webhooks" />;
 
   // Never render toggle rows over a failed load — a blind toggle would write
   // against invisible state (the apps-tab law).
@@ -61,29 +53,26 @@ export const WebhooksSection = () => {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold">Webhooks</h2>
-          <p className="text-muted-foreground text-sm">
-            Let another app trigger this agent. Paste the URL into that app and
-            describe what the agent should do with each event. Each run reports
-            back to your chat.
-          </p>
-        </div>
-        {hooks.length > 0 && (
-          <div className="flex shrink-0 flex-col items-end gap-1">
-            <Button size="sm" onClick={() => open(null)} disabled={atCap}>
-              <Plus className="size-4" />
-              New webhook
-            </Button>
-            {atCap && (
-              <p className="text-muted-foreground text-xs">
-                Up to {MAX_WEBHOOKS_PER_AGENT} per agent
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+      <PageHeader
+        title="Webhooks"
+        character="drop-list"
+        description="Let another app trigger this agent. Paste the URL into that app and describe what the agent should do with each event. Each run reports back to your chat."
+        action={
+          hooks.length > 0 && (
+            <div className="flex shrink-0 flex-col items-end gap-1">
+              <Button size="sm" onClick={() => open(null)} disabled={atCap}>
+                <Plus className="size-4" />
+                New webhook
+              </Button>
+              {atCap && (
+                <p className="text-muted-foreground text-xs">
+                  Up to {MAX_WEBHOOKS_PER_AGENT} per agent
+                </p>
+              )}
+            </div>
+          )
+        }
+      />
 
       {hooks.length === 0 ? (
         <Card className="flex flex-col items-center gap-3 p-8 text-center">

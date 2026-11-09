@@ -8,22 +8,12 @@
 //!
 //!   GATEWAY_TEST_DATABASE_URL=postgres://… cargo test -p proxy guidance_connections_pg
 
-use db::{create_pool, find_guidance_connections, GuidanceConnectionRow};
+use db::{find_guidance_connections, GuidanceConnectionRow};
 use sqlx::PgPool;
 
-const P: &str = "gwgd-";
+use crate::test_support::{org, test_pool, workspace};
 
-async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = std::env::var("GATEWAY_TEST_DATABASE_URL") else {
-        assert!(
-            std::env::var("CI").is_err(),
-            "GATEWAY_TEST_DATABASE_URL must be set in CI: the guidance connection fence tests must not silently skip"
-        );
-        eprintln!("skipping: GATEWAY_TEST_DATABASE_URL unset");
-        return None;
-    };
-    Some(create_pool(&url).await.expect("connect to test database"))
-}
+const P: &str = "gwgd-";
 
 async fn reset(pool: &PgPool) {
     let like = format!("{P}%");
@@ -34,27 +24,6 @@ async fn reset(pool: &PgPool) {
     ] {
         sqlx::query(sql).bind(&like).execute(pool).await.unwrap();
     }
-}
-
-async fn org(pool: &PgPool, id: &str) {
-    sqlx::query(
-        "INSERT INTO organizations (id, name, slug, updated_at) VALUES ($1, $1, $1, now())",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn workspace(pool: &PgPool, id: &str, org: &str) {
-    sqlx::query(
-        "INSERT INTO workspaces (id, name, organization_id, updated_at) VALUES ($1, $1, $2, now())",
-    )
-    .bind(id)
-    .bind(org)
-    .execute(pool)
-    .await
-    .unwrap();
 }
 
 /// One account of `provider`: workspace-scoped in `ws` when set, else

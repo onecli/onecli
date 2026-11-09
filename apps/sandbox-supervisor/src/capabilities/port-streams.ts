@@ -46,7 +46,7 @@ export type PortWorkItem =
   | CloseItem
   | AllowItem;
 
-export const PORT_WORK_KINDS = new Set<WorkItem["kind"]>([
+const PORT_WORK_KINDS = new Set<WorkItem["kind"]>([
   "port.open",
   "port.data",
   "port.ack",
@@ -59,7 +59,7 @@ export const isPortWorkItem = (item: WorkItem): item is PortWorkItem =>
 
 /** Dial budget: loopback either answers or refuses instantly; a hang means a
  * wedged service, which should surface as an error page, not a spinner. */
-export const PORT_DIAL_TIMEOUT_MS = 5_000;
+const PORT_DIAL_TIMEOUT_MS = 5_000;
 
 /**
  * Guest ports the platform will never dial, whatever the allowlist says.
@@ -70,7 +70,7 @@ export const PORT_DIAL_TIMEOUT_MS = 5_000;
  * sshd would be a credential surface that must go through the owner-only
  * SSH path, never a preview.
  */
-export const SUPERVISOR_RESERVED_PORTS: ReadonlySet<number> = new Set([22]);
+const SUPERVISOR_RESERVED_PORTS: ReadonlySet<number> = new Set([22]);
 
 /**
  * The static reserved set plus the port the open proxy actually bound

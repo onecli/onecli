@@ -1,16 +1,11 @@
-import OrgSsoPage from "@/ee/settings/org-sso-page";
-import { isEntitled } from "@onecli/api/lib/entitlements";
-import { EnterpriseLockedCard } from "@/lib/components/enterprise-locked-card";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function Page() {
-  // SAML/OIDC SSO (#74-78) is licensed — dark unlicensed.
-  if (!isEntitled()) {
-    return (
-      <EnterpriseLockedCard
-        feature="sso"
-        description="Connect your identity provider for SAML/OIDC sign-in, enforce it org-wide, and provision members via SCIM."
-      />
-    );
-  }
-  return <OrgSsoPage />;
+interface Props {
+  params: Promise<{ orgId: string }>;
+}
+
+/** An old URL: Settings > Organization > Security & SSO. */
+export default async function Page({ params }: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "security");
 }

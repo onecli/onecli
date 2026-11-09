@@ -933,6 +933,7 @@ export const runSupervisor = async (
     conversationId: string,
     resumeSessionRef: string | undefined,
     ephemeral: boolean,
+    forkSessionRef?: string,
   ): Promise<HarnessSession> => {
     if (ephemeral && runtime.session) await releaseSession(runtime);
     if (runtime.session && runtime.surfaceStale) {
@@ -965,6 +966,13 @@ export const runSupervisor = async (
       ...(config.effort && { effort: config.effort }),
       ...(resumeSessionRef &&
         harness.capabilities.resume && { resumeSessionRef }),
+      // A thread's first session copies its parent's transcript (a DM
+      // thread forked off the DM). Only without a ref to resume: a session
+      // that exists is resumed, never re-forked. A harness that cannot fork
+      // mints a fresh session: the inherited context is lost, never the turn.
+      ...(forkSessionRef &&
+        !resumeSessionRef &&
+        harness.capabilities.fork && { forkSessionRef }),
       // Anchoring, not authority: lets the adapter attribute session-scoped
       // harness events (a wake request between turns) to this conversation.
       context: { conversationId },
@@ -978,6 +986,7 @@ export const runSupervisor = async (
       conversationId,
       sessionRef: session.sessionRef,
       resumed: Boolean(resumeSessionRef),
+      forked: Boolean(forkSessionRef && !resumeSessionRef),
     });
     // Hold the first turn until THIS session has taken its list from us.
     // Bounded: a harness that never asks proceeds anyway (see
@@ -1259,6 +1268,8 @@ export const runSupervisor = async (
         // An ephemeral turn never resumes, whatever ref came with it.
         item.ephemeralSession ? undefined : item.resumeSessionRef,
         item.ephemeralSession === true,
+        // Nor forks: its run is one of a series of unrelated ones.
+        item.ephemeralSession ? undefined : item.forkSessionRef,
       );
 
       // An abort that landed while the session was starting applies to this

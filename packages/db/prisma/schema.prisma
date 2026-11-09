@@ -1607,10 +1607,10 @@ model Skill {
   // is what keeps the supervisor's prune-by-manifest honest across edits.
   name        String
   // Required: it IS the frontmatter line the harness reads to decide when to
-  // load the skill. Single line, ≤500 (validations/skills.ts).
+  // load the skill. Single line, ≤1,024 (validations/skills.ts).
   description String
-  // The SKILL.md body. ≤24_000; body + extra files together are capped by
-  // MAX_SKILL_TOTAL_CHARS — the sync-frame budget governor.
+  // The SKILL.md body. ≤120,000 however it arrived; a tier's skills together
+  // are held to SKILL_TIER_BUDGETS, what keeps the home sync inside its parts.
   content     String
   // Pause without delete: a disabled row simply leaves the projection; it
   // does NOT veto a same-named org row (filtered before the shadow merge).

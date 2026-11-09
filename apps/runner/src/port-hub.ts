@@ -34,7 +34,7 @@ type PortMessage = Extract<
   }
 >;
 
-export const PORT_MESSAGE_KINDS = new Set<SupervisorMessage["kind"]>([
+const PORT_MESSAGE_KINDS = new Set<SupervisorMessage["kind"]>([
   "port.opened",
   "port.data",
   "port.ack",
@@ -63,9 +63,9 @@ export class PortOpenError extends Error {
 }
 
 /** A supervisor that never answers (old image, wedged) must not hang a request. */
-export const PORT_OPEN_TIMEOUT_MS = 10_000;
+const PORT_OPEN_TIMEOUT_MS = 10_000;
 /** Runner-side cap per sandbox (the supervisor has its own belt). */
-export const MAX_RUNNER_PORT_STREAMS_PER_SANDBOX = 32;
+const MAX_RUNNER_PORT_STREAMS_PER_SANDBOX = 32;
 
 export interface PortHubOptions {
   /** Send a work item to the sandbox's supervisor; false if not connected. */

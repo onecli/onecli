@@ -1,21 +1,14 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useTransition,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import {
-  WORKSPACE_PATH_RE,
-  ORG_PATH_RE,
-  connectionsPath,
-} from "@/lib/navigation";
+import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
+import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
+import { useReplaceParam } from "@/lib/settings-modal/use-replace-param";
+import { useSettingsModal } from "@/lib/settings-modal/modal-context";
 import { openConnectPopup } from "@/lib/connect-popup";
 import { ChevronRight, Search, X } from "lucide-react";
+import { createPortal } from "react-dom";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -64,16 +57,22 @@ const SlackReadTile = dynamic(() =>
 interface AppsTabProps {
   pageScope?: PageScope;
   basePath?: string;
+  /** Where the search box renders, when the page has a better spot for it
+   * than the filter row (the settings modal puts it in its tab strip, above
+   * the strip's line). Omitted: the filter row keeps it. */
+  searchSlot?: HTMLElement | null;
 }
 
 export const AppsTab = ({
   pageScope = "workspace",
   basePath,
+  searchSlot,
 }: AppsTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [, startTransition] = useTransition();
+  const href = useConnectionsHref(basePath);
+  const modal = useSettingsModal();
   const searchQuery = searchParams.get("q") ?? "";
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -124,18 +123,7 @@ export const AppsTab = ({
   const [requestHostname, setRequestHostname] = useState("");
   const [requestAppName, setRequestAppName] = useState<string | undefined>();
 
-  const updateParam = useCallback(
-    (key: string, value: string | null) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (value) params.set(key, value);
-      else params.delete(key);
-      const qs = params.toString();
-      startTransition(() => {
-        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-      });
-    },
-    [searchParams, router, pathname, startTransition],
-  );
+  const updateParam = useReplaceParam();
 
   const queryClient = useQueryClient();
   const connectionsQuery = useConnections(pageScope);
@@ -173,27 +161,25 @@ export const AppsTab = ({
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       if (provider) {
-        const path = connectionsPath(
-          { pathname, basePath },
-          `/apps/${provider}`,
-        );
         // Hand a brand-new account to the detail page so it can offer agent
-        // access on arrival — the popup's message is long gone by the time
+        // access on arrival: the popup's message is long gone by the time
         // that page mounts. A reconnect carries no id and just navigates.
         router.push(
-          connectionId
-            ? `${path}?connected=${encodeURIComponent(connectionId)}`
-            : path,
+          href(
+            connectionId
+              ? `/apps/${provider}?connected=${encodeURIComponent(connectionId)}`
+              : `/apps/${provider}`,
+          ),
         );
       }
     },
-    [queryClient, pageScope, router, basePath, pathname],
+    [queryClient, pageScope, router, href],
   );
 
   useAppMessages({
     onConnected: handleConnected,
     onConfigure: (provider) => {
-      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`));
+      router.push(href(`/apps/${provider}`));
     },
   });
 
@@ -204,9 +190,12 @@ export const AppsTab = ({
     openConnectPopup(provider, {
       ...options,
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
+      // An org connect names its org. On the org routes the URL does; in
+      // the Settings modal the URL beneath may name a workspace instead,
+      // so the modal's resolved org is the source.
       orgId:
         pageScope === "organization"
-          ? pathname.match(ORG_PATH_RE)?.[1]
+          ? (modal?.organizationId ?? pathname.match(ORG_PATH_RE)?.[1])
           : undefined,
     });
 
@@ -311,54 +300,62 @@ export const AppsTab = ({
     openPopup(app.id, { height: popupHeight });
   };
 
+  const searchBox = (
+    <div className="relative sm:shrink-0">
+      <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+      <Input
+        ref={searchInputRef}
+        placeholder="Search apps…"
+        value={localSearch}
+        onChange={(e) => {
+          setLocalSearch(e.target.value);
+          updateParam("q", e.target.value || null);
+        }}
+        className="h-8 w-full bg-card pl-9 text-sm sm:w-52"
+      />
+      {localSearch && (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => {
+            setLocalSearch("");
+            updateParam("q", null);
+          }}
+          className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
+        >
+          <X className="size-3" />
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <>
-      <div className="flex items-center gap-2">
-        <div className="flex flex-1 flex-wrap gap-1.5">
+      {searchSlot && createPortal(searchBox, searchSlot)}
+      <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:gap-2">
+        {/* One line, scrolling sideways when the page is narrow: a wrapped
+            category reads as a second, separate filter. */}
+        <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {CATEGORY_LABELS.map(({ id, label }) => (
             <button
               key={id}
               type="button"
               onClick={() => updateParam("category", id === "all" ? null : id)}
               className={cn(
-                "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors",
+                "shrink-0 rounded-md px-2.5 py-1 text-xs whitespace-nowrap transition-colors",
                 activeCategory === id
-                  ? "border-foreground bg-foreground text-background"
-                  : "border-border text-muted-foreground hover:border-foreground/50 hover:text-foreground",
+                  ? "bg-brand-wash text-brand-ink font-medium"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
             >
               {label}
             </button>
           ))}
         </div>
-        <div className="relative shrink-0">
-          <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-          <Input
-            ref={searchInputRef}
-            placeholder="Search..."
-            value={localSearch}
-            onChange={(e) => {
-              setLocalSearch(e.target.value);
-              updateParam("q", e.target.value || null);
-            }}
-            className="h-9 w-52 bg-card pl-9 text-sm"
-          />
-          {localSearch && (
-            <button
-              type="button"
-              onClick={() => {
-                setLocalSearch("");
-                updateParam("q", null);
-              }}
-              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
-            >
-              <X className="size-3" />
-            </button>
-          )}
-        </div>
+        {searchSlot === undefined && searchBox}
       </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-4 grid auto-rows-fr gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {/* Always present, searching included: a search that finds nothing
             is exactly when someone wants to ask for the app. */}
         <RequestAppSlot
@@ -389,15 +386,8 @@ export const AppsTab = ({
               type="button"
               onClick={() => {
                 setLocalSearch("");
-                const params = new URLSearchParams(searchParams.toString());
-                params.delete("q");
-                params.delete("category");
-                const qs = params.toString();
-                startTransition(() => {
-                  router.replace(qs ? `${pathname}?${qs}` : pathname, {
-                    scroll: false,
-                  });
-                });
+                updateParam("q", null);
+                updateParam("category", null);
               }}
               className="text-brand mt-2 text-sm font-medium hover:underline"
             >
@@ -415,16 +405,11 @@ export const AppsTab = ({
                   name={app.name}
                   icon={app.icon}
                   darkIcon={app.darkIcon}
+                  description={app.description}
+                  category={categoryLabel(app.id)}
                   connectionCount={count}
                   onConnect={(e) => handleConnect(e, app)}
-                  onClick={() =>
-                    router.push(
-                      connectionsPath(
-                        { pathname, basePath },
-                        `/apps/${app.id}`,
-                      ),
-                    )
-                  }
+                  onClick={() => router.push(href(`/apps/${app.id}`))}
                 />
               );
             })}
@@ -466,14 +451,7 @@ export const AppsTab = ({
             agentName: connectAgent?.name,
           })
         }
-        onConnected={() =>
-          router.push(
-            connectionsPath(
-              { pathname, basePath },
-              `/apps/${GITHUB_APP_PROVIDER}`,
-            ),
-          )
-        }
+        onConnected={() => router.push(href(`/apps/${GITHUB_APP_PROVIDER}`))}
       />
 
       {configApp?.configurable && (
@@ -506,10 +484,16 @@ export const AppsTab = ({
   );
 };
 
+/** The chip label of the category an app is filed under, if any. */
+const categoryLabel = (appId: string) =>
+  CATEGORY_LABELS.find(({ id }) => id === APP_CATEGORIES[appId])?.label;
+
 interface AppRowProps {
   name: string;
   icon: string;
   darkIcon?: string;
+  description?: string;
+  category?: string;
   connectionCount: number;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
@@ -519,6 +503,8 @@ const AppRow = ({
   name,
   icon,
   darkIcon,
+  description,
+  category,
   connectionCount,
   onConnect,
   onClick,
@@ -527,41 +513,50 @@ const AppRow = ({
   return (
     <div
       className={cn(
-        "group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors cursor-pointer hover:bg-accent/50 has-[button:hover]:bg-card!",
+        "group flex cursor-pointer flex-col gap-2 rounded-lg border bg-card px-3.5 py-3 transition-colors hover:border-foreground/20 has-[button:hover]:border-border!",
         connected && "border-brand/30",
       )}
       onClick={onClick}
     >
-      <div className="flex flex-1 items-center gap-3 min-w-0">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted dark:bg-white/10 dark:border-white/10">
+      <div className="flex items-center gap-2.5">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background dark:border-white/10 dark:bg-white/10">
           <AppIcon icon={icon} darkIcon={darkIcon} name={name} />
         </div>
-        <div className="min-w-0">
-          <span className="text-sm font-medium">{name}</span>
-          <p className="text-[11px] text-muted-foreground group-hover:underline group-hover:text-foreground group-has-[button:hover]:no-underline group-has-[button:hover]:text-muted-foreground transition-colors">
-            View details
-          </p>
-        </div>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {name}
+        </span>
+        {category && (
+          <span className="bg-secondary text-muted-foreground shrink-0 rounded-md px-1.5 py-0.5 text-[11px]">
+            {category}
+          </span>
+        )}
       </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        <ChevronRight className="size-4 text-muted-foreground transition-all group-hover:text-foreground group-hover:translate-x-0.5 group-has-[button:hover]:text-muted-foreground group-has-[button:hover]:translate-x-0" />
-        <div className="border-l pl-2 min-w-20 flex justify-center">
-          {connected ? (
-            <div className="flex flex-col items-center">
-              <span className="text-xs font-medium text-brand">Connected</span>
-              {connectionCount > 1 && (
-                <span className="text-[11px] text-muted-foreground">
-                  {connectionCount} accounts
-                </span>
-              )}
-            </div>
-          ) : (
-            <Button size="xs" onClick={onConnect}>
-              Connect
-            </Button>
-          )}
-        </div>
+      {description && (
+        <p className="text-muted-foreground line-clamp-2 text-xs leading-snug">
+          {description}
+        </p>
+      )}
+      <div className="mt-auto flex items-center justify-between gap-2">
+        {connected ? (
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-brand-ink text-xs font-medium">
+              Connected
+            </span>
+            {connectionCount > 1 && (
+              <span className="text-[11px] text-muted-foreground">
+                {connectionCount} accounts
+              </span>
+            )}
+          </div>
+        ) : (
+          <Button size="xs" variant="outline" onClick={onConnect}>
+            Connect
+          </Button>
+        )}
+        <span className="text-muted-foreground flex items-center gap-0.5 text-[11px] transition-colors group-hover:text-foreground group-has-[button:hover]:text-muted-foreground">
+          View details
+          <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5 group-has-[button:hover]:translate-x-0" />
+        </span>
       </div>
     </div>
   );

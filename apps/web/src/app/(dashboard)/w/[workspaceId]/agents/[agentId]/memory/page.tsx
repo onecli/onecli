@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
-import { MemorySection } from "./_components/memory-section";
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
-export const metadata: Metadata = {
-  title: "Memory",
-};
+interface Props {
+  params: Promise<{ workspaceId: string; agentId: string }>;
+}
 
-export default function AgentMemoryPage() {
-  return <MemorySection />;
+/** An old URL: Memory is a block on the agent's Knowledge page. */
+export default async function AgentMemoryPage({ params }: Props) {
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(workspaceId, agentId, "memory");
 }

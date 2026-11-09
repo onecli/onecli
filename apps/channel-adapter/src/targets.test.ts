@@ -2,20 +2,34 @@ import { unpackThreadAddress } from "@onecli/channels/slack";
 import { describe, expect, it } from "vitest";
 import { replyTargetForLink, replyTargetForTurn } from "./targets";
 
-const directLink = { kind: "direct" as const, externalThreadId: "D100" };
+/** A DM's TOP LEVEL: the bare IM id (the person's one direct conversation). */
+const directLink = { externalThreadId: "D100" };
 
 describe("reply targets", () => {
-  it("addresses a direct link's IM channel, top-level", () => {
+  it("addresses a top-level DM link at the IM channel itself", () => {
     expect(replyTargetForLink(unpackThreadAddress, directLink)).toEqual({
       channel: "D100",
       threadTs: null,
     });
   });
 
+  it("addresses a DM THREAD's link inside its thread", () => {
+    // A thread opened inside a DM is a conversation of its own, linked
+    // `direct` (the IM is where replies post) under the thread's packed
+    // address. Everything that posts by the LINK alone (approval cards, the
+    // narration card, a turn with no source thread) must land in the
+    // thread, never at the bottom of the DM. MUTATION-PROOF: make the
+    // decoder read the bare id for `direct` links again and this fails.
+    expect(
+      replyTargetForLink(unpackThreadAddress, {
+        externalThreadId: "D100:1699.123",
+      }),
+    ).toEqual({ channel: "D100", threadTs: "1699.123" });
+  });
+
   it("splits a group link's <channel>:<ts> into channel and thread", () => {
     expect(
       replyTargetForLink(unpackThreadAddress, {
-        kind: "group",
         externalThreadId: "C55:1699.123",
       }),
     ).toEqual({ channel: "C55", threadTs: "1699.123" });
@@ -24,7 +38,6 @@ describe("reply targets", () => {
   it("survives a group id with no separator by posting top-level", () => {
     expect(
       replyTargetForLink(unpackThreadAddress, {
-        kind: "group",
         externalThreadId: "C55",
       }),
     ).toEqual({ channel: "C55", threadTs: null });
@@ -33,9 +46,9 @@ describe("reply targets", () => {
 
 describe("a turn's reply target", () => {
   it("answers a DM thread IN that thread, not at the bottom of the DM", () => {
-    // THE BUG THIS FIXES: one direct conversation carries every thread the
-    // person opens inside it, so the LINK alone cannot say which one a given
-    // turn belongs to — every threaded answer landed top-level.
+    // THE BUG THIS FIXES: the DM's top-level link carries every turn typed
+    // at the bottom of the DM, so the LINK alone cannot say which thread a
+    // given turn belongs to — every threaded answer landed top-level.
     // MUTATION-PROOF: use `replyTargetForLink` in the mirror and this fails.
     expect(
       replyTargetForTurn(unpackThreadAddress, directLink, {
@@ -71,7 +84,7 @@ describe("a turn's reply target", () => {
     expect(
       replyTargetForTurn(
         unpackThreadAddress,
-        { kind: "group", externalThreadId: "C55:1699.123" },
+        { externalThreadId: "C55:1699.123" },
         { sourceThreadId: "9999.000" },
       ),
     ).toEqual({ channel: "C55", threadTs: "9999.000" });

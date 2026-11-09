@@ -92,7 +92,9 @@ export const buildCsp = (nonce: string): string => {
     `script-src ${scriptSrc.join(" ")}`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data: blob: https:",
+    // The API's own origin too: agent avatars are served from it, and on a
+    // local or self-hosted http deployment `https:` alone blocks them.
+    `img-src 'self' data: blob: https: ${apiOrigin()}`,
     `connect-src ${connectSrc.join(" ")}`,
     `frame-src ${["https://js.stripe.com", ...turnstileOrigin].join(" ")}`,
     "frame-ancestors 'none'",

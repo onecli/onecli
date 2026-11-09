@@ -48,6 +48,7 @@ import {
   desktopSlug,
 } from "../../services/sandbox-port-service";
 import { createTurn, wakeSandboxFor } from "../../services/turn-service";
+import { visibleTo } from "../../services/conversation-visibility";
 import { signalWork, markSandboxEngaged } from "../../services/due-work";
 import { writeConversationNotice } from "../../services/conversation-notice";
 import { userIsOrgAdmin } from "../../services/workspace-access-check";
@@ -526,8 +527,8 @@ export const releaseControl = async (
   return desktopFor(workspaceId, agentId, actor.userId);
 };
 
-/** Whether this person may read the conversation: a group thread, or their
- * own direct thread. The same rule as conversation-service's `visibleTo`. */
+/** Whether this person may read the conversation: a group thread, or a
+ * private thread of their own. Conversation-service's `visibleTo`, composed. */
 const canReadConversation = async (
   conversationId: string,
   userId: string,
@@ -535,7 +536,7 @@ const canReadConversation = async (
   (await db.conversation.count({
     where: {
       id: conversationId,
-      OR: [{ direct: false }, { userId }],
+      ...visibleTo(userId),
     },
   })) > 0;
 
@@ -658,10 +659,10 @@ const settlePendingRequest = async (
  * conversation already gets the supervisor's released steer on the control
  * flip, so this creates a turn ONLY when nothing is active there: the
  * idle case (the agent ended its reply after asking, as the fragment tells
- * it to). The turn is the platform's (`userId: null`), in the direct
+ * it to). The turn is the platform's (`userId: null`), in the private
  * thread the ask came from, through the direct-wake door that is reserved
  * for exactly this kind of platform resume. A conversation that is not
- * direct (a group thread) goes through the system door instead; both are
+ * private (a group thread) goes through the system door instead; both are
  * fenced to the agent's workspace.
  */
 const resumeAgent = async (
@@ -674,7 +675,7 @@ const resumeAgent = async (
     where: { id: conversationId },
     select: {
       id: true,
-      direct: true,
+      userId: true,
       agent: { select: { id: true, workspaceId: true } },
     },
   });
@@ -692,7 +693,7 @@ const resumeAgent = async (
       {
         source: DESKTOP_RESUME_SOURCE,
         userId: null,
-        ...(conversation.direct && {
+        ...(conversation.userId !== null && {
           directWake: { agentId: conversation.agent.id },
         }),
       },

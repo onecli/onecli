@@ -1,1 +1,11 @@
-export { default } from "@/lib/settings/org-api-keys-page";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
+
+interface Props {
+  params: Promise<{ orgId: string }>;
+}
+
+/** An old URL: Settings > Account > API keys. */
+export default async function Page({ params }: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "api-keys");
+}

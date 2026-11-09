@@ -1,15 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { Brain, Loader2, Plus } from "lucide-react";
+import { Brain, Plus } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { cn } from "@onecli/ui/lib/utils";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { useMemories } from "@/hooks/use-memories";
 import type { AgentMemorySummary } from "@/lib/api";
 import { MemoryRow } from "./memory-row";
 import { MemoryDialog } from "./memory-dialog";
 import { MemoryHistorySheet } from "./memory-history-sheet";
+import { ListRowsSkeleton } from "@/lib/dashboard/shell/list-rows-skeleton";
 
 /**
  * The agent's Memory section (step 8; files writable since the write-back
@@ -18,7 +20,13 @@ import { MemoryHistorySheet } from "./memory-history-sheet";
  * here; humans read, edit, restore, and redact — the DB is the one truth
  * for everyone.
  */
-export const MemorySection = () => {
+export const MemorySection = ({
+  /** The block heading. Off on the merged Knowledge page, which titles
+   *  the block itself. */
+  heading = true,
+}: {
+  heading?: boolean;
+} = {}) => {
   const agent = useAgentPageAgent();
   const view = useMemories(agent.id);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -34,14 +42,7 @@ export const MemorySection = () => {
     setDialogOpen(true);
   };
 
-  if (view.isPending) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 className="text-muted-foreground size-5 animate-spin" />
-        <span className="sr-only">Loading memory</span>
-      </div>
-    );
-  }
+  if (view.isPending) return <ListRowsSkeleton label="Loading memory" />;
 
   // Never render mutating controls over a failed load — a blind edit would
   // write against invisible state (the apps-tab law).
@@ -60,22 +61,31 @@ export const MemorySection = () => {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-base font-semibold">Memory</h2>
-          <p className="text-muted-foreground text-sm">
-            What this agent has learned and saved. It writes here through its
-            memory tools and by editing its memory files; your edits are live
-            from its next read.
-          </p>
+      {(heading || rows.length > 0) && (
+        <div
+          className={cn(
+            "flex items-center gap-4",
+            heading ? "justify-between" : "justify-end",
+          )}
+        >
+          {heading && (
+            <div>
+              <h2 className="text-base font-semibold">Memory</h2>
+              <p className="text-muted-foreground text-sm">
+                What this agent has learned and saved. It writes here through
+                its memory tools and by editing its memory files; your edits are
+                live from its next read.
+              </p>
+            </div>
+          )}
+          {rows.length > 0 && (
+            <Button size="sm" onClick={openCreate}>
+              <Plus className="size-4" />
+              New memory
+            </Button>
+          )}
         </div>
-        {rows.length > 0 && (
-          <Button size="sm" onClick={openCreate}>
-            <Plus className="size-4" />
-            New memory
-          </Button>
-        )}
-      </div>
+      )}
 
       {rows.length === 0 ? (
         <Card className="flex flex-col items-center gap-3 p-8 text-center">

@@ -38,6 +38,8 @@ const rendered = (
   peerMessages: [],
   peerMessagesOpeningTask: new Set<number>(),
   tools: [],
+  steps: [],
+  reasoning: "",
   ended: true,
   ...over,
 });

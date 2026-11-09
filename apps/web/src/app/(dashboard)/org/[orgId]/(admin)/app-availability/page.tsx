@@ -1,9 +1,10 @@
-import { redirect } from "next/navigation";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
 /**
- * App availability moved under Organization Settings — it is org-wide
- * administration, not a top-level destination. This keeps the old top-level
- * URL (bookmarks, links already handed out) landing on the new page.
+ * An old URL from before App availability moved under Organization
+ * Settings (bookmarks, links already handed out). It is Settings > Shared
+ * apps now; straight there, not through `settings/app-availability` (a
+ * second redirect).
  */
 export default async function Page({
   params,
@@ -11,5 +12,5 @@ export default async function Page({
   params: Promise<{ orgId: string }>;
 }) {
   const { orgId } = await params;
-  redirect(`/org/${orgId}/settings/app-availability`);
+  await redirectToSettingsModal({ organizationId: orgId }, "shared-apps");
 }

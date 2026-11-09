@@ -6,11 +6,13 @@ import {
   MessageScrollerItem,
   MessageScrollerProvider,
 } from "@onecli/ui/components/message-scroller";
+import { Message, MessageContent } from "@onecli/ui/components/message";
 import type { Turn } from "@/lib/api/types";
 import type { OutgoingMessage } from "@/hooks/use-conversations";
 import type { RenderedTurn } from "@/lib/chat/transcript";
 import { cn } from "@onecli/ui/lib/utils";
 import { isActiveTurn, isFollowUpRow } from "@/lib/chat/turns";
+import { ActivityLine, WAITING_COPY } from "./activity-line";
 import { ApprovalTimelineSlot } from "./approval-timeline-slot";
 import { useApprovalTimeline } from "./approval-timeline";
 import { useApprovalCards } from "./use-approval-cards";
@@ -220,6 +222,19 @@ export const ChatThread = ({
                   conversationId={conversationId}
                   attachments={pending.attachments}
                 />
+                {/* A fresh send is answered at once: the same caption a
+                    running turn starts with, so the reader never stares at
+                    a silent gap while the turn row is created. It hands
+                    over to the turn's own line when the row arrives. Not
+                    for a follow-up: the live run's caption already says
+                    what the agent is doing. */}
+                {pinnedSend && (
+                  <Message align="start" className="mt-3">
+                    <MessageContent className="min-w-0">
+                      <ActivityLine text={WAITING_COPY} turnStatus="sending" />
+                    </MessageContent>
+                  </Message>
+                )}
               </MessageScrollerItem>
             )}
             {/* Cards newer than every turn — including ones raised by a

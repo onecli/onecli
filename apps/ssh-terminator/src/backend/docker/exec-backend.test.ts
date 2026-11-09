@@ -161,6 +161,23 @@ describe("createDockerExecBackend — lifecycle", () => {
     await expect(handle.exited).rejects.toBeInstanceOf(ExecDisconnectedError);
   });
 
+  it("keeps the transport error and skips the exit poll when the stream then closes", async () => {
+    const engine = makeEngine();
+    let inspects = 0;
+    engine.inspectBehavior = () => {
+      inspects += 1;
+      return Promise.resolve({ Running: false, ExitCode: 0 });
+    };
+    const handle = await runExec(engine);
+    engine.socket.emit("error", new Error("boom"));
+    engine.socket.destroy();
+    const error = await handle.exited.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ExecDisconnectedError);
+    expect((error as Error).message).toBe("exec transport error: boom");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(inspects).toBe(0);
+  });
+
   it("dispose() tears the socket down and settles exited — idempotently", async () => {
     const engine = makeEngine();
     engine.inspectBehavior = () =>
