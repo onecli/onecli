@@ -46,6 +46,7 @@ vi.mock("@onecli/db", () => {
     findMany: record(name)("findMany"),
     aggregate: record(name)("aggregate"),
     create: record(name)("create"),
+    createMany: record(name)("createMany"),
     deleteMany: record(name)("deleteMany"),
   });
   const tx = {
@@ -54,6 +55,8 @@ vi.mock("@onecli/db", () => {
       return 0;
     },
     policyRuleV2: model("policyRuleV2"),
+    policyRuleIdentity: model("policyRuleIdentity"),
+    policyRuleTarget: model("policyRuleTarget"),
     agent: model("agent"),
   };
   return {

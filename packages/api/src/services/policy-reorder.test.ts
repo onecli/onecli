@@ -101,6 +101,20 @@ vi.mock("@onecli/db", () => {
         });
         return {};
       },
+      // The publish snapshot writes the generation in bulk.
+      createMany: async ({
+        data,
+      }: {
+        data: { logicalId: string; priority: number }[];
+      }) => {
+        for (const d of data) {
+          state.published.push({
+            logicalId: d.logicalId,
+            priority: d.priority,
+          });
+        }
+        return { count: data.length };
+      },
       update: async ({
         where,
         data,
