@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeSlackTokens } from "./text";
+import { decodeSlackTokens, sectionChunks } from "./text";
 
 /**
  * The inbound token grammar, arm per token type — each rule is the
@@ -226,5 +226,23 @@ describe("decodeSlackTokens", () => {
         resolver,
       ),
     ).toBe("Tom & Jerry (https://x.example/?a=1&b=2) #r&d");
+  });
+});
+
+describe("sectionChunks", () => {
+  it("never cuts an emoji in half on a hard cut", () => {
+    // No newline to cut at, and the emoji straddles the section limit.
+    const text = `${"a".repeat(2899)}😀${"b".repeat(300)}`;
+    const sections = sectionChunks(text);
+
+    expect(sections.join("")).toBe(text);
+    for (const section of sections) {
+      expect(section.length).toBeLessThanOrEqual(2900);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          section,
+        ),
+      ).toBe(false);
+    }
   });
 });
