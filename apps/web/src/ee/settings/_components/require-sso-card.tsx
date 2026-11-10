@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Lock } from "lucide-react";
+import { Lock, ShieldCheck } from "lucide-react";
 import { Card, CardContent } from "@onecli/ui/components/card";
 import { Label } from "@onecli/ui/components/label";
 import { Switch } from "@onecli/ui/components/switch";
@@ -20,6 +20,7 @@ import {
   useUpdateSsoEnforcement,
 } from "@/hooks/use-sso-enforcement";
 import { usePlanGate } from "@/lib/plan-gate";
+import { SsoPanelHeader } from "./sso-panel";
 
 /**
  * The "Require single sign-on" org policy toggle. Enabling is confirmed via
@@ -65,30 +66,43 @@ export const RequireSsoCard = () => {
   return (
     <>
       <Card>
-        <CardContent className="flex items-center justify-between gap-6">
-          <div className="grid gap-1">
-            <Label htmlFor="require-sso" className="flex items-center gap-1.5">
-              {locked && <Lock className="size-3.5" />}
-              Require single sign-on
-            </Label>
-            <p className="text-muted-foreground text-sm">
-              Everyone with an email on your verified domain must sign in
-              through your identity provider. Members marked as break-glass
-              exempt keep their other sign-in methods.
-            </p>
-            {!enforced && !locked && missingPrecondition && (
-              <p aria-live="polite" className="text-muted-foreground text-xs">
-                To turn this on: {missingPrecondition}
-              </p>
-            )}
-          </div>
-          <Switch
-            id="require-sso"
-            checked={enforced}
-            onCheckedChange={handleToggle}
-            disabled={switchDisabled}
-            aria-label="Require single sign-on"
+        <CardContent className="space-y-4">
+          <SsoPanelHeader
+            icon={ShieldCheck}
+            title="Enforcement"
+            description="Require members to sign in through your identity provider."
           />
+          <div className="flex items-start justify-between gap-4">
+            <div className="grid gap-1">
+              <Label
+                htmlFor="require-sso"
+                className="flex items-center gap-1.5"
+              >
+                {locked && <Lock className="size-3.5" />}
+                Require single sign-on
+              </Label>
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                Everyone on your verified domain signs in through your IdP.
+                Break-glass members keep their other sign-in methods.
+              </p>
+            </div>
+            <Switch
+              id="require-sso"
+              checked={enforced}
+              onCheckedChange={handleToggle}
+              disabled={switchDisabled}
+              aria-label="Require single sign-on"
+              className="mt-0.5"
+            />
+          </div>
+          {!enforced && !locked && missingPrecondition && (
+            <p
+              aria-live="polite"
+              className="bg-muted text-muted-foreground rounded-md px-3 py-2 text-xs leading-relaxed"
+            >
+              To turn this on: {missingPrecondition}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -106,8 +120,9 @@ export const RequireSsoCard = () => {
                 {exemptCount === 0 ? (
                   <p className="text-destructive font-medium">
                     No member is break-glass exempt yet. Exempt at least one
-                    owner on the Team page first. Otherwise an identity provider
-                    outage can lock out the entire organization, including you.
+                    owner in Settings &gt; Members first. Otherwise an identity
+                    provider outage can lock out the entire organization,
+                    including you.
                   </p>
                 ) : (
                   <p>

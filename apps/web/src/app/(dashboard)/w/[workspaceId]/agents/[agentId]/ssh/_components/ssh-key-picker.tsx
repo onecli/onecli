@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api";
 import type { SshKey } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { useMintSshCertificate } from "@/hooks/use-agents";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 
 /**
  * Refusals are STATES rendered inline off `ApiError.status`, never toasts.
@@ -45,6 +46,9 @@ export const SshKeyPicker = ({
   mint: ReturnType<typeof useMintSshCertificate>;
 }) => {
   const qc = useQueryClient();
+  // Keys are the person's, kept in Settings > Profile: opened over this
+  // agent, so closing it lands back here.
+  const settingsHref = useSettingsHref();
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   // Deleting the selected key must not strand the picker on a dead id.
   const selected = keys.find((k) => k.id === selectedId) ?? keys[0];
@@ -94,7 +98,7 @@ export const SshKeyPicker = ({
       <p className="text-muted-foreground text-xs">
         Certificates are short-lived; mint one per session.{" "}
         <Link
-          href="/account/ssh-keys"
+          href={settingsHref("profile")}
           className="hover:text-foreground underline underline-offset-2"
         >
           Manage keys

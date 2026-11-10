@@ -5,30 +5,31 @@ import { FileCode2, Link2 } from "lucide-react";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
 import { Textarea } from "@onecli/ui/components/textarea";
-import { cn } from "@onecli/ui/lib/utils";
 import { useCreateSsoConnection } from "@/hooks/use-sso-connections";
 import { usePlanGate } from "@/lib/plan-gate";
 import { PlanGatedSubmitButton } from "./plan-gated-submit-button";
 
-const types = [
-  {
-    value: "saml" as const,
-    label: "SAML 2.0",
-    description: "Entra ID, Okta, and most enterprise IdPs.",
-  },
-  {
-    value: "oidc" as const,
-    label: "OpenID Connect",
-    description: "IdPs exposing an OIDC issuer with client credentials.",
-  },
-];
+export type SsoType = "saml" | "oidc";
 
-export const SsoSetupForm = () => {
+/**
+ * The details one protocol needs, for the Add identity provider dialog's
+ * second step (the dialog's first step picks `type`).
+ */
+export const SsoSetupForm = ({
+  type,
+  onDone,
+  secondaryAction,
+}: {
+  type: SsoType;
+  /** The connection was created. */
+  onDone?: () => void;
+  /** Beside the submit button (the dialog's Back). */
+  secondaryAction?: React.ReactNode;
+}) => {
   const createMutation = useCreateSsoConnection();
   const planGate = usePlanGate();
   const locked = planGate.isLocked("sso");
 
-  const [type, setType] = useState<"saml" | "oidc">("saml");
   const [displayName, setDisplayName] = useState("");
   const [samlSource, setSamlSource] = useState<"url" | "xml">("url");
   const [metadataUrl, setMetadataUrl] = useState("");
@@ -49,47 +50,26 @@ export const SsoSetupForm = () => {
     e.preventDefault();
     if (planGate.guard("sso")) return;
     if (!complete) return;
-    createMutation.mutate({
-      type,
-      displayName: displayName.trim(),
-      ...(type === "saml"
-        ? samlSource === "url"
-          ? { metadataUrl: metadataUrl.trim() }
-          : { metadataXml: metadataXml.trim() }
-        : {
-            issuer: issuer.trim(),
-            clientId: clientId.trim(),
-            clientSecret,
-          }),
-    });
+    createMutation.mutate(
+      {
+        type,
+        displayName: displayName.trim(),
+        ...(type === "saml"
+          ? samlSource === "url"
+            ? { metadataUrl: metadataUrl.trim() }
+            : { metadataXml: metadataXml.trim() }
+          : {
+              issuer: issuer.trim(),
+              clientId: clientId.trim(),
+              clientSecret,
+            }),
+      },
+      { onSuccess: () => onDone?.() },
+    );
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      <div className="grid grid-cols-2 gap-3">
-        {types.map((opt) => {
-          const isSelected = type === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => setType(opt.value)}
-              className={cn(
-                "flex flex-col gap-1.5 rounded-lg border p-4 text-left transition-colors",
-                isSelected
-                  ? "border-brand bg-brand/5"
-                  : "hover:bg-muted/50 hover:border-foreground/20",
-              )}
-            >
-              <span className="text-sm font-medium">{opt.label}</span>
-              <span className="text-muted-foreground text-xs leading-relaxed">
-                {opt.description}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
       <div className="grid gap-2">
         <Label htmlFor="sso-name">Connection name</Label>
         <Input
@@ -182,13 +162,16 @@ export const SsoSetupForm = () => {
         </>
       )}
 
-      <PlanGatedSubmitButton
-        locked={locked}
-        pending={createMutation.isPending}
-        complete={!!complete}
-        pendingLabel="Connecting..."
-        label="Create connection"
-      />
+      <div className="flex justify-end gap-2">
+        {secondaryAction}
+        <PlanGatedSubmitButton
+          locked={locked}
+          pending={createMutation.isPending}
+          complete={!!complete}
+          pendingLabel="Connecting…"
+          label="Create connection"
+        />
+      </div>
     </form>
   );
 };

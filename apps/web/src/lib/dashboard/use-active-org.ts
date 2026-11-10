@@ -17,11 +17,9 @@ export interface UseActiveOrgResult {
   isLoading: boolean;
 }
 
-// Resolves the org the user is currently viewing — and their role in it — keyed
-// on the org id in the URL, so it re-fetches whenever the active org changes
-// (e.g. when the switcher navigates to /org/<id>/...). Extracted from OrgSwitcher
-// so the account menu (NavUser) reads the same switch-aware source and the role
-// it shows can't drift from the org actually being viewed.
+// Resolves the org the user is currently viewing, keyed on the org id in the
+// URL, so it re-fetches whenever the active org changes (e.g. when the
+// switcher navigates to /org/<id>/...). The sidebar's scope menu reads it.
 export const useActiveOrg = (): UseActiveOrgResult => {
   const pathname = usePathname();
   const orgId = extractOrgId(pathname);

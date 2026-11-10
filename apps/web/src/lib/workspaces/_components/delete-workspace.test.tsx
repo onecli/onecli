@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   refresh: vi.fn(),
   setDefaultOrgCookie: vi.fn(),
-  switchWorkspaceAction: vi.fn(),
+  orgLanding: vi.fn(),
   toastError: vi.fn(),
 }));
 
@@ -34,13 +34,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push, refresh: mocks.refresh }),
+  useParams: () => ({}),
+  useSearchParams: () => new URLSearchParams(),
 }));
 vi.mock("@/lib/auth/set-active-scope", () => ({
   setDefaultOrgCookie: mocks.setDefaultOrgCookie,
 }));
-vi.mock("../actions", () => ({
-  switchWorkspaceAction: mocks.switchWorkspaceAction,
-}));
+// Where the org now lands: its first remaining workspace's first agent.
+vi.mock("@/lib/dashboard/landing", () => ({ orgLanding: mocks.orgLanding }));
 vi.mock("@/lib/plan-gate", () => ({
   usePlanGate: () => ({ guard: () => false }),
 }));
@@ -53,7 +54,7 @@ vi.mock("@/ee/billing/_components/upgrade-to-team-button", () => ({
 vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
 
 const { DeleteWorkspaceButton } = await import("./delete-workspace-button");
-const { WorkspaceCard } = await import("./workspace-card");
+const { WorkspaceRow } = await import("./workspace-row");
 
 beforeAll(() => {
   // Radix menus drive their open state through pointer capture and scroll
@@ -83,6 +84,9 @@ beforeEach(() => {
   mocks.setDefaultOrgCookie.mockImplementation(async (orgId: string) => {
     mocks.calls.push(`cookie:${orgId}`);
   });
+  mocks.orgLanding.mockImplementation(
+    async (orgId: string) => `/w/ws-next/agents/ag-of-${orgId}/chat`,
+  );
   mocks.push.mockImplementation((href: string) => {
     mocks.calls.push(`push:${href}`);
   });
@@ -123,11 +127,11 @@ const surfaces = [
     },
   },
   {
-    label: "workspace list card",
+    label: "workspace list row",
     autofocus: false,
     render: ({ name, isLastWorkspace = false }: Props) =>
       renderWithClient(
-        <WorkspaceCard
+        <WorkspaceRow
           id="ws-1"
           name={name}
           agentCount={1}
@@ -140,7 +144,9 @@ const surfaces = [
         />,
       ),
     open: async (user: ReturnType<typeof userEvent.setup>) => {
-      await user.click(screen.getByRole("button", { name: "" }));
+      await user.click(
+        screen.getByRole("button", { name: "Workspace actions" }),
+      );
       await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     },
   },
@@ -196,7 +202,7 @@ describe.each(surfaces)("delete workspace from the $label", (surface) => {
     expect(confirm).toBeEnabled();
   });
 
-  it("deletes, closes, then pins the org and goes to its workspace list", async () => {
+  it("deletes, closes, then pins the org and goes straight to where it lands", async () => {
     const { user, dialog } = await openDialog();
     await user.type(
       within(dialog).getByPlaceholderText("Enter the workspace ID"),
@@ -204,14 +210,17 @@ describe.each(surfaces)("delete workspace from the $label", (surface) => {
     );
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
+    // One hop: the org's first agent, never its workspaces URL (which
+    // would render the shell around its redirect first).
     await waitFor(() =>
       expect(mocks.calls).toEqual([
         "remove:ws-1",
         "cookie:org-1",
-        "push:/org/org-1/workspaces",
+        "push:/w/ws-next/agents/ag-of-org-1/chat",
         "refresh",
       ]),
     );
+    expect(mocks.orgLanding).toHaveBeenCalledWith("org-1");
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
@@ -233,7 +242,9 @@ describe.each(surfaces)("delete workspace from the $label", (surface) => {
     expect(mocks.push).not.toHaveBeenCalled();
     cookie.resolve();
     await waitFor(() =>
-      expect(mocks.push).toHaveBeenCalledWith("/org/org-1/workspaces"),
+      expect(mocks.push).toHaveBeenCalledWith(
+        "/w/ws-next/agents/ag-of-org-1/chat",
+      ),
     );
   });
 
@@ -345,22 +356,22 @@ describe("delete entry points for the only workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("disables the card menu's Delete item", async () => {
+  it("disables the row menu's Delete item", async () => {
     const user = userEvent.setup();
     surfaces[1]!.render({ name: "Acme", isLastWorkspace: true });
-    await user.click(screen.getByRole("button", { name: "" }));
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     expect(
       await screen.findByRole("menuitem", { name: "Delete" }),
     ).toHaveAttribute("data-disabled");
   });
 });
 
-describe("workspace list card", () => {
-  it("opens the delete dialog without switching into the workspace", async () => {
+describe("workspace list row", () => {
+  it("opens the delete dialog without navigating anywhere", async () => {
     const user = userEvent.setup();
     surfaces[1]!.render({ name: "Acme" });
     await surfaces[1]!.open(user);
     expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
-    expect(mocks.switchWorkspaceAction).not.toHaveBeenCalled();
+    expect(mocks.push).not.toHaveBeenCalled();
   });
 });

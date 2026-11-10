@@ -1,15 +1,16 @@
-"use client";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-import { OnePasswordSetup } from "../../_components/onepassword-setup";
-import { VaultPageFrame } from "../../_components/vault-page-frame";
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
 
-export default function OnePasswordPage() {
-  return (
-    <VaultPageFrame
-      title="1Password"
-      description="Resolve secrets on-demand from 1Password using a service account. Nothing is stored on the server."
-    >
-      <OnePasswordSetup />
-    </VaultPageFrame>
-  );
+/** An old URL: Settings > Apps, the 1Password setup
+ *  (`?settings=apps&vault=onepassword`). */
+export default async function OnePasswordPage({ params, searchParams }: Props) {
+  const { workspaceId } = await params;
+  await redirectToSettingsModal({ workspaceId }, "apps", {
+    ...(await searchParams),
+    vault: "onepassword",
+  });
 }

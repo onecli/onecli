@@ -132,6 +132,10 @@ vi.mock("@/hooks/use-org-channels", async () => {
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: (u: string) => state.replaced.push(u) }),
 }));
+// The org's landing (its first agent); `landing.test.ts` pins the lookup.
+vi.mock("@/lib/dashboard/landing", () => ({
+  orgLanding: async (orgId: string) => `/w/ws-of-${orgId}/agents/a1/chat`,
+}));
 
 import { SlackInstalledFinish } from "./slack-installed-finish";
 
@@ -158,7 +162,7 @@ describe("SlackInstalledFinish (an agent's own app, installed from Slack)", () =
     render(<SlackInstalledFinish code="agent-code" organization={ORG} />);
     await waitFor(() =>
       expect(state.replaced).toEqual([
-        "/w/ws-1/agents/agent-1/channels?connected=slack",
+        "/w/ws-1/agents/agent-1/contacts?connected=slack",
       ]),
     );
     expect(state.agentCalls).toEqual([
@@ -180,7 +184,7 @@ describe("SlackInstalledFinish (an agent's own app, installed from Slack)", () =
     render(<SlackInstalledFinish code="socket-code" organization={ORG} />);
     await waitFor(() =>
       expect(state.replaced).toEqual([
-        "/w/ws-1/agents/agent-1/channels?installed=slack",
+        "/w/ws-1/agents/agent-1/contacts?installed=slack",
       ]),
     );
     expect(state.inspectCalls).toHaveLength(0);
@@ -244,7 +248,9 @@ describe("SlackInstalledFinish (login-CSRF control)", () => {
       { provider: "slack", claim: "sealed-claim-1", organizationId: "org-1" },
     ]);
     await waitFor(() =>
-      expect(state.replaced).toEqual(["/org/org-1/channels?connected=slack"]),
+      expect(state.replaced).toEqual([
+        "/w/ws-of-org-1/agents/a1/chat?settings=slack&connected=slack",
+      ]),
     );
   });
 
@@ -260,7 +266,11 @@ describe("SlackInstalledFinish (login-CSRF control)", () => {
     await user.click(await screen.findByRole("button", { name: "Cancel" }));
 
     expect(state.finishCalls).toHaveLength(0);
-    expect(state.replaced).toEqual(["/org/org-9/channels"]);
+    await waitFor(() =>
+      expect(state.replaced).toEqual([
+        "/w/ws-of-org-9/agents/a1/chat?settings=slack",
+      ]),
+    );
   });
 
   it("an org-less account gets guidance — and the code is NOT burned", async () => {
@@ -305,7 +315,7 @@ describe("SlackInstalledFinish (login-CSRF control)", () => {
     // A workspace install has no agent to resume: the agent hint is not owed.
     expect(screen.queryByText(/Resume setup/)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Go to Channels" }),
+      screen.getByRole("button", { name: "Go to Slack settings" }),
     ).toBeInTheDocument();
     expect(state.finishCalls).toHaveLength(0);
   });

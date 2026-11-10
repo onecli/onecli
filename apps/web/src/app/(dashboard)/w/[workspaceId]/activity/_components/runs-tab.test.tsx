@@ -57,7 +57,7 @@ const Harness = ({
 const facts = {
   conversationId: "c1",
   agent: { id: "ag-1", name: "Donna" },
-  direct: false,
+  privateThread: false,
   status: "failed",
   askedBy: null,
   appAttribution: "withheld",
@@ -156,7 +156,7 @@ describe("Activity Runs tab", () => {
         ...facts,
         turnId: "t2",
         source: "web",
-        direct: true,
+        privateThread: true,
         private: true,
       },
     ]);

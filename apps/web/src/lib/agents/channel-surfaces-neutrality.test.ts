@@ -5,14 +5,14 @@ import { CHANNEL_PROVIDER_UIS } from "./channel-providers/registry";
 
 /**
  * The dashboard's channel module law, the twin of the api's and the
- * adapter's `provider-neutrality.test.ts`: the GENERIC channel surfaces —
- * the agent's Channels section, the agent rail's connected mark, the
- * sidebar's agent rows, and the provider-label/icon helpers — never name a
- * provider. They iterate presences and look the provider up in
- * `channel-providers/registry.ts`; the provider's cards, name and mark live
- * in `channel-providers/<id>.tsx` and the `<id>-*` components it names. A
- * Teams module is a component directory plus one registry line and gets the
- * section, the marks and the connect round-trip with nothing else to edit.
+ * adapter's `provider-neutrality.test.ts`: the GENERIC channel surfaces,
+ * the agent's Channels section, the rail's and the sidebar's agent marks,
+ * and the provider-label/icon helpers, never name a provider. They iterate
+ * presences and look the provider up in `channel-providers/registry.ts`;
+ * the provider's cards, name and mark live in `channel-providers/<id>.tsx`
+ * and the `<id>-*` components it names. A Teams module is a component
+ * directory plus one registry line and gets the section, the marks and the
+ * connect round-trip with nothing else to edit.
  *
  * Written 2026-09-15 after a whole-PR neutrality audit found the section
  * mounting the Slack cards directly and both marks calling a Slack-only
@@ -22,8 +22,9 @@ describe("the generic channel surfaces are provider-neutral", () => {
   const root = join(__dirname, "..", "..");
   const generic = [
     "app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/channels-section.tsx",
-    "app/(dashboard)/w/[workspaceId]/agents/[agentId]/_components/agent-section-rail.tsx",
-    "lib/dashboard/agents-group.tsx",
+    "lib/dashboard/shell/dashboard-rail.tsx",
+    "lib/dashboard/shell/dashboard-sidebar.tsx",
+    "lib/dashboard/shell/agent-header.tsx",
     "lib/agents/channel-provider-ui.ts",
     "lib/agents/channel-providers.ts",
   ];

@@ -42,7 +42,7 @@ export const LibraryGranted = () => {
       </p>
       <p className="text-muted-foreground text-xs">
         {sent === false
-          ? "Close this window and try again from the Skills page."
+          ? "Close this window and try connecting the library again."
           : "Return to OneCLI to pick the repo."}
       </p>
       <Button size="sm" variant="outline" onClick={() => window.close()}>

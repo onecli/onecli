@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  CHANNEL_LIVENESS,
   sequencedFrameSchema,
   supervisorMessageSchema,
   type RunnerChannelClaimRequest,
@@ -75,8 +76,9 @@ export interface RunnerWsServerOptions {
   channels: ChannelPlane;
   /** Resumable sessions; absent = bootstrap-only. */
   keyring?: SessionKeyring;
-  /** Keepalive cadence override; tests only, see PING_INTERVAL_MS. */
-  pingIntervalMs?: number;
+  /** Liveness override (ping cadence, silence limit); tests only, see
+   * CHANNEL_LIVENESS. */
+  liveness?: { intervalMs: number; timeoutMs: number };
   /** First re-claim backoff override; tests only, see RECLAIM_MIN_MS. */
   reclaimMinMs?: number;
 }
@@ -92,6 +94,15 @@ export interface RunnerWsServer {
   /** Register a callback for a supervisor socket closing (port streams, and
    * the runner's check of the container the socket was for). */
   onDisconnect(
+    listener: (sandboxId: string, containerRef: string) => void,
+  ): void;
+  /**
+   * Register a callback for a socket this server CLOSED because its
+   * supervisor went silent while other sockets on this copy kept answering
+   * (see the liveness doc below). Fires after the socket's own disconnect
+   * listeners.
+   */
+  onUnresponsive(
     listener: (sandboxId: string, containerRef: string) => void,
   ): void;
   listen(): Promise<void>;
@@ -113,14 +124,30 @@ export interface RunnerWsServer {
 }
 
 /**
- * Keepalive cadence for every supervisor channel. The channel is long-lived
- * and mostly SILENT, and a load balancer in front of the runner may drop a
- * flow that stays quiet past its idle timeout (often a few minutes). A
- * server-side ping well inside that window keeps the flow alive; peers
- * answer with pong automatically. Keepalive only: dead peers surface
- * through close events and reconcile.
+ * THE RUNNER'S SIDE OF CHANNEL LIVENESS (`CHANNEL_LIVENESS`, the same law
+ * the supervisor holds the runner to). Every live socket is pinged every
+ * `intervalMs`, which also keeps a load balancer from dropping a quiet
+ * flow, and a pong or any frame counts as hearing from its supervisor. One
+ * silent for longer than `timeoutMs` is terminated (no close handshake: a
+ * peer that cannot answer a ping cannot answer one either), which puts it
+ * on the ordinary closed-socket path.
+ *
+ * Without this a sandbox that stopped running anything (its process
+ * stopped, or the machine under it stalled) kept its socket OPEN, so the
+ * control plane kept reading its channel as held, kept handing it turns
+ * that never started, and never stopped it, because a sandbox owed turns
+ * is never idle.
+ *
+ * Two guards keep a fault of THIS copy or its network from reading as one
+ * supervisor's silence. A check that fires far later than scheduled (the
+ * event loop or the host was paused) judges nothing and restarts every
+ * clock. And a silent socket is reported unresponsive only while another
+ * socket on this copy was heard inside the window: when every one went
+ * quiet together (a copy holding a single socket can never tell the
+ * difference), each is still closed (its supervisor redials), but the
+ * ordinary reconnect grace decides what happens next.
  */
-const PING_INTERVAL_MS = 60_000;
+const LATE_TICK_FACTOR = 2;
 /** Backoff bounds for re-claiming a socket admitted during an outage. */
 const RECLAIM_MIN_MS = 1_000;
 const RECLAIM_MAX_MS = 15_000;
@@ -147,6 +174,10 @@ interface Channel extends Admitted {
   /** Settles once this socket's claim is resolved one way or another, so a
    * release is never sent ahead of the claim it undoes. */
   claimed: Promise<void>;
+  /** When this copy last heard from the supervisor: any frame or pong. */
+  heardAt: number;
+  /** Set when the liveness check closed the socket for its silence. */
+  unresponsive: boolean;
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -159,7 +190,7 @@ export const createRunnerWsServer = ({
   onMessage,
   channels,
   keyring,
-  pingIntervalMs = PING_INTERVAL_MS,
+  liveness = CHANNEL_LIVENESS,
   reclaimMinMs = RECLAIM_MIN_MS,
 }: RunnerWsServerOptions): RunnerWsServer => {
   /** sandboxId → this copy's live socket for it. */
@@ -176,7 +207,12 @@ export const createRunnerWsServer = ({
   const disconnectListeners: Array<
     (sandboxId: string, containerRef: string) => void
   > = [];
+  const unresponsiveListeners: Array<
+    (sandboxId: string, containerRef: string) => void
+  > = [];
   let pingTimer: NodeJS.Timeout | undefined;
+  /** When the liveness check last ran (0: not yet). */
+  let lastCheckAt = 0;
   let draining = false;
   /** Set by `crash`: sockets die with no close frame and nothing released. */
   let crashed = false;
@@ -371,7 +407,13 @@ export const createRunnerWsServer = ({
   };
 
   const attach = (ws: WebSocket, admitted: Admitted) => {
-    const channel: Channel = { ...admitted, ws, claimed: Promise.resolve() };
+    const channel: Channel = {
+      ...admitted,
+      ws,
+      claimed: Promise.resolve(),
+      heardAt: Date.now(),
+      unresponsive: false,
+    };
     if (admitted.claimOwed) channel.claimed = settleOwedClaim(channel);
     const { sandboxId } = channel;
 
@@ -390,7 +432,13 @@ export const createRunnerWsServer = ({
     // so it can move on to another copy like every other socket here.
     if (draining) ws.close(CLOSE_RESTART, "runner restarting");
 
-    ws.on("message", (data) => onFrame(channel, data));
+    ws.on("message", (data) => {
+      channel.heardAt = Date.now();
+      onFrame(channel, data);
+    });
+    ws.on("pong", () => {
+      channel.heardAt = Date.now();
+    });
     ws.on("close", () => {
       if (crashed) return;
       // Fenced by connection on the control plane: a release for a socket
@@ -406,6 +454,16 @@ export const createRunnerWsServer = ({
           listener(sandboxId, channel.containerRef);
         } catch (error) {
           log("warn", "disconnect listener failed", { error: String(error) });
+        }
+      }
+      if (!channel.unresponsive) return;
+      for (const listener of unresponsiveListeners) {
+        try {
+          listener(sandboxId, channel.containerRef);
+        } catch (error) {
+          log("warn", "unresponsive listener failed", {
+            error: String(error),
+          });
         }
       }
     });
@@ -461,6 +519,47 @@ export const createRunnerWsServer = ({
     );
   });
 
+  /** One liveness pass: judge every socket, then ping the ones kept. */
+  const checkLiveness = () => {
+    const now = Date.now();
+    const late =
+      lastCheckAt !== 0 &&
+      now - lastCheckAt > liveness.intervalMs * LATE_TICK_FACTOR;
+    lastCheckAt = now;
+    if (late) {
+      // This process was not running for a while: nobody's silence in that
+      // window is evidence of anything. Every clock starts again.
+      log("warn", "liveness check ran late; restarting every clock", {
+        sockets: live.size,
+      });
+      for (const channel of live.values()) channel.heardAt = now;
+    }
+    const silent = [...live.values()].filter(
+      (channel) => now - channel.heardAt > liveness.timeoutMs,
+    );
+    const isolated = silent.length < live.size;
+    for (const channel of silent) {
+      channel.unresponsive = isolated;
+      log("warn", "supervisor silent; closing its socket", {
+        sandboxId: channel.sandboxId,
+        silentMs: now - channel.heardAt,
+        isolated,
+      });
+      channel.ws.terminate();
+    }
+    for (const [sandboxId, channel] of live) {
+      if (channel.ws.readyState !== channel.ws.OPEN) continue;
+      try {
+        channel.ws.ping();
+      } catch (error) {
+        log("warn", "supervisor ping failed", {
+          sandboxId,
+          error: String(error),
+        });
+      }
+    }
+  };
+
   const waitClosed = (sockets: WebSocket[]): Promise<void> =>
     Promise.race([
       Promise.all(
@@ -495,19 +594,12 @@ export const createRunnerWsServer = ({
       disconnectListeners.push(listener);
     },
 
+    onUnresponsive(listener) {
+      unresponsiveListeners.push(listener);
+    },
+
     listen() {
-      pingTimer = setInterval(() => {
-        for (const [sandboxId, channel] of live) {
-          try {
-            channel.ws.ping();
-          } catch (error) {
-            log("warn", "supervisor ping failed", {
-              sandboxId,
-              error: String(error),
-            });
-          }
-        }
-      }, pingIntervalMs);
+      pingTimer = setInterval(checkLiveness, liveness.intervalMs);
       pingTimer.unref?.();
       return new Promise((resolve, reject) => {
         http.once("error", reject);

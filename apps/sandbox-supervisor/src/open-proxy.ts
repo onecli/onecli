@@ -52,7 +52,7 @@ export const OPEN_LANE_USER = "open";
  * `OPEN_PROXY` carries whatever was bound. Instructions cite the variable,
  * never the number.
  */
-export const OPEN_PROXY_PORT = 3128;
+const OPEN_PROXY_PORT = 3128;
 
 /** How many consecutive ports to try after the preferred one before giving up. */
 const PORT_ATTEMPTS = 10;

@@ -5,18 +5,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
-import { Skeleton } from "@onecli/ui/components/skeleton";
 import { matchAgentPage, withWorkspacePrefix } from "@/lib/navigation";
-import {
-  agentSectionBlocked,
-  isFullHeightAgentSection,
-  isTheaterAgentSection,
-} from "@/lib/agents/agent-sections";
+import { agentSectionBlocked } from "@/lib/agents/agent-sections";
 import { useAgents, useWarmAgent } from "@/hooks/use-agents";
-import { AgentPageHeader } from "./agent-page-header";
-import { AgentSectionRail } from "./agent-section-rail";
+import { AgentSectionCell } from "./agent-section-cell";
+import { AgentSectionSkeleton } from "./agent-section-skeleton";
 import { EmptyState } from "./empty-state";
-import { SectionShell } from "./section-shell";
 
 /**
  * The agent row the list query actually yields — derived from the hook rather
@@ -46,31 +40,11 @@ export const useAgentPageAgent = (): AgentPageAgent => {
 export const useAgentPageAgentMaybe = (): AgentPageAgent | null =>
   useContext(AgentPageContext);
 
-const FrameSkeleton = () => (
-  <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-    <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
-      <Skeleton className="size-8 rounded-lg" />
-      <Skeleton className="h-5 w-40" />
-    </div>
-    <div className="flex min-h-0 flex-1">
-      <div className="hidden w-52 shrink-0 space-y-2 border-r p-3 md:block">
-        {[1, 2, 3, 4].map((i) => (
-          <Skeleton key={i} className="h-8 w-full" />
-        ))}
-      </div>
-      <SectionShell className="space-y-3">
-        {[1, 2, 3].map((i) => (
-          <Skeleton key={i} className="h-14 w-full" />
-        ))}
-      </SectionShell>
-    </div>
-  </div>
-);
-
 /**
  * The client frame behind the agent-page layout: it resolves the agent once
- * and renders the header + rail around whichever section is mounted, so every
- * section can assume its agent exists and is one this kind of agent has.
+ * and renders the section inside it, so every section can assume its agent
+ * exists and is one this kind of agent has. The dashboard's sidebar names
+ * the agent and lists its sections, so the frame adds no chrome of its own.
  */
 export const AgentPageFrame = ({
   agentId,
@@ -98,13 +72,10 @@ export const AgentPageFrame = ({
   }, [warm, agentIdentity, agentKind]);
 
   if (isPending)
-    return isTheaterAgentSection(section) ? (
-      <div className="flex flex-1 items-center justify-center" aria-busy="true">
-        <span className="sr-only">Loading agent</span>
-        <Skeleton className="h-8 w-40" />
-      </div>
-    ) : (
-      <FrameSkeleton />
+    return (
+      <AgentSectionCell section={section}>
+        <AgentSectionSkeleton section={section} />
+      </AgentSectionCell>
     );
 
   if (isError) {
@@ -142,45 +113,22 @@ export const AgentPageFrame = ({
   }
 
   // A section this kind of agent doesn't have (a hand-typed URL, or a stale
-  // link after switching agents). The rail never offers it; this is the
+  // link after switching agents). The sidebar never offers it; this is the
   // backstop, in one place rather than in each section.
   const blocked = agentSectionBlocked(section, agent.kind);
 
-  if (isTheaterAgentSection(section)) {
-    return (
-      <AgentPageContext.Provider value={agent}>
-        {blocked ? (
+  return (
+    <AgentPageContext.Provider value={agent}>
+      {blocked ? (
+        <AgentSectionCell section={section} shell={false}>
           <EmptyState
             tone="quiet"
             title="That section is only available for hosted agents."
           />
-        ) : (
-          children
-        )}
-      </AgentPageContext.Provider>
-    );
-  }
-
-  return (
-    <AgentPageContext.Provider value={agent}>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <AgentPageHeader agent={agent} />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-          <AgentSectionRail agent={agent} />
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {blocked ? (
-              <EmptyState
-                tone="quiet"
-                title="That section is only available for hosted agents."
-              />
-            ) : isFullHeightAgentSection(section) ? (
-              children
-            ) : (
-              <SectionShell>{children}</SectionShell>
-            )}
-          </div>
-        </div>
-      </div>
+        </AgentSectionCell>
+      ) : (
+        <AgentSectionCell section={section}>{children}</AgentSectionCell>
+      )}
     </AgentPageContext.Provider>
   );
 };

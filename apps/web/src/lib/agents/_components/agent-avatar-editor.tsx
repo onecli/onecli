@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
 import { useUpdateAgentImage } from "@/hooks/use-agents";
+import { cn } from "@onecli/ui/lib/utils";
 
 /**
  * The avatar's upload/replace/remove door (the agent page header) — the
@@ -22,6 +23,8 @@ import { useUpdateAgentImage } from "@/hooks/use-agents";
  */
 export const AgentAvatarEditor = ({
   agent,
+  renderFrame,
+  className,
 }: {
   agent: {
     id: string;
@@ -32,13 +35,26 @@ export const AgentAvatarEditor = ({
      * deep-link menu item. */
     channels?: { provider: string; settingsUrl?: string | null }[];
   };
+  /** A different mark inside the same door (the sidebar header's initials
+   *  square). Receives the in-flight signal. */
+  renderFrame?: (pending: boolean) => React.ReactNode;
+  /** Extra classes on the trigger (its radius must match the mark's). */
+  className?: string;
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const update = useUpdateAgentImage();
   const settingsChannel = agent.channels?.find((c) => c.settingsUrl);
 
-  const frame = <AgentAvatar agent={agent} pending={update.isPending} />;
+  const frame = renderFrame ? (
+    renderFrame(update.isPending)
+  ) : (
+    <AgentAvatar agent={agent} pending={update.isPending} />
+  );
+  const triggerClass = cn(
+    "focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none",
+    className,
+  );
 
   const onFile = (file: File | undefined) => {
     // The crop runs inside the mutation, so isPending covers it end to end.
@@ -63,7 +79,8 @@ export const AgentAvatarEditor = ({
             <button
               type="button"
               aria-label="Change agent image"
-              className="focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
+              title="Change photo"
+              className={triggerClass}
               disabled={update.isPending}
             >
               {frame}
@@ -115,7 +132,8 @@ export const AgentAvatarEditor = ({
         <button
           type="button"
           aria-label="Upload agent image"
-          className="focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
+          title="Change photo"
+          className={triggerClass}
           disabled={update.isPending}
           onClick={() => inputRef.current?.click()}
         >

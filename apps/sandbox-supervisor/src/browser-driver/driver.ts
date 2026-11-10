@@ -3,6 +3,8 @@ import {
   errors,
   type Browser,
   type BrowserContext,
+  type Dialog,
+  type FileChooser,
   type Frame,
   type Locator,
   type Page,
@@ -17,7 +19,14 @@ import {
   parseSnapshot,
   type DialogNode,
 } from "./snapshot";
-import type { ModalInfo, Reply, Request, TabInfo } from "./protocol";
+import type {
+  ModalInfo,
+  PendingDialog,
+  Reply,
+  Request,
+  TabInfo,
+} from "./protocol";
+import type { GetProperty } from "./get-property";
 import { describeAction } from "./modal-action";
 import { hostOf, onSite, siteOf } from "./site";
 import {
@@ -31,6 +40,7 @@ import {
   launchBrowser,
   type LaunchEnvironment,
 } from "./launch";
+import { containedPath, type ContainmentReason } from "../home/contained-path";
 
 /**
  * The driver: one attached browser, the verbs on it, and the page state each
@@ -56,6 +66,14 @@ import {
  * clicking behind it; a reply that does not say so lets it believe the
  * click landed (observed live: a scripted loop marked real pages as failed
  * for minutes while a quota dialog sat on the screen).
+ *
+ * JavaScript dialogs: an `alert` is accepted on the spot and reported (it
+ * has one answer). A `confirm` or `prompt` is HELD: the page is stopped on
+ * it, the verb that raised it answers with the question, and only `dialog
+ * accept|dismiss` moves on. Answering for the agent would decide "Delete
+ * everything?" on its behalf (the old auto-dismiss always said no, so an
+ * agent could never say yes). While a dialog is held the renderer runs
+ * nothing: a read of the page would hang, so no verb touches it.
  */
 
 /** DOM quiet for this long after an action counts as settled. */
@@ -103,7 +121,7 @@ const GONE_TIMEOUT_MS = 60_000;
  * while after load; observed live on a 3-CPU sandbox, 5 s was not enough
  * for a forum index.
  */
-const ACTION_TIMEOUT_MS = 15_000;
+export const ACTION_TIMEOUT_MS = 15_000;
 /**
  * The title of a modal that names itself nowhere (no label, no heading):
  * `modal "(untitled)"` reads as a blocker with no name, where an empty
@@ -127,6 +145,16 @@ const BEHIND_MODAL_TIMEOUT_MS = 2_000;
 export const VERB_DEADLINE_MS = 75_000;
 /** A dialog's or an alert's words are summarized in the header, not reprinted whole. */
 const MODAL_TEXT_MAX = 300;
+/**
+ * Page text that lands in a reply line (a confirm's question, a prompt's
+ * prefill, what a field reads after `type`) is clipped to this: a page
+ * controls those strings, and a megabyte `confirm()` must not become a
+ * megabyte of the agent's context. Modals have the same cap.
+ */
+const clip = (text: string): string =>
+  text.length > MODAL_TEXT_MAX
+    ? `${text.slice(0, MODAL_TEXT_MAX - 1).trimEnd()}…`
+    : text;
 /** The most modals, and the most alerts, a header names; past that the page is noise. */
 const OVERLAYS_MAX = 3;
 /** `read` keeps a page's worth of text, not a crawl's. */
@@ -150,16 +178,22 @@ const CHALLENGE_FRAME_HOSTS =
   /captcha-delivery\.com|challenges\.cloudflare\.com|hcaptcha\.com|recaptcha|perimeterx|px-cdn\.net|arkoselabs\.com|funcaptcha/i;
 
 /**
+ * A refusal with a message written for the agent: the next step, not the
+ * symptom. Every subclass is answered as `ok: false` with its message.
+ */
+class Refusal extends Error {}
+
+/**
  * A target that names no element of the last snapshot, or more than one.
  * The message is resolveTarget's: what to do instead.
  */
-export class TargetError extends Error {}
+export class TargetError extends Refusal {}
 
 /**
  * An action on an element the open modal covers. The message is the next
  * step, not the symptom: which modal, and the controls that answer it.
  */
-class BehindModalError extends Error {
+class BehindModalError extends Refusal {
   constructor(target: string, modal: ModalInfo) {
     const answers = modal.actions.map(describeAction).join(", ");
     super(
@@ -169,11 +203,82 @@ class BehindModalError extends Error {
 }
 
 /**
+ * A click that never reached its element because another element sits on
+ * the click point (a cookie banner, a sticky header, a spinner overlay).
+ * Playwright retries for the whole action timeout and then reports a bare
+ * "Timeout exceeded"; its call log names the interceptor, which is the one
+ * thing the agent needs. Observed with agent-browser's wording of the same
+ * refusal, which an agent acts on correctly: dismiss the cover first.
+ */
+class CoveredError extends Refusal {
+  constructor(target: string, cover: string) {
+    super(
+      `${target} is covered by ${cover}; dismiss or close that first, then take a snapshot`,
+    );
+  }
+}
+
+/**
+ * The line Playwright's call log writes when a pointer action is
+ * intercepted: `<p>…</p> from <div id="banner">…</div> subtree intercepts
+ * pointer events`. The subtree root is what the agent dismisses (the
+ * banner, not the paragraph in it), so it is the one named; without a
+ * `from`, the element itself. The log is coloured for a terminal; the
+ * escapes come off first.
+ */
+const INTERCEPTED =
+  /(<[^\n]+?>)(?: from (<[^\n]+?>) subtree)? intercepts pointer events/;
+// eslint-disable-next-line no-control-regex -- the escapes are the point
+const ANSI = /\u001b\[[0-9;]*m/g;
+
+/** The element the call log says intercepts, as its opening tag. */
+const interceptorOf = (message: string): string | undefined => {
+  const match = INTERCEPTED.exec(message.replace(ANSI, ""));
+  if (!match) return undefined;
+  // The log abbreviates an element to `<div id="x">…</div>`; its opening
+  // tag is what names it.
+  const tag = match[2] ?? match[1] ?? "";
+  return /^<[^>]*>/.exec(tag)?.[0];
+};
+
+/**
+ * `type` landed, but the field reads something else: a masked input that
+ * keeps only digits, a widget that swallows the keystrokes, a field the
+ * page cleared on input. Playwright's `fill` reports none of this, and an
+ * agent told "ok" moves on with a form it did not fill (observed with
+ * agent-browser: `fill` behind a modal, exit 0, value unchanged). The
+ * message names what landed, unless the text is a secret.
+ */
+class NotTakenError extends Refusal {
+  constructor(target: string, landed: string | null, secret: boolean) {
+    super(
+      landed === null
+        ? `${target} did not take the text; the page may need the field clicked first`
+        : secret
+          ? `${target} did not take the text (the field reads something else)`
+          : `${target} did not take the text: the field reads ${JSON.stringify(clip(landed))}; the page may filter input (try the shape it expects) or need the field clicked first`,
+    );
+  }
+}
+
+/**
+ * A verb that needs the page while a JavaScript dialog is holding it. The
+ * message is the one way forward.
+ */
+class DialogHeldError extends Refusal {
+  constructor(pending: PendingDialog) {
+    super(
+      `the page is stopped on a ${pending.type}: ${JSON.stringify(pending.message)}; answer it first: dialog accept${pending.type === "prompt" ? " [text]" : ""} | dialog dismiss`,
+    );
+  }
+}
+
+/**
  * `wait --gone` ran out: the words are still on the screen. Playwright's
  * own message ("Timeout 60000ms exceeded.") says neither what is still
  * there nor what to do about it.
  */
-class StillShowingError extends Error {
+class StillShowingError extends Refusal {
   constructor(text: string) {
     super(
       `"${text}" is still showing after ${String(GONE_TIMEOUT_MS / 1_000)} s; take a screenshot to see why, then wait again or report it`,
@@ -201,6 +306,11 @@ interface TabState {
   previous: ElementIndex;
   /** The last dialog the page raised, reported once with the next reply. */
   dialog: string | null;
+  /**
+   * A confirm or prompt the page raised and the driver holds, with what to
+   * answer it. Set by the context's dialog handler, cleared by `dialog`.
+   */
+  held: { dialog: Dialog; info: PendingDialog } | null;
   /** The modals the last reply reported, topmost first. */
   modals: ModalInfo[];
   /**
@@ -215,6 +325,23 @@ export interface DriverOptions {
   /** Where screenshots land when the verb names no path. */
   outputDir: string;
 }
+
+/** Names a tab's JavaScript dialog is reported under: what the page asked. */
+const describeDialog = (dialog: Dialog): string =>
+  `${dialog.type()}: ${clip(dialog.message())}`;
+
+/**
+ * An element for a refusal: its role and name as its line reads, when the
+ * last snapshot has it with a name; else what the agent typed (a ref, or
+ * the nameless role).
+ */
+const describeElement = (
+  element: { role: string; name: string } | undefined,
+  target: Target,
+): string =>
+  element && element.name !== ""
+    ? describeTarget({ role: element.role, name: element.name })
+    : describeTarget(target);
 
 export class Driver {
   private browser: Browser | null = null;
@@ -236,17 +363,32 @@ export class Driver {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
-    // A dialog answered here never blocks a verb: alerts are accepted, a
-    // confirm/prompt dismissed, and the agent is told in the next reply.
+    // An alert (or a beforeunload) has one answer and gets it here, so it
+    // never blocks a verb; the agent is told in the next reply. A confirm
+    // or a prompt is a question for the agent: held, and reported by the
+    // verb that raised it (act(), which watches for this).
     context.on("dialog", (dialog) => {
       const page = dialog.page();
-      if (page)
-        this.stateOf(page).dialog = `${dialog.type()}: ${dialog.message()}`;
-      void (
-        dialog.type() === "alert" || dialog.type() === "beforeunload"
-          ? dialog.accept()
-          : dialog.dismiss()
-      ).catch(() => undefined);
+      const type = dialog.type();
+      if (page && (type === "confirm" || type === "prompt")) {
+        const state = this.stateOf(page);
+        // Two in a row (a page that asks again before the first is read):
+        // the earlier one is dismissed so the page can reach the later one.
+        void state.held?.dialog.dismiss().catch(() => undefined);
+        state.held = {
+          dialog,
+          info: {
+            type,
+            message: clip(dialog.message()),
+            ...(type === "prompt"
+              ? { defaultValue: clip(dialog.defaultValue()) }
+              : {}),
+          },
+        };
+        return;
+      }
+      if (page) this.stateOf(page).dialog = describeDialog(dialog);
+      void dialog.accept().catch(() => undefined);
     });
     browser.once("disconnected", () => {
       this.browser = null;
@@ -259,6 +401,20 @@ export class Driver {
   }
 
   async close(): Promise<void> {
+    // A confirm or prompt still held would outlive this attachment and
+    // wedge the next one: Chrome answers no CDP attach while a page is
+    // stopped on a dialog nobody owns (observed live: every verb after a
+    // `stop` timed out at 30 s, forever). Dismiss what is held first; the
+    // agent lost the question with the daemon, and a `no` is the safe
+    // default answer to one it never gave.
+    for (const page of this.context?.pages() ?? []) {
+      const state = this.tabs.get(page);
+      if (state?.held) {
+        const { dialog } = state.held;
+        state.held = null;
+        await dialog.dismiss().catch(() => undefined);
+      }
+    }
     // Detach only: the browser and its profile outlive the driver.
     await this.browser?.close().catch(() => undefined);
     this.browser = null;
@@ -290,12 +446,7 @@ export class Driver {
         return await Promise.race([this.dispatch(request), expired]);
       }
     } catch (error) {
-      if (
-        error instanceof TargetError ||
-        error instanceof BehindModalError ||
-        error instanceof StillShowingError
-      )
-        return { ok: false, error: error.message };
+      if (error instanceof Refusal) return { ok: false, error: error.message };
       if (error instanceof DeadlineError) {
         await this.close();
         return { ok: false, error: error.message };
@@ -308,12 +459,26 @@ export class Driver {
 
   private async dispatch(request: Request): Promise<Reply> {
     const page = this.page();
+    // A held confirm or prompt stops the renderer: every read of the page
+    // would hang, and every action would queue behind the answer. The one
+    // verb that makes progress is the answer.
+    const held = this.stateOf(page).held;
+    if (held && request.verb !== "dialog") throw new DialogHeldError(held.info);
     switch (request.verb) {
       case "open":
-        await page.goto(request.url, { waitUntil: "domcontentloaded" });
-        return this.look(page, { arriving: true });
+        // Through act(): a page that confirms as it loads ("Leave?", a
+        // consent gate) stops there, and act() both sees the dialog and
+        // waits the arrival out (the bot-check wait included).
+        return this.look(
+          await this.act(page, () =>
+            page.goto(request.url, { waitUntil: "domcontentloaded" }),
+          ),
+        );
       case "snapshot":
-        return this.look(page, { full: request.full === true });
+        return this.look(page, {
+          full: request.full === true,
+          ...(request.within ? { within: request.within } : {}),
+        });
       case "click":
         return this.look(
           await this.act(page, () =>
@@ -322,8 +487,8 @@ export class Driver {
         );
       case "type":
         await this.act(page, () =>
-          this.onTarget(page, request.target, (target) =>
-            target.fill(request.text),
+          this.onTarget(page, request.target, (target, named) =>
+            this.fill(target, request, named),
           ),
         );
         return this.look(page);
@@ -343,6 +508,31 @@ export class Driver {
           this.onTarget(page, request.target, (target) => target.hover()),
         );
         return this.look(page);
+      case "check":
+      case "uncheck":
+        // setChecked: a no-op when already in that state, so a loop that
+        // re-runs is safe; a click would toggle it back.
+        await this.act(page, () =>
+          this.onTarget(page, request.target, (target) =>
+            target.setChecked(request.verb === "check"),
+          ),
+        );
+        return this.look(page);
+      case "upload":
+        return this.look(
+          await this.act(page, () => this.upload(page, request)),
+        );
+      case "get":
+        // The value alone, no header: a script reads it with $(...), and a
+        // url line in front would be part of the value.
+        return {
+          ok: true,
+          url: "",
+          title: "",
+          got: await this.onTarget(page, request.target, (target) =>
+            read(target, request.property),
+          ),
+        };
       case "scroll": {
         const px =
           (request.pixels ?? 600) * (request.direction === "down" ? 1 : -1);
@@ -362,7 +552,7 @@ export class Driver {
       case "read":
         return this.readable(page);
       case "screenshot":
-        return this.screenshot(page, request.path);
+        return this.screenshot(page, request);
       case "tabs":
         return this.listTabs(page);
       case "tab":
@@ -392,6 +582,8 @@ export class Driver {
           value: toJsonValue(value),
         };
       }
+      case "dialog":
+        return this.answerDialog(page, request);
       case "stop":
         // The daemon answers this one itself; reaching here is a bug.
         return { ok: false, error: "stop is handled by the daemon" };
@@ -414,6 +606,17 @@ export class Driver {
     const state = this.stateOf(page);
     const dialog = state.dialog;
     state.dialog = null;
+    // Held: the renderer is stopped, so nothing is read from the page. The
+    // url is the browser's to give; the title and everything else wait.
+    if (state.held) {
+      return {
+        ok: true,
+        url: page.url(),
+        title: "",
+        ...(dialog ? { dialog } : {}),
+        pending: state.held.info,
+      };
+    }
     const seen = await this.pageState(page);
     const taken = new Set<string>();
     const matched = (seen?.modals ?? []).map((m) => {
@@ -458,17 +661,24 @@ export class Driver {
 
   private async look(
     page: Page,
-    options: { full?: boolean; arriving?: boolean } = {},
+    options: { full?: boolean; arriving?: boolean; within?: Target } = {},
   ): Promise<Reply> {
+    // The verb's action raised a confirm or prompt: the page is stopped on
+    // it, and the reply is the question (nothing else can be read).
+    if (this.stateOf(page).held) return this.header(page);
     if (options.arriving) await this.arrive(page);
-    const tree = await this.snapshot(page, options.full === true);
+    const tree = await this.snapshot(page, options);
     const nodes = parseSnapshot(tree);
     const elements = elementsOf(nodes);
     const state = this.stateOf(page);
     const index = new ElementIndex(elements);
-    if (index.document !== state.elements.document)
-      state.previous = state.elements;
-    state.elements = index;
+    // A scoped snapshot is a view of the last one, not a new one: its refs
+    // are the same, and the elements outside it stay nameable.
+    if (!options.within) {
+      if (index.document !== state.elements.document)
+        state.previous = state.elements;
+      state.elements = index;
+    }
     const header = await this.header(page, dialogsIn(nodes));
     return {
       ...header,
@@ -488,15 +698,23 @@ export class Driver {
    * rule the page cannot see as a DOM change, present only for the
    * duration of the call, and `visibility` rather than `display` so
    * nothing moves on the screen a person may be watching. `--full` keeps
-   * the whole tree: the agent asked for everything.
+   * the whole tree: the agent asked for everything. `within` roots the
+   * tree at one element of the last snapshot (a form, a table), for a
+   * page whose list runs past the cap.
    */
-  private async snapshot(page: Page, full: boolean): Promise<string> {
-    if (full) return page.locator("body").ariaSnapshot({ mode: "ai" });
+  private async snapshot(
+    page: Page,
+    options: { full?: boolean; within?: Target },
+  ): Promise<string> {
+    const root = options.within
+      ? page.locator(`aria-ref=${this.resolve(page, options.within)}`)
+      : page.locator("body");
+    if (options.full) return root.ariaSnapshot({ mode: "ai" });
     const hidden = await page
       .evaluate(hideThirdPartyFrames, siteOf(hostOf(page.url())))
       .catch(() => 0);
     try {
-      return await page.locator("body").ariaSnapshot({ mode: "ai" });
+      return await root.ariaSnapshot({ mode: "ai" });
     } finally {
       // Restored without being awaited: the page's main thread is busy on a
       // heavy page and every round-trip queues behind it (measured 200 ms
@@ -516,12 +734,117 @@ export class Driver {
 
   private async screenshot(
     page: Page,
-    path: string | undefined,
+    request: Extract<Request, { verb: "screenshot" }>,
   ): Promise<Reply> {
     const target =
-      path ?? `${this.options.outputDir}/screenshot-${String(Date.now())}.png`;
-    await page.screenshot({ path: target });
+      request.path ??
+      `${this.options.outputDir}/screenshot-${String(Date.now())}.png`;
+    await page.screenshot({ path: target, fullPage: request.full === true });
     return { ...(await this.header(page)), path: target };
+  }
+
+  /**
+   * `type`: replace the field's text, then read it back. `fill` returns
+   * once the events are dispatched, not once the page kept the text, and
+   * the two differ on a masked input, a field whose handler rewrites the
+   * value, or a widget that stores keystrokes elsewhere. One extra read on
+   * the element, in the same call.
+   */
+  private async fill(
+    target: Locator,
+    request: Extract<Request, { verb: "type" }>,
+    named: string,
+  ): Promise<void> {
+    await target.fill(request.text);
+    const landed = await target.evaluate(readFieldValue).catch(() => null);
+    if (landed === request.text) return;
+    // What a password field reads is a secret whichever way the text
+    // arrived: an agent that typed one on argv already erred once, and the
+    // refusal must not repeat it.
+    const secret =
+      request.secret === true ||
+      (await target.evaluate(isPasswordField).catch(() => true));
+    throw new NotTakenError(named, landed, secret);
+  }
+
+  /**
+   * `upload`: the files, contained under the home (home/contained-path.ts,
+   * the rule send_file follows: a page or a prompt that names a path the
+   * agent did not mean to send gets nothing), then set on the element. A
+   * file input takes them directly, whatever the page did to hide it; a
+   * button that opens the picker is clicked and the picker answered. Which
+   * one the target is, the element says.
+   */
+  private async upload(
+    page: Page,
+    request: Extract<Request, { verb: "upload" }>,
+  ): Promise<void> {
+    const files = request.paths.map((raw) => {
+      const contained = containedPath(this.options.environment.homeDir, raw);
+      if (contained.ok) return contained.path;
+      throw new Refusal(uploadRefusal(raw, contained.reason));
+    });
+    await this.onTarget(page, request.target, async (target, named) => {
+      if (await target.evaluate(isFileInput)) {
+        await target.setInputFiles(files);
+        return;
+      }
+      // Not a file input: a button (or a drop zone's link) that opens the
+      // picker when clicked. The picker is caught and answered; a click
+      // that opens none is refused as such, not as a bare timeout.
+      const chooser = page.waitForEvent("filechooser", {
+        timeout: ACTION_TIMEOUT_MS,
+      });
+      chooser.catch(() => undefined);
+      await target.click();
+      let picker: FileChooser;
+      try {
+        picker = await chooser;
+      } catch (error) {
+        if (error instanceof errors.TimeoutError)
+          throw new Refusal(
+            `${named} is not a file field and clicking it opened no file picker; upload onto the file field itself (often a button named like its label)`,
+          );
+        throw error;
+      }
+      await picker.setFiles(files);
+    });
+  }
+
+  /**
+   * `dialog accept|dismiss`: answer the confirm or prompt the page is
+   * stopped on, then read the page as it stands after. The verb that
+   * raised the dialog was abandoned mid-action (its promise settles once
+   * the renderer runs again, into a catch); the page's state after the
+   * answer is what the agent needs to see.
+   */
+  private async answerDialog(
+    page: Page,
+    request: Extract<Request, { verb: "dialog" }>,
+  ): Promise<Reply> {
+    const state = this.stateOf(page);
+    const held = state.held;
+    if (!held)
+      throw new Refusal(
+        "no dialog is open; this verb answers a confirm or a prompt the page raised",
+      );
+    state.held = null;
+    // The dialog may already be gone (the tab navigated or closed under
+    // it): then there is nothing to answer and the page is simply read.
+    await (
+      request.answer === "accept"
+        ? held.dialog.accept(request.text)
+        : held.dialog.dismiss()
+    ).catch(() => undefined);
+    state.dialog = `${describeDialog(held.dialog)} (${request.answer === "accept" ? "accepted" : "dismissed"})`;
+    // What the answer set off: a navigation ("Leave page?"), a fetch, a
+    // re-render, or the NEXT question (a page that confirms twice in a
+    // row). The page runs again on the next task; give it that task before
+    // reading, so a second dialog is held and reported, not hung on.
+    await delay(NAVIGATION_GRACE_MS);
+    if (state.held) return this.header(page);
+    await this.settle(page);
+    return this.look(page);
   }
 
   private async listTabs(active: Page): Promise<Reply> {
@@ -595,8 +918,15 @@ export class Driver {
    * going quiet. Returns the page to read afterwards: a tab the action
    * opened (a target=_blank link) becomes the active one, as it does for
    * a person.
+   *
+   * A confirm or prompt the action raised stops the page, and with it the
+   * action (Playwright's click waits for the handler to return, and the
+   * handler is waiting for the agent). The dialog handler marks the tab
+   * held; the action is left to settle on its own once the dialog is
+   * answered, and the verb answers now with the question.
    */
   private async act(page: Page, action: () => Promise<unknown>): Promise<Page> {
+    const state = this.stateOf(page);
     const main = page.mainFrame();
     const site = siteOf(hostOf(page.url()));
     let requested = false;
@@ -605,6 +935,10 @@ export class Driver {
     let committed: () => void = () => undefined;
     const commit = new Promise<void>((resolve) => {
       committed = resolve;
+    });
+    let heldNow: () => void = () => undefined;
+    const held = new Promise<"held">((resolve) => {
+      heldNow = () => resolve("held");
     });
     const onRequest = (request: PageRequest) => {
       if (request.isNavigationRequest() && request.frame() === main)
@@ -621,12 +955,29 @@ export class Driver {
     const onPopup = (popup: Page) => {
       opened = popup;
     };
+    const onDialog = (dialog: Dialog) => {
+      if (dialog.type() === "confirm" || dialog.type() === "prompt") heldNow();
+    };
     page.on("request", onRequest);
     page.on("framenavigated", onNavigated);
     page.on("popup", onPopup);
+    page.on("dialog", onDialog);
     try {
-      await action();
+      // The action's own failure is the verb's answer; a dialog ends the
+      // wait first. The action promise is kept from becoming an unhandled
+      // rejection when it settles later (a timeout once the dialog is
+      // answered): its outcome is not this verb's to report.
+      const acted = action();
+      const outcome = await Promise.race([acted, held]);
+      if (outcome === "held") {
+        acted.catch(() => undefined);
+        return page;
+      }
       await delay(NAVIGATION_GRACE_MS);
+      // Raised after the action returned (a handler on a timer, a submit
+      // that confirms on the next task): the settle below would hang on
+      // the stopped renderer, so the question is the answer here too.
+      if (state.held) return page;
       if (requested) await Promise.race([commit, delay(ACTION_NAVIGATION_MS)]);
       else if (answers.length > 0)
         await Promise.race([Promise.all(answers), delay(ACTION_REQUESTS_MS)]);
@@ -634,6 +985,7 @@ export class Driver {
       page.off("request", onRequest);
       page.off("framenavigated", onNavigated);
       page.off("popup", onPopup);
+      page.off("dialog", onDialog);
     }
     const target: Page = opened ?? page;
     if (opened) this.active = opened;
@@ -741,31 +1093,52 @@ export class Driver {
    * it, the one thing to do next; Playwright's own message ("element
    * intercepts pointer events", or a bare timeout) says neither. A modal
    * that does not cover the element (a non-blocking aria-modal panel)
-   * passes the check.
+   * passes the check. An action that times out because something else
+   * covers the element (a banner the page never called a dialog) is
+   * answered with what covers it, read off Playwright's call log.
    */
-  private async onTarget(
+  private async onTarget<T>(
     page: Page,
     target: Target,
-    action: (element: Locator) => Promise<unknown>,
-  ): Promise<void> {
+    action: (element: Locator, named: string) => Promise<T>,
+  ): Promise<T> {
+    const state = this.stateOf(page);
+    const ref = this.resolve(page, target);
+    const element = page.locator(`aria-ref=${ref}`);
+    // The element as its line reads (`textbox "PIN"`), whichever way the
+    // agent named it: a refusal about a ref should still say what it was.
+    const named = describeElement(state.elements.get(ref), target);
+    const modal = state.modals[0];
+    if (modal !== undefined && !state.modalRefs.has(ref)) {
+      try {
+        await element.click({ trial: true, timeout: BEHIND_MODAL_TIMEOUT_MS });
+      } catch (error) {
+        if (error instanceof errors.TimeoutError)
+          throw new BehindModalError(named, modal);
+        throw error;
+      }
+    }
+    try {
+      return await action(element, named);
+    } catch (error) {
+      const cover =
+        error instanceof errors.TimeoutError
+          ? interceptorOf(error.message)
+          : undefined;
+      if (cover) throw new CoveredError(named, cover);
+      throw error;
+    }
+  }
+
+  /** The ref `target` names in the tab's last snapshot, or a TargetError. */
+  private resolve(page: Page, target: Target): string {
     const state = this.stateOf(page);
     const resolved = resolveTarget(target, state.elements, {
       previous: state.previous,
       within: state.modalRefs,
     });
     if ("error" in resolved) throw new TargetError(resolved.error);
-    const element = page.locator(`aria-ref=${resolved.ref}`);
-    const modal = state.modals[0];
-    if (modal !== undefined && !state.modalRefs.has(resolved.ref)) {
-      try {
-        await element.click({ trial: true, timeout: BEHIND_MODAL_TIMEOUT_MS });
-      } catch (error) {
-        if (error instanceof errors.TimeoutError)
-          throw new BehindModalError(describeTarget(target), modal);
-        throw error;
-      }
-    }
-    await action(element);
+    return resolved.ref;
   }
 
   private stateOf(page: Page): TabState {
@@ -775,6 +1148,7 @@ export class Driver {
         elements: new ElementIndex([]),
         previous: new ElementIndex([]),
         dialog: null,
+        held: null,
         modals: [],
         modalRefs: new Set(),
       };
@@ -813,6 +1187,42 @@ const toJsonValue = (value: unknown): unknown => {
     return null;
   if (typeof value === "bigint") return value.toString();
   return value;
+};
+
+/** `get`: one property of the element, as a person would read it. */
+const read = async (
+  element: Locator,
+  property: GetProperty,
+): Promise<string | null> => {
+  switch (property) {
+    case "text":
+      return element.innerText();
+    case "value":
+      // A password's value never leaves the page by this door: printed, it
+      // would sit in the agent's transcript (the same reason `type e7 -`
+      // reads it from stdin). `type` still checks it landed, internally.
+      if (await element.evaluate(isPasswordField))
+        throw new Refusal(
+          "the value of a password field is not read back; check the page's reaction instead",
+        );
+      return element.evaluate(readFieldValue);
+    case "href":
+      return element.evaluate(readHref);
+  }
+};
+
+/** The one line `upload` refuses a path with. */
+const uploadRefusal = (raw: string, reason: ContainmentReason): string => {
+  switch (reason) {
+    case "outside":
+      return `${raw}: only files under your home directory can be uploaded`;
+    case "missing":
+      return `${raw}: no file at that path`;
+    case "loop":
+      return `${raw}: that path is a symlink loop`;
+    case "unresolvable":
+      return `${raw}: that path could not be resolved`;
+  }
 };
 
 /** What one read of the page tells: its title, its open modals and alerts, the bot-check marks. */
@@ -1097,6 +1507,38 @@ export const restoreFrames = (): void => {
     frame.removeAttribute("data-onecli-skip");
   }
 };
+
+/**
+ * Runs in the page, on one element: what the field holds. A form control's
+ * value; a contenteditable's text; null for an element that is neither
+ * (the caller reads that as "not a field").
+ */
+export const readFieldValue = (el: Element): string | null => {
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  )
+    return el.value;
+  if (el instanceof HTMLElement && el.isContentEditable) return el.innerText;
+  return null;
+};
+
+/** Runs in the page, on one element: the link's resolved href, or the nearest link's. */
+export const readHref = (el: Element): string | null => {
+  const link = el.closest("a[href], area[href]");
+  return link instanceof HTMLAnchorElement || link instanceof HTMLAreaElement
+    ? link.href
+    : null;
+};
+
+/** Runs in the page, on one element: whether it is a file input. */
+export const isFileInput = (el: Element): boolean =>
+  el instanceof HTMLInputElement && el.type === "file";
+
+/** Runs in the page, on one element: whether it is a password input. */
+export const isPasswordField = (el: Element): boolean =>
+  el instanceof HTMLInputElement && el.type === "password";
 
 /**
  * Runs in the page: resolves after `quiet` ms without a content mutation,

@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { connectionsPath } from "@/lib/navigation";
+import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
 import { ChevronRight, KeyRound } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
 import { Card } from "@onecli/ui/components/card";
@@ -75,7 +75,7 @@ export const ConnectedTab = ({
   pageScope = "workspace",
 }: ConnectedTabProps) => {
   const router = useRouter();
-  const pathname = usePathname();
+  const href = useConnectionsHref(basePath);
   const queryClient = useQueryClient();
   const [editingSecret, setEditingSecret] = useState<
     ConnectedItem["secretData"] | null
@@ -129,7 +129,7 @@ export const ConnectedTab = ({
         detail: label
           ? `Connected as ${label}`
           : `${c.scopes.length} scope${c.scopes.length !== 1 ? "s" : ""} granted`,
-        href: connectionsPath({ pathname, basePath }, `/apps/${c.provider}`),
+        href: href(`/apps/${c.provider}`),
         providerCount: hasMultiple ? providerCounts.get(c.provider) : undefined,
         inherited: isInherited,
       };
@@ -157,7 +157,7 @@ export const ConnectedTab = ({
       type: "vault" as const,
       typeLabel: "External Vault",
       detail: v.status === "connected" ? "Connected" : "Paired",
-      href: connectionsPath({ pathname, basePath }, `/vaults/${v.provider}`),
+      href: href(`/vaults/${v.provider}`),
     }));
 
     return [...appItems, ...secretItems, ...vaultItems];
@@ -165,8 +165,7 @@ export const ConnectedTab = ({
     connectionsQuery.data,
     secretsQuery.data,
     vaultsQuery.data,
-    pathname,
-    basePath,
+    href,
     pageScope,
   ]);
 
@@ -177,8 +176,7 @@ export const ConnectedTab = ({
 
   useAppMessages({
     onConnected: refreshItems,
-    onConfigure: (provider) =>
-      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`)),
+    onConfigure: (provider) => router.push(href(`/apps/${provider}`)),
   });
 
   const handleItemClick = (item: ConnectedItem) => {
@@ -217,7 +215,7 @@ export const ConnectedTab = ({
         <p className="text-sm text-muted-foreground">
           No connected services yet. Head to the{" "}
           <button
-            onClick={() => router.push(connectionsPath({ pathname, basePath }))}
+            onClick={() => router.push(href())}
             className="text-brand hover:underline font-medium"
           >
             Apps

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { db } from "@onecli/db";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
-import { agentSectionPath } from "@/lib/navigation";
+import { agentPagePath, agentSectionPath } from "@/lib/navigation";
 import { AgentIndexRedirect } from "./_components/agent-index-redirect";
 
 export const metadata: Metadata = {
@@ -44,7 +44,7 @@ export default async function AgentIndexPage({ params }: Props) {
   if (agent) {
     redirect(
       agentSectionPath(
-        `/w/${workspaceId}/agents/${agentId}`,
+        agentPagePath(workspaceId, agentId),
         agentId,
         defaultAgentSection(agent.kind),
       ),

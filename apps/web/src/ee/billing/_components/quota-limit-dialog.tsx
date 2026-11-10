@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ArrowRight, Gauge } from "lucide-react";
-import { generateOrgPrefix } from "@/lib/org-navigation";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 import { Button } from "@onecli/ui/components/button";
 import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import { UpgradeDialogShell } from "@/lib/components/upgrade-dialog-shell";
@@ -15,7 +15,6 @@ export interface QuotaLimitDialogProps {
   current: number;
   limit: number;
   plan: string;
-  organizationId: string;
 }
 
 export const QuotaLimitDialog = ({
@@ -25,9 +24,8 @@ export const QuotaLimitDialog = ({
   current,
   limit,
   plan,
-  organizationId,
 }: QuotaLimitDialogProps) => {
-  const orgPrefix = generateOrgPrefix(organizationId);
+  const billingHref = useSettingsHref()("billing");
   const noun =
     limit === 1
       ? resourceName.toLowerCase().replace(/s$/, "")
@@ -50,7 +48,7 @@ export const QuotaLimitDialog = ({
             Cancel
           </Button>
           <Button variant="brand" className="flex-1" asChild>
-            <Link href={`${orgPrefix}/billing`}>
+            <Link href={billingHref} onClick={() => onOpenChange(false)}>
               Upgrade
               <ArrowRight className="size-4" />
             </Link>

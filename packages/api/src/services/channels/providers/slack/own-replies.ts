@@ -63,10 +63,11 @@ const msToTs = (ms: number): string => (ms / 1000).toFixed(6);
 const isRichTextBlock = (b: unknown): boolean =>
   typeof b === "object" && b !== null && "type" in b && b.type === "rich_text";
 
-export const isPlainReply = (
-  m: SlackHistoryMessage,
-  t: OwnReplyTarget,
-): boolean =>
+/** The agent's two marks on its own posts: its app id (every post) and its
+ * bot user id (a post without the icon override). */
+type OwnMarks = Pick<OwnReplyTarget, "externalId" | "identityRef">;
+
+export const isPlainReply = (m: SlackHistoryMessage, t: OwnMarks): boolean =>
   (m.app_id ? m.app_id === t.externalId : m.user === t.identityRef) &&
   REPLY_SUBTYPES.has(m.subtype) &&
   (m.blocks ?? []).every(isRichTextBlock) &&
@@ -85,12 +86,12 @@ const botTokenOf = (t: OwnReplyTarget): string => {
 };
 
 /** The thread the agent answered in: the link's address, narrowed to the
- * thread the calling turn arrived in when there is one (a threaded DM, a
+ * thread the calling turn arrived in when there is one (a DM thread, a
  * thread in a point-of-contact room). The CHANNEL always comes from the
  * link, the adapter's own `replyTargetForTurn` rule, so a stale or odd value
  * can only point inside this conversation, never into another one. */
 const addressOf = (t: OwnReplyTarget) => {
-  const base = unpackThreadAddress(t.kind, t.externalThreadId);
+  const base = unpackThreadAddress(t.externalThreadId);
   return t.sourceThreadId ? { ...base, threadTs: t.sourceThreadId } : base;
 };
 

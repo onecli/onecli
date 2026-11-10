@@ -10,19 +10,23 @@ import type { AuthContextValue } from "@/lib/auth/types";
  */
 
 const auth: Partial<AuthContextValue> = {};
+// What the post-auth sync reports: null while it runs, a sentence when it
+// cannot finish.
+const sync = vi.hoisted((): { error: string | null } => ({ error: null }));
 
 vi.mock("@/providers/auth-provider", () => ({
   useAuth: () => auth,
 }));
 
 vi.mock("@/lib/auth/use-post-auth-redirect", () => ({
-  usePostAuthRedirect: () => {},
+  usePostAuthRedirect: () => sync.error,
 }));
 
 const searchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => searchParams,
 }));
+vi.mock("next/image", () => ({ default: () => null }));
 
 import { OnpremLoginContent } from "./login-content-onprem";
 
@@ -41,6 +45,7 @@ beforeEach(() => {
     signInWithPassword,
   });
   searchParams.forEach((_v, k) => searchParams.delete(k));
+  sync.error = null;
 });
 
 afterEach(cleanup);
@@ -119,5 +124,37 @@ describe("self-hosted sign-in screen", () => {
     );
     const link = screen.getByRole("link", { name: "Create an account" });
     expect(link.getAttribute("href")).toBe("/auth/signup");
+  });
+
+  it("keeps the form up while the session is still being checked", () => {
+    // Nearly everyone here is signed out: a spinner in its place would
+    // flash the form away and back on every visit.
+    Object.assign(auth, { isLoading: true });
+    const { container } = render(
+      <OnpremLoginContent googleConfigured={false} emailConfigured={false} />,
+    );
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("gives way to the dashboard's skeleton once signed in", () => {
+    Object.assign(auth, { isAuthenticated: true });
+    const { container } = render(
+      <OnpremLoginContent googleConfigured={false} emailConfigured={false} />,
+    );
+    expect(container.querySelector("[data-agent-nav-skeleton]")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+    expect(container.textContent).not.toMatch(/Signing you in|Loading\.\.\./);
+  });
+
+  it("replaces the skeleton with the reason a signed-in sync could not finish", () => {
+    Object.assign(auth, { isAuthenticated: true });
+    sync.error = "Could not reach the server. Reload to try again.";
+    const { container } = render(
+      <OnpremLoginContent googleConfigured={false} emailConfigured={false} />,
+    );
+    expect(screen.getByRole("alert").textContent).toBe(sync.error);
+    expect(container.querySelector("[data-agent-nav-skeleton]")).toBeNull();
   });
 });

@@ -12,8 +12,8 @@ import {
 import { resolveConnectRow, type Known } from "@/lib/chat/connect-row-state";
 import {
   WORKSPACE_PATH_RE,
-  agentSectionPath,
   connectionsPath,
+  mergedSectionPath,
 } from "@/lib/navigation";
 import { withConnectLinkAgent } from "@/lib/connect-link-agent";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
@@ -324,10 +324,13 @@ export const ConnectorSuggestionsCard = ({
             action={
               agentId ? (
                 <Button
+                  variant="outline"
                   size="xs"
                   aria-label={`Set up ${name} for this agent`}
                   onClick={() =>
-                    router.push(agentSectionPath(pathname, agentId, "channels"))
+                    router.push(
+                      mergedSectionPath(pathname, agentId, "channels"),
+                    )
                   }
                 >
                   Set up

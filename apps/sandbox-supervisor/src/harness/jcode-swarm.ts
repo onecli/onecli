@@ -300,7 +300,17 @@ export const createJcodeSwarmTasks = (deps: {
             warnOnce("unparseable swarm member in roster");
             continue;
           }
-          if (member.data.is_headless !== true) continue; // leads/attached members
+          // Leads and attached members are not background work, and neither
+          // is a lead the daemon lists as headless: a relaunched daemon
+          // restores every persisted session as a detached (headless) member
+          // until its conversation reattaches it (measured live), and our
+          // own lead read as a helper would hold the sandbox awake.
+          if (
+            member.data.is_headless !== true ||
+            leads.includes(member.data.session_id)
+          ) {
+            continue;
+          }
           rosterBySession.set(member.data.session_id, member.data);
           if (rosterBySession.size >= MAX_MEMBERS_PER_POLL) break;
         }

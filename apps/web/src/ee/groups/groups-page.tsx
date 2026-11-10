@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { PageHeader } from "@dashboard/page-header";
 import { isEntitled } from "@onecli/api/lib/entitlements";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
+import { orgHomePath } from "@/lib/navigation";
 import { requireOrgAdmin } from "@/ee/auth/require-org-admin";
 import { GroupList } from "./_components/group-list";
 import { RoleMappingList } from "./_components/role-mapping-list";
@@ -14,7 +15,7 @@ export default async function GroupsPage() {
   // licensed surface stays dark on its own. Read at runtime: the client
   // bundle's CAPS can never see ENTERPRISE_ENABLED, so an entitled self-host
   // reads as rbac-less there and gating on it bounced paying admins.
-  if (!isEntitled()) redirect(`/org/${organizationId}/workspaces`);
+  if (!isEntitled()) redirect(orgHomePath(organizationId));
 
   // Kept alongside the (admin) route-group guard as defense-in-depth; fails
   // closed (any role-check error redirects rather than rendering admin UI).
@@ -24,6 +25,7 @@ export default async function GroupsPage() {
     <div className="flex flex-1 flex-col gap-8">
       <PageHeader
         title="Groups"
+        character="drop"
         description="Organize members into groups, the building blocks for group-level access."
       />
       <GroupList />
