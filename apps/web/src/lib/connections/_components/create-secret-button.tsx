@@ -47,7 +47,6 @@ export const CreateSecretButton = ({
           current={quota.current}
           limit={quota.limit}
           plan={quota.plan}
-          organizationId={quota.organizationId}
         />
       )}
     </>

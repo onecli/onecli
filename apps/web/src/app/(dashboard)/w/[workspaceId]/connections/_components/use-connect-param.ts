@@ -55,7 +55,10 @@ export const useConnectParam = ({
 
     const clearActionParams = () => {
       const preserved = new URLSearchParams();
-      for (const key of ["q", "category"]) {
+      // The catalog's own filters, and the Settings modal's open state when
+      // the catalog renders inside it (`?settings=apps&tab=`): a connect
+      // link into the modal must not close it.
+      for (const key of ["q", "category", "settings", "tab"]) {
         const val = searchParams.get(key);
         if (val) preserved.set(key, val);
       }

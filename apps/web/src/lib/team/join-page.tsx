@@ -7,6 +7,7 @@ import {
 import { db } from "@onecli/db";
 import { getServerSession } from "@/lib/auth/server";
 import { IS_CLOUD } from "@/lib/env";
+import { resolveOrgHome } from "@/lib/dashboard/home-landing";
 import { JoinForm } from "./_components/join-form";
 import { JoinSignIn } from "./_components/join-sign-in";
 import { JoinUnavailable } from "./_components/join-unavailable";
@@ -72,9 +73,9 @@ export default async function JoinPage({
         user.id,
         user.email,
       );
-      // The org layout pins the default-org cookie on arrival, so the
-      // switch sticks across the rest of the session too.
-      if (orgId) redirect(`/org/${orgId}/workspaces`);
+      // Straight onto that org's first agent (the workspace page pins the
+      // default-org cookie, so the switch sticks for the session).
+      if (orgId) redirect(await resolveOrgHome(orgId));
     }
 
     // Expired, cancelled, used (by someone else, or by a since-removed

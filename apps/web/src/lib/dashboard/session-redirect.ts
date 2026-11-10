@@ -1,8 +1,16 @@
+/**
+ * Whether the session belongs to no org: no workspace of its own, and (on
+ * cloud, which reports it) no membership either. Such a viewer goes to org
+ * creation, except on the account's addresses, which stay theirs.
+ */
+export const isOrgless = (data: Record<string, unknown>): boolean =>
+  !data.workspaceId && !data.hasOrg;
+
 export const getDashboardRedirect = (
   data: Record<string, unknown>,
   pathname: string,
 ): string | null => {
-  if (!data.workspaceId && !data.hasOrg && !pathname.startsWith("/account")) {
+  if (isOrgless(data) && !pathname.startsWith("/account")) {
     return "/create-org";
   }
 

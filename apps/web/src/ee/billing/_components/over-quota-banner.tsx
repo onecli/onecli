@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { AlertTriangle, ArrowUpRight } from "lucide-react";
-import { generateOrgPrefix } from "@/lib/org-navigation";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import {
   usePlanUsage,
@@ -12,11 +11,8 @@ import {
 } from "../use-plan-usage";
 
 export const OverQuotaBanner = () => {
-  const pathname = usePathname();
   const usage = usePlanUsage();
-  const orgPrefix = generateOrgPrefix(usage?.organizationId);
-
-  if (pathname.includes("/billing")) return null;
+  const billingHref = useSettingsHref()("billing");
 
   // Paid orgs over a grandfathered hard cap (agents, seats) are an accepted
   // state — see isFlaggedOverLimit for the rationale.
@@ -40,7 +36,7 @@ export const OverQuotaBanner = () => {
   const resources = isOver ? overResources : approachingResources;
   return (
     <Link
-      href={`${orgPrefix}/billing`}
+      href={billingHref}
       className={`group mb-6 flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors ${
         isOver
           ? "border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15 dark:border-amber-500/40 dark:bg-amber-500/15 dark:hover:bg-amber-500/20"

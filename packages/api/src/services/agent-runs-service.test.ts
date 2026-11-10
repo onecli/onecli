@@ -381,7 +381,7 @@ describe("Runs evidence query boundaries", () => {
         where: expect.objectContaining({
           conversation: expect.objectContaining({
             AND: expect.arrayContaining([
-              { OR: [{ direct: false }, { userId: "viewer" }] },
+              { OR: [{ userId: null }, { userId: "viewer" }] },
             ]),
           }),
         }),

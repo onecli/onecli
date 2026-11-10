@@ -4,6 +4,7 @@ import { canCreateOrganization } from "@onecli/api/ee/services/quota-service";
 import { isEntitled } from "@onecli/api/lib/entitlements";
 import { getUserDefaultOrgId } from "@/lib/auth/default-org";
 import { EnterpriseLockedCard } from "@/lib/components/enterprise-locked-card";
+import { resolveOrgHome } from "@/lib/dashboard/home-landing";
 import { CreateOrgForm } from "./_components/create-org-form";
 
 export default async function CreateOrgPage() {
@@ -26,7 +27,7 @@ export default async function CreateOrgPage() {
       );
     }
     const orgId = await getUserDefaultOrgId();
-    redirect(orgId ? `/org/${orgId}/workspaces` : "/");
+    redirect(orgId ? await resolveOrgHome(orgId) : "/");
   }
 
   return <CreateOrgForm />;

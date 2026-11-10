@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   Check,
+  Dices,
   Loader2,
   ShieldCheck,
   Sparkles,
@@ -23,7 +24,10 @@ import {
   useAgentSandboxStatus,
   useCreateHostedAgent,
   useRenameOnboardingAgent,
+  useSetStarterFace,
 } from "@/hooks/use-agents";
+import { randomAgentName } from "@/lib/agents/agent-names";
+import { agentFaceUrl, randomAgentFace } from "@/lib/agents/agent-faces";
 import type { SandboxStatus } from "@/lib/api/types";
 import { hostedCreateRefusalCopy } from "@/lib/agents/availability";
 import { agentChatPath } from "@/lib/navigation";
@@ -104,8 +108,18 @@ export default function CreatePage() {
   } = useOnboarding();
   const createAgent = useCreateHostedAgent();
   const renameAgent = useRenameOnboardingAgent();
+  const setStarterFace = useSetStarterFace();
 
-  const [name, setName] = useState(createdAgentName ?? DEFAULT_AGENT_NAME);
+  // The field opens on a random famous assistant, not the placeholder the
+  // early create used (DEFAULT_AGENT_NAME stays that placeholder: resume
+  // reads it as "no name picked yet"). A name already given is kept.
+  const [name, setName] = useState(() =>
+    createdAgentName && createdAgentName !== DEFAULT_AGENT_NAME
+      ? createdAgentName
+      : randomAgentName([DEFAULT_AGENT_NAME]),
+  );
+  // A random robot picture beside it; Shuffle rolls both.
+  const [face, setFace] = useState<number | null>(() => randomAgentFace());
   const [nameTouched, setNameTouched] = useState(false);
   // Eases the screen away before the hand-off to the chat.
   const { leaving, leave } = useScreenExit();
@@ -127,6 +141,19 @@ export default function CreatePage() {
   const nameError = validateDisplayName(name);
   const showNameError = nameTouched && name.length > 0 && nameError !== null;
   const canSubmit = phase === "form" && name.trim().length > 0 && !nameError;
+
+  // Another name and picture. The placeholder is never offered: a flow left
+  // on it would read as "no name picked" on resume.
+  const shuffle = () => {
+    const next = randomAgentName([DEFAULT_AGENT_NAME], name);
+    setName(next);
+    setNameTouched(false);
+    setFace((current) => randomAgentFace(current));
+    nameInput.current?.focus();
+    requestAnimationFrame(() =>
+      nameInput.current?.setSelectionRange(next.length, next.length),
+    );
+  };
 
   const chatDestination =
     createdAgentId && workspaceId
@@ -198,6 +225,8 @@ export default function CreatePage() {
           });
           recordCreatedAgent({ agentId: createdAgentId, agentName: trimmed });
         }
+        // The picked picture becomes its avatar (best effort, after the fact).
+        if (face !== null) setStarterFace(createdAgentId, face, workspaceId);
         return;
       }
       // The fallback: the welcome step's create was refused (or never ran),
@@ -208,6 +237,7 @@ export default function CreatePage() {
       });
       // Persist the created agent even if the user already left the page.
       recordCreatedAgent({ agentId: agent.id, agentName: agent.name });
+      if (face !== null) setStarterFace(agent.id, face, workspaceId);
     } catch (err) {
       if (unmountedRef.current) return;
       toast.error(
@@ -235,9 +265,13 @@ export default function CreatePage() {
   // back to the form before this can show.
   const ready = !settling && !!chatDestination && (running || waitedOut);
 
-  // The created name is the truth once it exists (resume included); the
-  // local field only covers the pre-creation renders of this screen.
-  const bootingName = createdAgentName ?? name.trim();
+  // The name being set up. While the agent still carries the welcome step's
+  // placeholder, the field is the truth (the rename is in flight); once it
+  // has a real name (resume included), that name is.
+  const bootingName =
+    createdAgentName && createdAgentName !== DEFAULT_AGENT_NAME
+      ? createdAgentName
+      : name.trim();
   const bootLineText = (text: string) => text.replaceAll("{name}", bootingName);
 
   return (
@@ -255,7 +289,7 @@ export default function CreatePage() {
             entrance("mission"),
           )}
         >
-          <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+          <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
             Works with <span className="text-brand">all your tools</span>,
             safely
           </h1>
@@ -285,7 +319,7 @@ export default function CreatePage() {
             entrance("form"),
           )}
         >
-          <h1 className="font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+          <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
             Name your agent
           </h1>
           <p className="text-muted-foreground mt-3 max-w-md text-balance">
@@ -301,21 +335,53 @@ export default function CreatePage() {
             }}
           >
             <Label htmlFor="agent-name">Agent name</Label>
-            <Input
-              ref={nameInput}
-              id="agent-name"
-              name="agent-name"
-              autoComplete="off"
-              spellCheck={false}
-              className={cn("mt-2", showNameError && "border-destructive")}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => setNameTouched(true)}
-              autoFocus
-              maxLength={DISPLAY_NAME_MAX_LEN}
-              aria-invalid={showNameError}
-              aria-describedby={showNameError ? "agent-name-error" : undefined}
-            />
+            <div className="mt-2 flex items-center gap-2">
+              {face !== null && (
+                // eslint-disable-next-line @next/next/no-img-element -- a static public asset, already sized
+                <img
+                  src={agentFaceUrl(face)}
+                  alt=""
+                  width={40}
+                  height={40}
+                  className="size-10 shrink-0 rounded-lg border object-cover"
+                />
+              )}
+              <Input
+                ref={nameInput}
+                id="agent-name"
+                name="agent-name"
+                autoComplete="off"
+                spellCheck={false}
+                className={cn("h-10", showNameError && "border-destructive")}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onBlur={() => setNameTouched(true)}
+                autoFocus
+                maxLength={DISPLAY_NAME_MAX_LEN}
+                aria-invalid={showNameError}
+                aria-describedby={
+                  showNameError ? "agent-name-error" : undefined
+                }
+              />
+              {/* The same Shuffle as the New agent dialog. */}
+              <Button
+                type="button"
+                variant="outline"
+                onClick={shuffle}
+                aria-label={
+                  face !== null ? "Shuffle name and picture" : "Shuffle name"
+                }
+                title={
+                  face !== null
+                    ? "Try another name and picture"
+                    : "Try another name"
+                }
+                className="border-brand/30 bg-brand-wash text-brand-ink hover:bg-brand-wash/70 hover:text-brand-ink h-10 shrink-0 gap-1.5 px-3"
+              >
+                <Dices className="size-4" aria-hidden />
+                Shuffle
+              </Button>
+            </div>
             {showNameError && (
               <p
                 id="agent-name-error"
@@ -328,7 +394,7 @@ export default function CreatePage() {
             <Button
               type="submit"
               variant="brand"
-              className="mt-4 w-full"
+              className="mt-8 w-full"
               disabled={!canSubmit}
             >
               Let&apos;s go
@@ -342,7 +408,7 @@ export default function CreatePage() {
           className={cn("w-full max-w-sm", entrance("booting"))}
         >
           <div role="status" aria-label={`Setting up ${bootingName}`}>
-            <h1 className="text-center font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
+            <h1 className="text-center text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
               {bootingName} is getting ready
             </h1>
             {/* The visual list conveys progress via opacity only — this text

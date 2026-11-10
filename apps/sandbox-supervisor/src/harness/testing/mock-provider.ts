@@ -118,6 +118,10 @@ export interface MockProvider {
      * truth for what a steered message looked like once injected (its
      * delivery-only frame included). */
     lastUser: string;
+    /** Every user message the request carried, oldest first: the ground
+     * truth for what transcript the model was handed (a resumed session's
+     * earlier turns ride here). */
+    userTexts: string[];
   }[];
   close: () => Promise<void>;
 }
@@ -187,20 +191,24 @@ const chunk = (text: string, finish: string | null) =>
   })}\n\n`;
 
 /** The last user message's text, however the body nests it. */
-const lastUserContent = (body: string): string => {
+const lastUserContent = (body: string): string =>
+  userContents(body).at(-1) ?? "";
+
+/** Every user message's text, oldest first, however the body nests it. */
+const userContents = (body: string): string[] => {
   try {
     const parsed = JSON.parse(body) as {
       messages?: { role?: string; content?: unknown }[];
     };
-    const last = [...(parsed.messages ?? [])]
-      .reverse()
-      .find((message) => message.role === "user");
-    if (!last) return "";
-    return typeof last.content === "string"
-      ? last.content
-      : JSON.stringify(last.content ?? "");
+    return (parsed.messages ?? [])
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content ?? ""),
+      );
   } catch {
-    return body;
+    return [body];
   }
 };
 
@@ -313,6 +321,7 @@ export const startMockProvider = (options: {
         const toolNames = toolNamesOf(body);
         const systemText = systemTextOf(body);
         const lastUser = lastUserContent(body);
+        const userTexts = userContents(body);
         const scripted = options.script?.({
           lastUser,
           index: served++,
@@ -325,6 +334,7 @@ export const startMockProvider = (options: {
             toolNames,
             systemText,
             lastUser,
+            userTexts,
             ...(swarmToolDescription !== undefined && {
               swarmToolDescription,
             }),
@@ -339,6 +349,7 @@ export const startMockProvider = (options: {
           toolNames,
           systemText,
           lastUser,
+          userTexts,
           ...(swarmToolDescription !== undefined && { swarmToolDescription }),
         });
         res.writeHead(200, {

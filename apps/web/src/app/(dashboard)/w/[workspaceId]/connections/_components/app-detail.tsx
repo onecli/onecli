@@ -19,11 +19,9 @@ import {
 import { useConnections } from "@/hooks/use-connections";
 import { useInvalidateGrants } from "@/hooks/use-grants";
 import { useAppConfigStatus } from "@/hooks/use-app-config";
-import {
-  WORKSPACE_PATH_RE,
-  ORG_PATH_RE,
-  connectionsPath,
-} from "@/lib/navigation";
+import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
+import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
+import { useSettingsModal } from "@/lib/settings-modal/modal-context";
 import { AppIcon } from "@/lib/components/app-icon";
 import { AppConfigForm, type AppConfigFormHandle } from "./app-config-form";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
@@ -66,6 +64,8 @@ interface AppDetailProps {
   hasEnvDefaults: boolean;
   hasAppConfig: boolean;
   pageScope?: PageScope;
+  /** Where "Apps" leads back to; the connections catalog of the page's
+   *  scope when unset (inside the Settings modal, the modal's). */
   backPath?: string;
 }
 
@@ -80,6 +80,8 @@ export const AppDetail = ({
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const connectionsHref = useConnectionsHref();
+  const modal = useSettingsModal();
   const queryClient = useQueryClient();
   const invalidateGrants = useInvalidateGrants();
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
@@ -190,9 +192,11 @@ export const AppDetail = ({
         ? { agentId: linkAgent.id, agentName: linkAgent.name }
         : {}),
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
+      // The org routes name the org in the URL; inside the Settings modal
+      // the URL beneath may name a workspace, so the modal's org is used.
       orgId:
         pageScope === "organization"
-          ? pathname.match(ORG_PATH_RE)?.[1]
+          ? (modal?.organizationId ?? pathname.match(ORG_PATH_RE)?.[1])
           : undefined,
     });
 
@@ -236,17 +240,18 @@ export const AppDetail = ({
 
   return (
     <div className="space-y-6">
-      {/* Back link */}
+      {/* Back link: a 32px row, so it sits on the Workspace picker's line
+          inside the Settings modal. */}
       <Link
-        href={backPath ?? connectionsPath({ pathname })}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        href={backPath ?? connectionsHref()}
+        className="inline-flex h-8 items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="size-4" />
         Apps
       </Link>
 
       {/* Header with actions */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex size-12 shrink-0 items-center justify-center rounded-xl border bg-muted dark:bg-white/10 dark:border-white/10">
             <AppIcon
@@ -324,7 +329,7 @@ export const AppDetail = ({
         />
       ) : (
         <div className="space-y-3">
-          <div className="flex items-start justify-between">
+          <div className="flex items-center justify-between gap-4">
             <h3 className="text-sm font-medium">Connected accounts</h3>
             {/* Shown only once an account is connected: a second click adds
                 another account (another login), it doesn't reconnect the
@@ -344,7 +349,14 @@ export const AppDetail = ({
               Workspace accounts
             </p>
           )}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+          {/* Two columns only once there are two cards: one card beside an
+              empty half reads as a gap, not a grid. */}
+          <div
+            className={cn(
+              "grid grid-cols-1 gap-2",
+              connections.length > 1 && "lg:grid-cols-2",
+            )}
+          >
             {connections.map((conn) => (
               <ConnectionAccountCard
                 key={conn.id}
@@ -369,7 +381,12 @@ export const AppDetail = ({
               >
                 Organization accounts
               </p>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+              <div
+                className={cn(
+                  "grid grid-cols-1 gap-2",
+                  inheritedConnections.length > 1 && "lg:grid-cols-2",
+                )}
+              >
                 {inheritedConnections.map((conn) => (
                   <InheritedConnectionCard
                     key={conn.id}

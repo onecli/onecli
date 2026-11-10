@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { History, MoreHorizontal, Pencil } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import {
@@ -10,7 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
-import { agentWebhookRunsPath } from "@/lib/navigation";
+import { useAgentActivityPaths } from "@/lib/dashboard/use-agent-activity-paths";
 
 export interface WebhookActionsMenuProps {
   agentId: string;
@@ -27,7 +26,7 @@ export const WebhookActionsMenu = ({
   name,
   onEdit,
 }: WebhookActionsMenuProps) => {
-  const pathname = usePathname();
+  const activityPaths = useAgentActivityPaths();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -37,7 +36,7 @@ export const WebhookActionsMenu = ({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem asChild>
-          <Link href={agentWebhookRunsPath(pathname, agentId, webhookId)}>
+          <Link href={activityPaths.webhookRuns(agentId, webhookId)}>
             <History className="size-4" aria-hidden />
             View runs
           </Link>

@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { sign as cryptoSign } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -20,32 +19,26 @@ import {
   type VerifyUserCertificateOptions,
 } from "./cert";
 import {
-  ed25519SignerFromPrivateKeyPem,
   formatEd25519PublicKeyLine,
   parseEd25519PublicKeyLine,
-  spkiToEd25519Raw,
+  type Ed25519Signer,
 } from "./keys";
+import {
+  hasSshKeygen,
+  newKeyPair,
+  newSigner,
+  withTempDir,
+} from "./test-support";
 import { WireWriter } from "./wire";
 
-const newKeyPair = () => {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return {
-    privatePem: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
-    publicRaw: spkiToEd25519Raw(
-      Buffer.from(publicKey.export({ format: "der", type: "spki" })),
-    ),
-    privateKey,
-  };
-};
-
-const ca = newKeyPair();
-const caSigner = ed25519SignerFromPrivateKeyPem(ca.privatePem);
+const caSigner = newSigner();
 const user = newKeyPair();
 
 const mint = async (overrides?: {
   principal?: string;
   validAfter?: Date;
   validBefore?: Date;
+  signer?: Ed25519Signer;
 }) =>
   buildUserCertificate(
     {
@@ -63,8 +56,46 @@ const mint = async (overrides?: {
       workspaceId: "ws_1",
       userId: "user_1",
     },
-    caSigner,
+    overrides?.signer ?? caSigner,
   );
+
+/**
+ * Re-sign `cert` with our CA after swapping in the given principals and
+ * critical options: the signature is valid, so a refusal is the
+ * verification law itself, never a bad signature.
+ */
+const resign = async (
+  cert: SshCertificate,
+  fields: { principals: string[]; criticalOptions: Buffer },
+): Promise<Buffer> => {
+  const principals = new WireWriter();
+  for (const principal of fields.principals) principals.writeString(principal);
+  const tbs = new WireWriter()
+    .writeString(ED25519_CERT_TYPE)
+    .writeString(Buffer.alloc(16))
+    .writeString(cert.publicKey)
+    .writeUint64(cert.serial)
+    .writeUint32(cert.certType)
+    .writeString(cert.keyId)
+    .writeString(principals.toBuffer())
+    .writeUint64(cert.validAfter)
+    .writeUint64(cert.validBefore)
+    .writeString(fields.criticalOptions)
+    .writeString(Buffer.alloc(0))
+    .writeString(Buffer.alloc(0))
+    .writeString(cert.signatureKey)
+    .toBuffer();
+  const signature = await caSigner.sign(tbs);
+  return new WireWriter()
+    .writeBytes(tbs)
+    .writeString(
+      new WireWriter()
+        .writeString("ssh-ed25519")
+        .writeString(signature)
+        .toBuffer(),
+    )
+    .toBuffer();
+};
 
 describe("buildUserCertificate / parseCertificateBlob", () => {
   it("round-trips every field", async () => {
@@ -108,20 +139,7 @@ describe("assertValidUserCertificate", () => {
     });
 
   it("rejects a foreign CA", async () => {
-    const foreignCa = ed25519SignerFromPrivateKeyPem(newKeyPair().privatePem);
-    const built = await buildUserCertificate(
-      {
-        userPublicKey: user.publicRaw,
-        keyId: "{}",
-        principal: "agent_1",
-        validAfter: new Date(Date.now() - 60_000),
-        validBefore: new Date(Date.now() + 600_000),
-        sandboxId: "sbx_1",
-        workspaceId: "ws_1",
-        userId: "user_1",
-      },
-      foreignCa,
-    );
+    const built = await mint({ signer: newSigner() });
     expect(() => verified(parseCertificateBlob(built.blob))).toThrow(
       expect.objectContaining({ reason: "wrong_ca" }),
     );
@@ -172,20 +190,11 @@ describe("assertValidUserCertificate", () => {
       verified(cert, { principal: "agent_2", ignoreValidityWindow: true }),
     ).toThrow(expect.objectContaining({ reason: "wrong_principal" }));
     // And a foreign CA is still refused with the window skipped.
-    const foreignCa = ed25519SignerFromPrivateKeyPem(newKeyPair().privatePem);
-    const foreign = await buildUserCertificate(
-      {
-        userPublicKey: user.publicRaw,
-        keyId: "{}",
-        principal: "agent_1",
-        validAfter: new Date(Date.now() - 7200_000),
-        validBefore: new Date(Date.now() - 3600_000),
-        sandboxId: "sbx_1",
-        workspaceId: "ws_1",
-        userId: "user_1",
-      },
-      foreignCa,
-    );
+    const foreign = await mint({
+      validAfter: new Date(Date.now() - 7200_000),
+      validBefore: new Date(Date.now() - 3600_000),
+      signer: newSigner(),
+    });
     expect(() =>
       verified(parseCertificateBlob(foreign.blob), {
         ignoreValidityWindow: true,
@@ -201,39 +210,15 @@ describe("assertValidUserCertificate", () => {
   });
 
   it("rejects any critical option — we never mint them", async () => {
-    // Re-sign a cert that carries a critical option with our own CA: the
-    // signature is valid, so the refusal is the critical-option law itself.
     const built = await mint();
-    const cert = parseCertificateBlob(built.blob);
-    const criticalPacked = new WireWriter()
+    const criticalOptions = new WireWriter()
       .writeString("force-command")
       .writeString(new WireWriter().writeString("/bin/true").toBuffer())
       .toBuffer();
-    const tbs = new WireWriter()
-      .writeString(ED25519_CERT_TYPE)
-      .writeString(Buffer.alloc(16))
-      .writeString(cert.publicKey)
-      .writeUint64(cert.serial)
-      .writeUint32(cert.certType)
-      .writeString(cert.keyId)
-      .writeString(new WireWriter().writeString("agent_1").toBuffer())
-      .writeUint64(cert.validAfter)
-      .writeUint64(cert.validBefore)
-      .writeString(criticalPacked)
-      .writeString(Buffer.alloc(0))
-      .writeString(Buffer.alloc(0))
-      .writeString(cert.signatureKey)
-      .toBuffer();
-    const signature = await caSigner.sign(tbs);
-    const blob = new WireWriter()
-      .writeBytes(tbs)
-      .writeString(
-        new WireWriter()
-          .writeString("ssh-ed25519")
-          .writeString(signature)
-          .toBuffer(),
-      )
-      .toBuffer();
+    const blob = await resign(parseCertificateBlob(built.blob), {
+      principals: ["agent_1"],
+      criticalOptions,
+    });
     expect(() => verified(parseCertificateBlob(blob))).toThrow(
       expect.objectContaining({ reason: "unknown_critical_option" }),
     );
@@ -241,32 +226,10 @@ describe("assertValidUserCertificate", () => {
 
   it("rejects an empty principal list (spec: empty = any)", async () => {
     const built = await mint();
-    const cert = parseCertificateBlob(built.blob);
-    const tbs = new WireWriter()
-      .writeString(ED25519_CERT_TYPE)
-      .writeString(Buffer.alloc(16))
-      .writeString(cert.publicKey)
-      .writeUint64(cert.serial)
-      .writeUint32(cert.certType)
-      .writeString(cert.keyId)
-      .writeString(Buffer.alloc(0))
-      .writeUint64(cert.validAfter)
-      .writeUint64(cert.validBefore)
-      .writeString(Buffer.alloc(0))
-      .writeString(Buffer.alloc(0))
-      .writeString(Buffer.alloc(0))
-      .writeString(cert.signatureKey)
-      .toBuffer();
-    const signature = await caSigner.sign(tbs);
-    const blob = new WireWriter()
-      .writeBytes(tbs)
-      .writeString(
-        new WireWriter()
-          .writeString("ssh-ed25519")
-          .writeString(signature)
-          .toBuffer(),
-      )
-      .toBuffer();
+    const blob = await resign(parseCertificateBlob(built.blob), {
+      principals: [],
+      criticalOptions: Buffer.alloc(0),
+    });
     expect(() => verified(parseCertificateBlob(blob))).toThrow(
       expect.objectContaining({ reason: "no_principals" }),
     );
@@ -303,21 +266,10 @@ describe("public key line helpers", () => {
 // both display our minted cert and mint one our parser + verifier accept.
 // Skipped where ssh-keygen is unavailable (the pure-JS vectors above still
 // pin the format).
-const hasSshKeygen = (() => {
-  try {
-    execFileSync("ssh-keygen", ["-h"], { stdio: "ignore" });
-    return true;
-  } catch (err) {
-    // ssh-keygen -h exits non-zero but existing; ENOENT means truly absent.
-    return (err as NodeJS.ErrnoException).code !== "ENOENT";
-  }
-})();
-
 describe.skipIf(!hasSshKeygen)("ssh-keygen cross-validation", () => {
   it("ssh-keygen -L reads a cert we minted", async () => {
     const built = await mint();
-    const dir = mkdtempSync(join(tmpdir(), "onecli-ssh-cert-"));
-    try {
+    withTempDir("onecli-ssh-cert-", (dir) => {
       const certPath = join(dir, "id_ed25519-cert.pub");
       writeFileSync(certPath, `${built.line}\n`);
       const out = execFileSync("ssh-keygen", ["-L", "-f", certPath], {
@@ -326,14 +278,11 @@ describe.skipIf(!hasSshKeygen)("ssh-keygen cross-validation", () => {
       expect(out).toContain("agent_1");
       expect(out).toContain("user cert");
       expect(out).toContain("permit-pty");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
-  it("we verify a cert ssh-keygen minted", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "onecli-ssh-cert-"));
-    try {
+  it("we verify a cert ssh-keygen minted", () => {
+    withTempDir("onecli-ssh-cert-", (dir) => {
       const caPath = join(dir, "ca");
       const userPath = join(dir, "id_ed25519");
       execFileSync("ssh-keygen", [
@@ -366,7 +315,6 @@ describe.skipIf(!hasSshKeygen)("ssh-keygen cross-validation", () => {
         "-1m:+10m",
         `${userPath}.pub`,
       ]);
-      const { readFileSync } = await import("node:fs");
       const certLine = readFileSync(`${userPath}-cert.pub`, "utf8");
       const caLine = readFileSync(`${caPath}.pub`, "utf8");
       const cert = parseCertificateLine(certLine);
@@ -376,8 +324,6 @@ describe.skipIf(!hasSshKeygen)("ssh-keygen cross-validation", () => {
           principal: "agent_x",
         }),
       ).not.toThrow();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

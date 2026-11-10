@@ -7,6 +7,7 @@ import {
 } from "@onecli/agent-protocol";
 import { z } from "zod";
 import { ServiceError } from "./errors";
+import { visibleTo } from "./conversation-visibility";
 import { isLlmHost } from "../lib/path-match";
 import { CAPS } from "../lib/env";
 import { getRoleResolver } from "../providers";
@@ -40,13 +41,14 @@ import {
  * which is approximate and can include other conversations, so that
  * evidence goes only to org admins and never carries request paths.
  *
- * VISIBILITY. A member sees their own runs plus non-direct ones (cron,
- * watch, eval, channel threads): the same fence as conversations. Where
- * roles are enforced (cloud, licensed self-host) an org admin also sees
- * everyone's DIRECT runs. A list names such a run but never carries its
- * content: opening it is the read, and the route audits each one. Without
- * role enforcement every member is an implicit admin, so that override does
- * not exist there: direct threads stay private to their owner.
+ * VISIBILITY. A member sees their own runs plus unowned ones (cron, watch,
+ * eval, channel threads): the same fence as conversations (`visibleTo`).
+ * Where roles are enforced (cloud, licensed self-host) an org admin also
+ * sees everyone's PRIVATE runs: direct threads, and the DM threads opened
+ * inside them. A list names such a run but never carries its content:
+ * opening it is the read, and the route audits each one. Without role
+ * enforcement every member is an implicit admin, so that override does not
+ * exist there: private threads stay private to their owner.
  */
 
 /** Characters of any one string the list returns: the list is a scan, the
@@ -110,19 +112,25 @@ const visibleConversations = (
   isAdmin: boolean,
 ): Prisma.ConversationWhereInput => ({
   AND: [
-    // Guest DMs are sourced (direct=false). Exclude them until Runs has a
+    // Guest DMs are sourced AND unowned (a DM thread of a member's is
+    // sourced too, but owned: it stays). Exclude them until Runs has a
     // guest-specific read policy, including for administrators.
-    { OR: [{ direct: true }, { threadLink: { isNot: { kind: "direct" } } }] },
-    // Detaching a channel deletes its links, not its conversation. A sourced
-    // channel thread without a known group link fails closed.
     {
       OR: [
-        { direct: true },
+        { userId: { not: null } },
+        { threadLink: { isNot: { kind: "direct" } } },
+      ],
+    },
+    // Detaching a channel deletes its links, not its conversation. An
+    // unowned channel thread without a known group link fails closed.
+    {
+      OR: [
+        { userId: { not: null } },
         { source: { notIn: [...CHANNEL_PROVIDER_IDS] } },
         { threadLink: { is: { kind: "group" } } },
       ],
     },
-    ...(isAdmin ? [] : [{ OR: [{ direct: false }, { userId: viewerUserId }] }]),
+    ...(isAdmin ? [] : [visibleTo(viewerUserId)]),
   ],
 });
 
@@ -150,7 +158,6 @@ const turnSelect = {
   finishedAt: true,
   conversation: {
     select: {
-      direct: true,
       userId: true,
       agent: { select: { id: true, name: true } },
     },
@@ -294,7 +301,7 @@ const summarize = (
   conversationId: t.conversationId,
   agent: t.conversation.agent,
   source: t.source,
-  direct: t.conversation.direct,
+  privateThread: t.conversation.userId !== null,
   status: t.status,
   question: t.message,
   answer: events?.answer ?? null,
@@ -312,9 +319,10 @@ const summarize = (
       : null,
 });
 
-/** A colleague's private thread: reading it is an audited admin override. */
-const isOthersDirect = (t: TurnRow, viewerUserId: string) =>
-  t.conversation.direct && t.conversation.userId !== viewerUserId;
+/** A colleague's private thread (their direct thread, or a DM thread of
+ * theirs): reading it is an audited admin override. */
+const isOthersPrivateThread = (t: TurnRow, viewerUserId: string) =>
+  t.conversation.userId !== null && t.conversation.userId !== viewerUserId;
 
 /**
  * A run as a list row. A colleague's private thread keeps only its facts:
@@ -323,10 +331,10 @@ const isOthersDirect = (t: TurnRow, viewerUserId: string) =>
  */
 const toListItem = (
   run: Omit<RunDetail, "tools" | "appCalls">,
-  othersDirect: boolean,
+  othersPrivateThread: boolean,
 ): RunListItem => {
   const { question, answer, error, toolNames, ...facts } = run;
-  if (othersDirect) return { ...facts, private: true };
+  if (othersPrivateThread) return { ...facts, private: true };
   return {
     ...facts,
     private: false,
@@ -412,7 +420,7 @@ export const listRuns = async (
   const last = page.at(-1);
   return {
     runs: shown.map(({ turn, run }) =>
-      toListItem(run, isOthersDirect(turn, viewerUserId)),
+      toListItem(run, isOthersPrivateThread(turn, viewerUserId)),
     ),
     nextBefore:
       turns.length > scan && last
@@ -429,7 +437,7 @@ export const getRun = async (
   viewerUserId: string,
   agentId: string,
   turnId: string,
-): Promise<{ run: RunDetail; viewedOthersDirect: boolean }> => {
+): Promise<{ run: RunDetail; viewedOthersPrivateThread: boolean }> => {
   await requireAgent(workspaceId, organizationId, agentId);
   const isAdmin = await holdsAdminOverride(viewerUserId, organizationId);
   const turn = await db.turn.findFirst({
@@ -462,7 +470,7 @@ export const getRun = async (
       tools: evidence?.tools ?? [],
       appCalls,
     },
-    viewedOthersDirect: isOthersDirect(turn, viewerUserId),
+    viewedOthersPrivateThread: isOthersPrivateThread(turn, viewerUserId),
   };
 };
 

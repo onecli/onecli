@@ -27,7 +27,7 @@ const ALL_AGENTS = "all";
 /** The Activity URL: `?tab=runs`, `?agent=<id>`, `?view=<runs filter>`,
  *  `?webhook=<id>` (one webhook's runs), `?from=…&to=…`. */
 interface ActivityUrl {
-  tab?: "runs";
+  tab?: "runs" | "network";
   agent?: string;
   view?: Exclude<RunsView, "all">;
   webhook?: string;
@@ -52,20 +52,35 @@ const runWindow = (run: RunListItem) => {
 
 /**
  * Activity: what happened in this workspace, two ways.
- *  - Network (default): every request through the gateway.
- *  - Runs: each question an agent answered.
+ *  - Runs (default): each question an agent answered.
+ *  - Network: every request through the gateway.
  * The tab, the agent and a run's time window live in the URL, so an agent's
  * "View activity" and a run's "View requests in Network" land on the right
  * view, and refresh keeps it. Updates go through the History API: only this
  * component reads them, so no server round-trip is needed (Next keeps
  * `useSearchParams` in sync).
  */
-export const ActivityContent = () => {
+export const ActivityContent = ({
+  pinnedAgent,
+}: {
+  /**
+   * The agent page's Activity: every
+   * query is this agent's, the agent picker is gone and the Network tab
+   * is called Traffic. The URL keeps the same shape (`?tab=`, `?view=`,
+   * `?schedule=`, ...) minus `agent`, so the schedule and webhook deep
+   * links work unchanged.
+   */
+  pinnedAgent?: { id: string; name: string };
+} = {}) => {
   const pathname = usePathname();
   const params = useSearchParams();
   const { data: agents = [] } = useAgents();
 
-  const tab = params.get("tab") === "runs" ? "runs" : "network";
+  // Runs first on both surfaces: what the agents did is the question
+  // people come with; the gateway's request log is the follow-up.
+  const tab = params.get("tab") === "network" ? "network" : "runs";
+  const tabParam = (value: "runs" | "network") =>
+    value === "runs" ? undefined : value;
   // The Runs filter; an unknown value falls back to All.
   const rawView = params.get("view");
   const view = isRunsView(rawView) ? rawView : "all";
@@ -73,7 +88,7 @@ export const ActivityContent = () => {
   // A hand-edited or stale URL must not reach the query: an invalid scope is
   // dropped whole.
   const parsed = activityScopeSchema.safeParse({
-    agentId: params.get("agent") ?? undefined,
+    agentId: pinnedAgent?.id ?? params.get("agent") ?? undefined,
     from: params.get("from") ?? undefined,
     to: params.get("to") ?? undefined,
   });
@@ -91,7 +106,8 @@ export const ActivityContent = () => {
   const go = (next: ActivityUrl, history: "push" | "replace" = "replace") => {
     const q = new URLSearchParams();
     for (const [key, value] of Object.entries(next)) {
-      if (value) q.set(key, value);
+      // Pinned: the agent is the page's, never the URL's.
+      if (value && !(pinnedAgent && key === "agent")) q.set(key, value);
     }
     const qs = q.toString();
     const url = qs ? `${pathname}?${qs}` : pathname;
@@ -102,43 +118,58 @@ export const ActivityContent = () => {
   // Switching tab or agent keeps the other and drops a run's window: the
   // window only means something on the Network view it was opened for.
   const onTab = (value: string) =>
-    go({ tab: value === "runs" ? "runs" : undefined, agent: scope.agentId });
+    go({
+      tab: tabParam(value === "runs" ? "runs" : "network"),
+      agent: scope.agentId,
+    });
   const onAgent = (id: string) =>
     go({
-      tab: tab === "runs" ? "runs" : undefined,
+      tab: tabParam(tab),
       agent: id === ALL_AGENTS ? undefined : id,
       view: tab === "runs" ? viewParam : undefined,
     });
   // A new history entry: Back returns to the run list.
   const viewRunNetwork = (run: RunListItem) =>
-    go({ agent: run.agent.id, ...runWindow(run) }, "push");
+    go(
+      { tab: tabParam("network"), agent: run.agent.id, ...runWindow(run) },
+      "push",
+    );
 
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-6">
       <PageHeader
         title="Activity"
-        description="What your agents did, and every request through your gateway. Request bodies and query strings are never recorded."
+        character="drop-think"
+        description={
+          pinnedAgent
+            ? `What ${pinnedAgent.name} did, and every request it sent through your gateway. Request bodies and query strings are never recorded.`
+            : "What your agents did, and every request through your gateway. Request bodies and query strings are never recorded."
+        }
       />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <AnimatedTabs value={tab} onValueChange={onTab}>
           <AnimatedTabList>
-            <AnimatedTabTrigger value="network">Network</AnimatedTabTrigger>
             <AnimatedTabTrigger value="runs">Runs</AnimatedTabTrigger>
+            <AnimatedTabTrigger value="network">
+              {pinnedAgent ? "Traffic" : "Network"}
+            </AnimatedTabTrigger>
           </AnimatedTabList>
         </AnimatedTabs>
-        <Select value={scope.agentId ?? ALL_AGENTS} onValueChange={onAgent}>
-          <SelectTrigger className="h-8 w-48 text-xs" aria-label="Agent">
-            <SelectValue placeholder="All agents" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_AGENTS}>All agents</SelectItem>
-            {agents.map((agent) => (
-              <SelectItem key={agent.id} value={agent.id}>
-                {agent.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {!pinnedAgent && (
+          <Select value={scope.agentId ?? ALL_AGENTS} onValueChange={onAgent}>
+            <SelectTrigger className="h-8 w-48 text-xs" aria-label="Agent">
+              <SelectValue placeholder="All agents" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_AGENTS}>All agents</SelectItem>
+              {agents.map((agent) => (
+                <SelectItem key={agent.id} value={agent.id}>
+                  {agent.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
 
       {tab === "runs" ? (
@@ -149,23 +180,25 @@ export const ActivityContent = () => {
           view={view}
           onViewChange={(next) =>
             go({
-              tab: "runs",
+              tab: tabParam("runs"),
               agent: scope.agentId,
               view: next === "all" ? undefined : next,
             })
           }
           onClearWebhook={() =>
-            go({ tab: "runs", agent: scope.agentId, view: "webhook" })
+            go({ tab: tabParam("runs"), agent: scope.agentId, view: "webhook" })
           }
           onClearSchedule={() =>
-            go({ tab: "runs", agent: scope.agentId, view: "cron" })
+            go({ tab: tabParam("runs"), agent: scope.agentId, view: "cron" })
           }
           onViewNetwork={viewRunNetwork}
         />
       ) : (
         <NetworkTab
           scope={scope}
-          onClearWindow={() => go({ agent: scope.agentId })}
+          onClearWindow={() =>
+            go({ tab: tabParam("network"), agent: scope.agentId })
+          }
         />
       )}
     </div>

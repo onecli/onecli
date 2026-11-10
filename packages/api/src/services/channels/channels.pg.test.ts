@@ -48,6 +48,7 @@ type Providers = typeof import("../../providers");
 type Receipts = typeof import("./turn-receipt-service");
 type Validations = typeof import("../../validations/conversation");
 type DecryptCache = typeof import("./channel-decrypt-cache");
+type DueWork = typeof import("../due-work");
 
 let db: Db;
 let integrations: Integrations;
@@ -60,6 +61,7 @@ let apiKeys: ApiKeys;
 let receipts: Receipts;
 let validations: Validations;
 let decryptCache: DecryptCache;
+let dueWork: DueWork;
 let getCrypto: Providers["getCrypto"];
 let initSelfUrl: Providers["initSelfUrl"];
 let initAttachmentStore: Providers["initAttachmentStore"];
@@ -610,6 +612,7 @@ beforeAll(async () => {
   receipts = await import("./turn-receipt-service");
   validations = await import("../../validations/conversation");
   decryptCache = await import("./channel-decrypt-cache");
+  dueWork = await import("../due-work");
   ({ getCrypto, initSelfUrl, initAttachmentStore } =
     await import("../../providers"));
   // This suite imports services directly (never createApiApp), so
@@ -5390,6 +5393,130 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     if (result.outcome.kind !== "turn") throw new Error("unreachable");
     expect(result.outcome.turn.status).toBe("failed");
     expect(result.outcome.turn.errorCode).toBe("no_model_key");
+  });
+
+  describe("the queued-behind note (the per-agent cap)", () => {
+    // A DM thread typed while the agent already has its cap of person turns
+    // going is accepted (its loader goes up) but will not START until one
+    // finishes. The person is told so, once, privately, in the thread they
+    // typed in. Under the cap: silence, the loader is the whole signal.
+    const threadedDm = (
+      user: string,
+      channel: string,
+      text: string,
+      threadTs: string,
+      ts: string,
+    ) => ({ ...dmEvent(user, channel, text), thread_ts: threadTs, ts });
+
+    const fillTheCap = async (agentId: string) => {
+      for (let i = 0; i < dueWork.MAX_PERSON_TURNS_PER_AGENT; i += 1) {
+        const conversation = await db.conversation.create({
+          data: { agentId, source: "slack", externalRef: `C-busy-${i}:1.${i}` },
+          select: { id: true },
+        });
+        await db.turn.create({
+          data: {
+            conversationId: conversation.id,
+            message: `busy ${i}`,
+            status: "running",
+            source: "slack",
+            userId: MEMBER,
+          },
+        });
+      }
+    };
+
+    it("a thread opened past the cap gets ONE private note in its thread, naming how many tasks are ahead", async () => {
+      const { agentId, integrationId, presenceId } = await seedChannelAgent(
+        "dm-queued-note",
+        {
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-queued" }),
+          ),
+        },
+      );
+      await linkUser(integrationId, "U111", MEMBER);
+      await fillTheCap(agentId);
+      slackHandlers["chat.postEphemeral"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: threadedDm(
+          "U111",
+          "D123",
+          "and this too",
+          "1000.0001",
+          "1000.0009",
+        ),
+        eventId: "Ev-queued-1",
+      });
+      expect(result.kind).toBe("message");
+      if (result.kind !== "message") throw new Error("unreachable");
+      expect(result.outcome.kind).toBe("turn");
+
+      // Detached, like the receipt: wait for the note to land on the fake.
+      await vi.waitFor(() =>
+        expect(slackCallsFor("chat.postEphemeral")).toHaveLength(1),
+      );
+      const note = slackCallsFor("chat.postEphemeral")[0]!;
+      expect(note.token).toBe("xoxb-queued");
+      expect(note.form.get("channel")).toBe("D123");
+      expect(note.form.get("user")).toBe("U111");
+      // IN the thread the person typed in, not at the DM's top level.
+      expect(note.form.get("thread_ts")).toBe("1000.0001");
+      expect(note.form.get("text")).toBe(
+        dispatch.queuedBehindText(dueWork.MAX_PERSON_TURNS_PER_AGENT),
+      );
+      // The loader still goes up: the note is beside the receipt, never
+      // instead of it.
+      await vi.waitFor(async () =>
+        expect(
+          await db.channelTurnReceipt.findFirst({
+            where: { agentChannelId: presenceId },
+          }),
+        ).not.toBeNull(),
+      );
+    });
+
+    it("under the cap there is no note: the loader is the whole signal", async () => {
+      const { integrationId, presenceId } = await seedChannelAgent(
+        "dm-queued-quiet",
+        {
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-quiet" }),
+          ),
+        },
+      );
+      await linkUser(integrationId, "U111", MEMBER);
+      slackHandlers["chat.postEphemeral"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      const before = slackCallsFor("chat.postEphemeral").length;
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: threadedDm(
+          "U111",
+          "D123",
+          "quick one",
+          "2000.0001",
+          "2000.0002",
+        ),
+        eventId: "Ev-queued-2",
+      });
+      expect(result.kind).toBe("message");
+      // The receipt lands (so the detached work has run) and no note did.
+      await vi.waitFor(async () =>
+        expect(
+          await db.channelTurnReceipt.findFirst({
+            where: { agentChannelId: presenceId },
+          }),
+        ).not.toBeNull(),
+      );
+      expect(slackCallsFor("chat.postEphemeral")).toHaveLength(before);
+    });
   });
 });
 

@@ -111,6 +111,7 @@ export {
 export {
   ACTIVITY_TEXT_MAX,
   activityForReasoning,
+  activityForReasoningStream,
   activityForTool,
   bareToolName,
 } from "./activity";

@@ -91,11 +91,11 @@ Agent   ──► Gateway CONNECT host:443            (credential injection)
 
 Key files:
 
-| File                       | Role                                                        |
-| -------------------------- | ----------------------------------------------------------- |
-| `vault/mod.rs`             | `VaultProvider` trait + `VaultService` orchestrator         |
-| `vault/bitwarden.rs`       | Bitwarden provider (sessions, pairing, caching)             |
-| `vault/bitwarden_db.rs`    | DB-backed identity + session storage                        |
-| `vault/onepassword.rs`     | 1Password provider (Service Account session, `op://` cache) |
-| `vault/onepassword_api.rs` | Bridge to the Node 1Password SDK service                    |
-| `vault/api.rs`             | REST endpoints for pair/status/disconnect + the 1P picker   |
+| File                                               | Role                                                        |
+| -------------------------------------------------- | ----------------------------------------------------------- |
+| `apps/gateway/crates/vault/src/lib.rs`             | `VaultProvider` trait + `VaultService` orchestrator         |
+| `apps/gateway/crates/vault/src/bitwarden.rs`       | Bitwarden provider (sessions, pairing, caching)             |
+| `apps/gateway/crates/vault/src/bitwarden_db.rs`    | DB-backed identity + session storage                        |
+| `apps/gateway/crates/vault/src/onepassword.rs`     | 1Password provider (Service Account session, `op://` cache) |
+| `apps/gateway/crates/vault/src/onepassword_api.rs` | Bridge to the Node 1Password SDK service                    |
+| `apps/gateway/crates/server/src/vault_api.rs`      | REST endpoints for pair/status/disconnect + the 1P picker   |

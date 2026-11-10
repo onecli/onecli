@@ -287,12 +287,13 @@ export const resolveConversationReader = async (input: {
   if (!input.conversationId) return null;
   const conversation = await db.conversation.findFirst({
     where: { id: input.conversationId, agentId: input.agentId },
-    select: { source: true, externalRef: true, direct: true, userId: true },
+    select: { source: true, externalRef: true, userId: true },
   });
   if (!conversation) return null;
-  if (conversation.direct && conversation.userId) {
-    // A direct thread's turns are its owner's; a mismatched turn user would
-    // be an upstream bug, so refuse rather than guess.
+  if (conversation.userId) {
+    // A private thread's turns are its owner's (their direct thread, or a
+    // DM thread opened inside it: any owned conversation); a mismatched
+    // turn user would be an upstream bug, so refuse rather than guess.
     return input.turnUserId === null || input.turnUserId === conversation.userId
       ? conversation.userId
       : null;
@@ -307,7 +308,7 @@ export const resolveConversationReader = async (input: {
       where: { id: conversation.externalRef, agentId: input.agentId },
       select: {
         createdByUserId: true,
-        originConversation: { select: { direct: true, userId: true } },
+        originConversation: { select: { userId: true } },
         originConversationId: true,
       },
     });
@@ -315,11 +316,12 @@ export const resolveConversationReader = async (input: {
     // The run's REPORT is delivered to the schedule's origin. A schedule
     // created inside a shared channel thread reports into that channel, so
     // it is a shared audience: nobody. Only a report that stays private
-    // (no origin, or the creator's own direct thread) carries the creator.
+    // (no origin, or a private thread the creator owns) carries the
+    // creator; `createdByUserId` is non-null here, so owner equality alone
+    // says the origin is theirs.
     const privateDelivery =
       cron.originConversationId === null ||
-      (cron.originConversation?.direct === true &&
-        cron.originConversation.userId === cron.createdByUserId);
+      cron.originConversation?.userId === cron.createdByUserId;
     return privateDelivery ? cron.createdByUserId : null;
   }
   return null;
@@ -405,9 +407,10 @@ const fromOutcome = (outcome: ActAsYouOutcome): RunnerToolCallResponse =>
  * members, and the instructions steer every future event, so the audience
  * must be exactly one verified member:
  *
- * - Only a direct thread (web chat, or the same person's Slack DM) whose
- *   owner typed this turn: `resolveConversationReader`'s private-audience
- *   rule, with a known speaker required. A shared conversation (a channel
+ * - Only a private thread (web chat, the same person's Slack DM, or a
+ *   thread they opened inside that DM) whose owner typed this turn:
+ *   `resolveConversationReader`'s private-audience rule, with a known
+ *   speaker required. A shared conversation (a channel
  *   thread, a test run, a webhook/schedule run) fails: a guest's message
  *   there steers into a member's live run, so "a member asked" never holds
  *   for the whole run. A turn nobody typed (a platform-written report)

@@ -30,10 +30,10 @@ export const RequestAppSlot = ({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="group flex items-center justify-between rounded-xl border border-dashed border-muted-foreground/40 bg-card/40 px-4 py-3 text-left transition-colors cursor-pointer hover:bg-accent/50 hover:border-solid"
+        className="group flex h-full items-center rounded-lg border border-dashed border-muted-foreground/40 bg-card/40 px-3.5 py-3 text-left transition-colors cursor-pointer hover:bg-accent/50 hover:border-solid"
       >
-        <div className="flex items-center gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+        <div className="flex items-center gap-2.5">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background">
             <Plus className="size-4 text-muted-foreground transition-colors group-hover:text-foreground" />
           </div>
           <div className="flex flex-col">

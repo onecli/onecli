@@ -7,7 +7,7 @@ import {
   type ComponentProps,
   type ReactNode,
 } from "react";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,7 +127,7 @@ vi.mock("./chat-thread", () => ({
     );
   },
 }));
-// Keep the actual dock, overlay, preferences, theater, control pill and composer.
+// Keep the actual dock, stage, preferences, theater, control pill and composer.
 // Only the remote screen and network hooks are replaced.
 vi.mock("@/ee/desktop/desktop-screen", () => ({
   DesktopScreen: ({ children }: ComponentProps<typeof DesktopScreen>) => (
@@ -158,8 +158,8 @@ beforeEach(() => {
   spies.previews = true;
   dockChunk.arrived = Promise.resolve();
   localStorage.clear();
-  // These walk the theater from the open card, which the person chose once
-  // (the dock starts minimized to the header chip otherwise).
+  // These start from the open card, which the person chose once (the dock
+  // starts minimized to the header button otherwise).
   localStorage.setItem(
     "onecli:desktop-dock:agent-1",
     JSON.stringify({ mode: "card", chat: false, corner: "bottom-right" }),
@@ -221,8 +221,8 @@ const chatContainerSiblings = () => {
   );
 };
 
-describe("direct chat in the desktop theater", () => {
-  it("moves one mounted composer and transcript, preserving drafts and attachments across toggles and reopening", async () => {
+describe("direct chat with the computer grown", () => {
+  it("grows over the transcript with one mounted composer below it, keeping drafts and attachments across reopening", async () => {
     const user = userEvent.setup();
     const { container, unmount } = mount();
     const composer = screen.getByRole("textbox", { name: "Message" });
@@ -249,41 +249,23 @@ describe("direct chat in the desktop theater", () => {
     expect(screen.getByText("notes.txt")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Open computer" }));
-    let dialog = screen.getByRole("dialog");
-    expect(
-      within(dialog).queryByRole("textbox", { name: "Message" }),
-    ).toBeNull();
-    expect(
-      within(dialog).getByRole("button", { name: "Chat" }),
-    ).toHaveAttribute("aria-pressed", "false");
-    await user.click(within(dialog).getByRole("button", { name: "Chat" }));
-    expect(within(dialog).getByRole("textbox", { name: "Message" })).toBe(
-      composer,
-    );
-    expect(within(dialog).getByTestId("transcript")).toBe(transcript);
+    // Grown to fill the conversation, never over the composer: the person
+    // keeps typing to the agent while they watch it.
+    const stage = await screen.findByRole("region", {
+      name: "Agent’s computer",
+    });
+    expect(transcriptRegion).toContainElement(stage);
+    expect(stage).not.toContainElement(composer);
     expect(composer).toHaveValue("Keep my draft");
-    expect(within(dialog).getByText("notes.txt")).toBeInTheDocument();
     await user.type(composer, " from theater");
-
-    await user.click(within(dialog).getByRole("button", { name: "Chat" }));
-    expect(dialog).toContainElement(composer);
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
     expect(
-      within(dialog).queryByRole("textbox", { name: "Message" }),
+      screen.queryByRole("region", { name: "Agent’s computer" }),
     ).toBeNull();
-    expect(composer).toHaveValue("Keep my draft from theater");
-    await user.click(within(dialog).getByRole("button", { name: "Chat" }));
-    await user.click(
-      within(dialog).getByRole("button", { name: "Back to the chat" }),
-    );
     expect(container).toContainElement(composer);
     expect(container).toContainElement(transcript);
     await user.click(screen.getByRole("button", { name: "Open computer" }));
-    dialog = screen.getByRole("dialog");
-    // Chat was enabled at collapse, and is remembered on reopen.
-    expect(within(dialog).getByRole("textbox", { name: "Message" })).toBe(
-      composer,
-    );
-    expect(within(dialog).getByText("notes.txt")).toBeInTheDocument();
+    expect(screen.getByText("notes.txt")).toBeInTheDocument();
     expect(document.querySelectorAll('[aria-label="Message"]')).toHaveLength(1);
     expect(
       document.querySelectorAll('[data-testid="transcript"]'),
@@ -293,9 +275,7 @@ describe("direct chat in the desktop theater", () => {
     expect(spies.transcriptUnmount).not.toHaveBeenCalled();
     expect(spies.threadUnmount).not.toHaveBeenCalled();
     expect(spies.upload).toHaveBeenCalledTimes(1);
-    await user.click(
-      within(dialog).getByRole("button", { name: "Send message" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(spies.send).toHaveBeenCalledWith(
       expect.objectContaining({
         message: "Keep my draft from theater",

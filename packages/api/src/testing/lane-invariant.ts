@@ -42,7 +42,7 @@ const HOISTED_BLOCK = /vi\.hoisted\(\s*\(\)\s*=>\s*\{[\s\S]*?\}\s*\)/g;
 
 /** Value imports that read no edition at module load. */
 const LOAD_SAFE_IMPORT =
-  /^(?:vitest|node:[\w/]+|(?:\.\.?\/)+(?:testing\/)?(?:pg-proof|scoped-prisma)(?:\.js)?)$/;
+  /^(?:vitest|node:[\w/]+|(?:\.\.?\/)+(?:testing\/)?(?:pg-proof|scoped-prisma|model-key-grant)(?:\.js)?)$/;
 
 const VALUE_IMPORT = /^import\s+(?!type\b)[^;]*?from\s+["']([^"']+)["']/gms;
 

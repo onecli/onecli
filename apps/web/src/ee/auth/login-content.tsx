@@ -17,6 +17,9 @@ import { BrandLogo } from "@/lib/components/brand-logo";
 import { GoogleIcon } from "@/lib/components/google-icon";
 import { apiFetch } from "@/lib/api-fetch";
 import { TURNSTILE_SITE_KEY } from "@/lib/env";
+import { postAuthLanding } from "@/lib/auth/post-auth-landing";
+import { AuthSyncError } from "@/lib/auth/_components/auth-sync-error";
+import { PendingLanding } from "@/lib/dashboard/shell/pending-landing";
 import {
   lookupSsoProvider,
   isPlausibleEmail,
@@ -34,7 +37,6 @@ export const LoginContent = () => {
   const router = useRouter();
   const {
     isAuthenticated,
-    isLoading,
     user,
     signIn,
     signOut,
@@ -121,11 +123,7 @@ export const LoginContent = () => {
             router.replace(pendingCallback);
           } else {
             const data = (await res.json()) as { workspaceId?: string };
-            // No workspace context: the /org index server-redirects to the
-            // validated /org/<defaultOrgId>/workspaces (the home destination).
-            router.replace(
-              data.workspaceId ? `/w/${data.workspaceId}` : "/org",
-            );
+            router.replace(await postAuthLanding(data.workspaceId));
           }
         } else if (res.status === 401) {
           // Session-policy rejection (e.g. "require SSO") carries an explicit
@@ -159,7 +157,9 @@ export const LoginContent = () => {
           );
         }
       } catch {
-        // Transient error (deploy, network) — don't sign out
+        // Transient error (deploy, network): don't sign out, but say so,
+        // or the skeleton below waits on a landing that is never coming.
+        setError("Could not reach the server. Reload to try again.");
       }
     };
 
@@ -310,21 +310,17 @@ export const LoginContent = () => {
 
   // ── Render ──
 
-  const logo = <BrandLogo />;
-
-  if (isLoading || isAuthenticated) {
-    return (
-      <div className="bg-background flex min-h-svh flex-col items-center justify-center px-6 pb-24">
-        {logo}
-        <div className="flex flex-col items-center gap-4 py-20">
-          <div className="text-brand h-8 w-8 animate-spin rounded-full border-2 border-current border-t-transparent" />
-          <p className="text-muted-foreground text-sm">
-            {isAuthenticated ? "Signing you in..." : "Loading..."}
-          </p>
-        </div>
-      </div>
-    );
+  // Signed in: the dashboard's skeleton holds the screen while the landing
+  // is looked up, so the form gives way straight to the dashboard filling
+  // in. A failure the session survives (a rate limit, the server out of
+  // reach) replaces it, or it would wait forever. While Cognito is still
+  // checking the session the form stands: nearly everyone here is signed
+  // out.
+  if (isAuthenticated) {
+    return error ? <AuthSyncError message={error} /> : <PendingLanding />;
   }
+
+  const logo = <BrandLogo />;
 
   return (
     <div className="bg-background flex min-h-svh flex-col items-center justify-center px-6 pb-24">
@@ -333,9 +329,7 @@ export const LoginContent = () => {
       <div className="mb-8 text-center">
         {step === "providers" ? (
           <>
-            <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight sm:text-5xl">
-              Log in
-            </h1>
+            <h1 className="text-3xl font-semibold tracking-tight">Log in</h1>
             <p className="text-muted-foreground mt-3 text-lg">
               Continue with your account to
               <br />
@@ -344,7 +338,7 @@ export const LoginContent = () => {
           </>
         ) : (
           <>
-            <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight sm:text-5xl">
+            <h1 className="text-3xl font-semibold tracking-tight">
               You&apos;re almost signed up
             </h1>
           </>

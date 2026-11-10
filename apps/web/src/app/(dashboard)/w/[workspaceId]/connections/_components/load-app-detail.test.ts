@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getApp } from "@onecli/api/apps/registry";
-import { AppDetail } from "./app-detail";
 import { loadAppDetail } from "./load-app-detail";
 
 vi.mock("next/navigation", () => ({
@@ -9,16 +8,19 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
-// The pages' server actions: each page checks its own scope's config.
-const checks = vi.hoisted(() => ({
-  workspace: vi.fn<(provider: string) => Promise<boolean>>(async () => true),
-  organization: vi.fn<(provider: string) => Promise<boolean>>(async () => true),
+// The pages are redirects into the Settings modal: asserted by their
+// arguments (the stub returns instead of throwing, so the page resolves).
+const redirect = vi.hoisted(() => ({
+  toModal: vi.fn<
+    (
+      scope: unknown,
+      page: string,
+      params: Record<string, string | string[] | undefined>,
+    ) => Promise<void>
+  >(async () => {}),
 }));
-vi.mock("@/lib/actions/app-config", () => ({
-  checkAppConfigExists: checks.workspace,
-}));
-vi.mock("@/lib/actions/org-app-config", () => ({
-  checkOrgAppConfigExists: checks.organization,
+vi.mock("@/lib/settings-modal/redirect-to-modal", () => ({
+  redirectToSettingsModal: redirect.toModal,
 }));
 
 const GOOGLE_ENV = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] as const;
@@ -117,46 +119,49 @@ describe("loadAppDetail", () => {
 });
 
 describe("app detail pages", () => {
-  it("renders the workspace page with the workspace config check", async () => {
-    const { default: AppDetailPage } = await import("../apps/[provider]/page");
-    checks.workspace.mockClear();
-    const page = await AppDetailPage({
-      params: Promise.resolve({ provider: "gmail" }),
-    });
-    expect(checks.workspace).toHaveBeenCalledWith("gmail");
-    expect(page.type).toBe(AppDetail);
-    expect(page.props.hasAppConfig).toBe(true);
-    expect(page.props).toEqual(await loadAppDetail("gmail", checks.workspace));
-  });
+  const wsParams = (provider: string) =>
+    Promise.resolve({ workspaceId: "ws_1", provider });
+  const noQuery = Promise.resolve({});
 
-  it("renders the organization page with the org config check, scope and back link", async () => {
+  it("forwards both pages into the modal, the app and the query along", async () => {
+    const { default: AppDetailPage } = await import("../apps/[provider]/page");
     const { default: GlobalAppDetailPage } =
       await import("@/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-app-detail-page");
-    checks.organization.mockClear();
-    const page = await GlobalAppDetailPage({
+    redirect.toModal.mockClear();
+    await AppDetailPage({
+      params: wsParams("gmail"),
+      searchParams: Promise.resolve({ connected: "c1" }),
+    });
+    expect(redirect.toModal).toHaveBeenCalledWith(
+      { workspaceId: "ws_1" },
+      "apps",
+      { connected: "c1", app: "gmail" },
+    );
+    await GlobalAppDetailPage({
       params: Promise.resolve({ provider: "gmail", orgId: "org_1" }),
+      searchParams: noQuery,
     });
-    expect(checks.organization).toHaveBeenCalledWith("gmail");
-    expect(page.type).toBe(AppDetail);
-    expect(page.props.hasAppConfig).toBe(true);
-    expect(page.props).toEqual({
-      ...(await loadAppDetail("gmail", checks.organization)),
-      pageScope: "organization",
-      backPath: "/org/org_1/settings/global-connections",
-    });
+    expect(redirect.toModal).toHaveBeenLastCalledWith(
+      { organizationId: "org_1" },
+      "shared-apps",
+      { app: "gmail" },
+    );
   });
 
-  it("404s an unknown provider on both pages", async () => {
+  it("404s an unknown provider on both pages, never forwarding it", async () => {
     const { default: AppDetailPage } = await import("../apps/[provider]/page");
     const { default: GlobalAppDetailPage } =
       await import("@/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-app-detail-page");
+    redirect.toModal.mockClear();
     await expect(
-      AppDetailPage({ params: Promise.resolve({ provider: "nope" }) }),
+      AppDetailPage({ params: wsParams("nope"), searchParams: noQuery }),
     ).rejects.toThrow("NEXT_NOT_FOUND");
     await expect(
       GlobalAppDetailPage({
         params: Promise.resolve({ provider: "nope", orgId: "org_1" }),
+        searchParams: noQuery,
       }),
     ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(redirect.toModal).not.toHaveBeenCalled();
   });
 });
