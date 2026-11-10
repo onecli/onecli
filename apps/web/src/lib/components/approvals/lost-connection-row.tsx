@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { Button } from "@onecli/ui/components/button";
 import { AppIcon } from "@/lib/components/app-icon";
 import { channelProviderUi } from "@/lib/agents/channel-providers/registry";
-import { agentSectionPath } from "@/lib/navigation";
+import { mergedSectionPath } from "@/lib/navigation";
 import type { LostChannelConnectionItem } from "@/lib/api/channel-alerts";
 import { dismissChannelAlert } from "@/hooks/use-channel-alerts";
 import { RequestedAtLabel } from "./requested-at-label";
@@ -48,7 +48,7 @@ export const LostConnectionRow = ({
       <div className="mt-1 flex items-center justify-end">
         <Button size="xs" variant="outline" asChild>
           <Link
-            href={agentSectionPath(pathname, item.agentId, "channels")}
+            href={mergedSectionPath(pathname, item.agentId, "channels")}
             onClick={() => {
               dismissChannelAlert(item);
               onNavigate?.();

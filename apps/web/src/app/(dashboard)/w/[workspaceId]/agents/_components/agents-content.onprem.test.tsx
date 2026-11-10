@@ -22,6 +22,7 @@ vi.mock("@/hooks/use-agents", () => ({
     isPending: false,
   }),
   useCreateAgent: () => ({ mutate: vi.fn(), isPending: false }),
+  useSetStarterFace: () => vi.fn(),
   useCreateHostedAgent: () => ({
     mutate: vi.fn(),
     isPending: false,

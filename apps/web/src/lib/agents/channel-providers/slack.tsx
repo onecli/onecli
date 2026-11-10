@@ -6,7 +6,6 @@
  * section, the rail mark, the sidebar mark) never import them directly.
  */
 import { SlackAttachCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-attach-card";
-import { SlackActAsYouLink } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-act-as-you-link";
 import { SlackPresenceCard } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/channels/_components/slack-presence-card";
 import type { ChannelProviderUi } from "../channel-providers";
 
@@ -28,5 +27,4 @@ export const slackProviderUi: ChannelProviderUi = {
   channelUrl: slackChannelUrl,
   PresenceCard: SlackPresenceCard,
   AttachCard: SlackAttachCard,
-  ReadAccessCard: SlackActAsYouLink,
 };

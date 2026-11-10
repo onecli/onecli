@@ -1,4 +1,5 @@
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
+import { agentPagePath, workspacePath } from "@/lib/navigation";
 
 /**
  * The workspace's agent order for navigation: OLDEST first. One rule for
@@ -28,7 +29,10 @@ export const workspaceLandingPath = (
   workspaceId: string,
   firstAgent: { id: string; kind: string } | null,
 ): string => {
-  const ws = `/w/${encodeURIComponent(workspaceId)}`;
-  if (!firstAgent) return `${ws}/agents`;
-  return `${ws}/agents/${encodeURIComponent(firstAgent.id)}/${defaultAgentSection(firstAgent.kind)}`;
+  if (!firstAgent) return workspacePath(workspaceId, "agents");
+  return agentPagePath(
+    workspaceId,
+    firstAgent.id,
+    defaultAgentSection(firstAgent.kind),
+  );
 };

@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.20.0](https://github.com/onecli/onecli/compare/v2.19.0...v2.20.0) (2026-11-09)
+
+
+### Features
+
+* Settings modal, DM threads, Slack reactions, smooth chat streaming, browser dialogs ([#644](https://github.com/onecli/onecli/issues/644)) ([9d5c600](https://github.com/onecli/onecli/commit/9d5c6008f8c89de22d8dce7c0802c5952b9306e3))
+
 ## [2.19.0](https://github.com/onecli/onecli/compare/v2.18.0...v2.19.0) (2026-11-05)
 
 

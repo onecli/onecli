@@ -1,15 +1,18 @@
-import { redirect } from "next/navigation";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-/**
- * Channels moved out of Organization Settings to the org level — it is an
- * integration surface (workspaces agents join), not a settings pane. This
- * keeps the old settings URL landing on the new page.
- */
-export default async function Page({
-  params,
-}: {
+interface Props {
   params: Promise<{ orgId: string }>;
-}) {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/** An old URL from when Channels sat under Organization Settings: it is
+ *  Settings > Slack now. Straight there, not through `channels` (a second
+ *  redirect), with the query along like that page's. */
+export default async function Page({ params, searchParams }: Props) {
   const { orgId } = await params;
-  redirect(`/org/${orgId}/channels`);
+  await redirectToSettingsModal(
+    { organizationId: orgId },
+    "slack",
+    await searchParams,
+  );
 }

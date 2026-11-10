@@ -4,9 +4,9 @@ import { z } from "zod";
 /**
  * Zod surfaces for the skill routes (plans/hosted-agents-v2.md step 9).
  * Bounds live here so both doors — the agent surface and the org surface —
- * enforce one contract; they are ALSO what makes the sync-frame protocol
- * safe: every cap below feeds the MAX_SYNC_PART_BYTES packing arithmetic in
- * home-sync-service, so nothing authorable can ever exceed one frame.
+ * enforce one contract; they also bound what the home sync carries: a file
+ * too big for one frame rides as chunked blobs (home-sync-service), and the
+ * tier budgets below keep the whole within MAX_SYNC_PARTS.
  */
 
 export const SKILL_SCOPES = ["agent", "organization"] as const;
@@ -58,16 +58,21 @@ export const cleanSkillDescription = (
     max,
   );
 
-/** A hand-written SKILL.md body (the editor and the agent's tools). */
-export const SKILL_CONTENT_MAX_LENGTH = 24_000;
 /**
- * An imported SKILL.md body (from a zip): the standard sets no limit, and
- * real skills run long (Anthropic's own skill-creator is 33k characters).
- * 120,000 characters, in line with the Git library's 120 KB SKILL.md
- * limit. Such a body can still be edited in the dashboard; it just can't
- * grow past its imported length.
+ * A SKILL.md body, however it arrived (the editor, the agent's tools, or a
+ * zip). ONE limit, so a skill that got in can always be edited: the
+ * standard sets none, real skills run long (Anthropic's own skill-creator is
+ * 33k characters), and 120,000 matches the Git library's 120 KB SKILL.md
+ * limit. Length is nudged, not blocked, below that: see
+ * SKILL_CONTENT_SOFT_LENGTH.
  */
-export const IMPORTED_SKILL_CONTENT_MAX_LENGTH = 120_000;
+export const SKILL_CONTENT_MAX_LENGTH = 120_000;
+/**
+ * Past this the dashboard warns (never blocks): the agent reads the whole
+ * body every time the skill loads, and the standard recommends ~5,000
+ * tokens, with detail moved into files read on demand.
+ */
+export const SKILL_CONTENT_SOFT_LENGTH = 20_000;
 
 export const SKILL_FILE_PATH_MAX_LENGTH = 200;
 /** How deep a file may sit inside a skill folder (fixtures/incidents/x.json
@@ -107,12 +112,6 @@ export const SKILL_FILE_CONTENT_MAX_LENGTH = 24_000;
  * (zip) use the folder limits below. */
 export const MAX_FILES_PER_SKILL = 5;
 
-/**
- * The hand-written cap: body + every extra file together, for skills
- * written in the editor. Imported skills are bounded by the folder limits.
- */
-export const MAX_SKILL_TOTAL_CHARS = 32_000;
-
 /** An imported skill (from a zip): its files (SKILL.md included) and its
  * bytes. */
 export const MAX_IMPORTED_SKILL_FILES = 200;
@@ -128,10 +127,10 @@ export const MAX_SKILLS_PER_AGENT = 10;
 export const MAX_SKILLS_PER_ORG = 20;
 
 /**
- * What one tier's skills may hold together, checked at the import door (the
- * only way folders come in; hand-written skills stay small under their own
- * caps). An agent carries its own tier plus the org's, re-sent whole on
- * every sync generation:
+ * What one tier's skills may hold together, checked by the service at every
+ * door that can grow a skill (create, the dashboard's save, the agent's
+ * skill_update, a zip import). An agent carries its own tier plus the
+ * org's, re-sent whole on every sync generation:
  *  - bytes: 20 MB together, ~150 frame-sized parts, which leaves a full
  *    library budget and a full memory tier room inside MAX_SYNC_PARTS;
  *  - manifestBytes: every file is one path on the sync's final frame,
@@ -181,13 +180,6 @@ const descriptionField = z
   });
 
 const contentField = z.string().trim().min(1).max(SKILL_CONTENT_MAX_LENGTH);
-/** PATCH may carry an imported skill's longer body; the service holds a
- * hand-written skill to SKILL_CONTENT_MAX_LENGTH. */
-const patchContentField = z
-  .string()
-  .trim()
-  .min(1)
-  .max(IMPORTED_SKILL_CONTENT_MAX_LENGTH);
 
 export const skillFileSchema = z.object({
   path: z
@@ -227,16 +219,6 @@ const filesField = z
     },
   );
 
-const totalWithinBudget = (body: {
-  content?: string;
-  files?: { content: string }[];
-}) =>
-  (body.content?.length ?? 0) +
-    (body.files ?? []).reduce((sum, file) => sum + file.content.length, 0) <=
-  MAX_SKILL_TOTAL_CHARS;
-
-const budgetMessage = `A skill's body and files together are limited to ${MAX_SKILL_TOTAL_CHARS.toLocaleString("en-US")} characters`;
-
 /** POST /v1/skills — always an agent's own skill (a hosted agent of the
  * caller's workspace). Organization skills go through /v1/org/skills. */
 export const createSkillSchema = z
@@ -259,8 +241,7 @@ export const createSkillSchema = z
       .max(100),
     files: filesField.optional(),
   })
-  .strict()
-  .refine(totalWithinBudget, { message: budgetMessage });
+  .strict();
 
 /** POST /v1/org/skills — the org tier has no agent. */
 export const createOrgSkillSchema = z
@@ -271,17 +252,16 @@ export const createOrgSkillSchema = z
     enabled: z.boolean().optional(),
     files: filesField.optional(),
   })
-  .strict()
-  .refine(totalWithinBudget, { message: budgetMessage });
+  .strict();
 
 /** PATCH — partial; `name` is immutable (absent from the schema: it is the
- * directory name and the agent's own reference). The total budget is
- * re-checked in the SERVICE against the merged row — a content-only PATCH
- * must not smuggle the sum over the cap. */
+ * directory name and the agent's own reference). The body and each file
+ * hold their own limits here; the tier byte budget is checked in the
+ * SERVICE against what the tier already holds. */
 export const updateSkillSchema = z
   .object({
     description: descriptionField.optional(),
-    content: patchContentField.optional(),
+    content: contentField.optional(),
     enabled: z.boolean().optional(),
     files: filesField.optional(),
   })
@@ -291,33 +271,71 @@ export const updateSkillSchema = z
   });
 
 // ── The skill_* MCP tool arguments (the agent door) ─────────────────────────
-// Same bounds as the HTTP doors — one contract, two shells (the crons
-// precedent). Skills are addressed BY NAME here, never by id: the name is
-// the directory the agent sees in its own skills root. Extra files stay
-// dashboard-only (the 32k tool-args pipe cannot carry body + files anyway),
-// so none of these schemas accept `files`.
+// Skills are addressed BY NAME here, never by id: the name is the directory
+// the agent sees in its own skills root. Extra files stay dashboard-only, so
+// none of these schemas accept `files`.
+//
+// A tool call rides a pipe capped at MAX_TOOL_ARGS_CHARS (32k, JSON-encoded)
+// and tool ARGS cannot truncate (the memory_save precedent). A whole body is
+// therefore held to SKILL_TOOL_TEXT_MAX_LENGTH, and a longer skill (up to the
+// one SKILL_CONTENT_MAX_LENGTH, however it arrived) is changed in place with
+// `edits` and `append`, which send only the change.
+
+/** One text field of a skill tool call. The pipe counts the args
+ * JSON-encoded, so plain Markdown this long fits it with room to spare,
+ * while text dense with escapes (newlines or control characters, each two or
+ * more characters in JSON) can still pass it: the supervisor then refuses
+ * the call with the size, and the agent sends a smaller change. */
+export const SKILL_TOOL_TEXT_MAX_LENGTH = 24_000;
+/** In-place edits one skill_update may carry. */
+const SKILL_TOOL_MAX_EDITS = 20;
+
+const toolContentField = z
+  .string()
+  .trim()
+  .min(1)
+  .max(SKILL_TOOL_TEXT_MAX_LENGTH);
+
+const skillEditSchema = z
+  .object({
+    find: z.string().min(1).max(SKILL_TOOL_TEXT_MAX_LENGTH),
+    replace: z.string().max(SKILL_TOOL_TEXT_MAX_LENGTH),
+  })
+  .strict();
 
 /** skill_create — always the agent's own tier. */
 export const skillCreateArgsSchema = z
   .object({
     name: nameField,
     description: descriptionField,
-    content: contentField,
+    content: toolContentField,
   })
   .strict();
 
 /** skill_list takes no arguments. */
 export const skillListArgsSchema = z.object({}).strict();
 
-/** skill_update — by name, agent tier only; at least one change. */
+/** skill_update — by name, agent tier only; at least one change. The body
+ * changes EITHER whole (`content`) OR in place (`edits`, then `append`). */
 export const skillUpdateArgsSchema = z
   .object({
     name: nameField,
     description: descriptionField.optional(),
-    content: contentField.optional(),
+    content: toolContentField.optional(),
+    edits: z.array(skillEditSchema).min(1).max(SKILL_TOOL_MAX_EDITS).optional(),
+    append: z.string().trim().min(1).max(SKILL_TOOL_TEXT_MAX_LENGTH).optional(),
     enabled: z.boolean().optional(),
   })
   .strict()
+  .refine(
+    (body) =>
+      body.content === undefined ||
+      (body.edits === undefined && body.append === undefined),
+    {
+      message:
+        "Send either content (the whole new body) or edits/append (a change in place), not both",
+    },
+  )
   .refine((body) => Object.keys(body).length > 1, {
     message: "Nothing to update",
   });

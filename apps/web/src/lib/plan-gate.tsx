@@ -135,7 +135,6 @@ export const PlanGateProvider = ({ children }: { children: ReactNode }) => {
           open={open}
           onOpenChange={setOpen}
           feature={feature.feature}
-          organizationId={usage?.organizationId ?? null}
         />
       )}
       {feature?.kind === "license" && (

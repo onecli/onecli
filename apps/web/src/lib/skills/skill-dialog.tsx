@@ -39,6 +39,7 @@ import type { Skill, SkillFileInput, SkillSummary } from "@/lib/api";
 import {
   MAX_FILES_PER_SKILL,
   SKILL_CONTENT_MAX_LENGTH,
+  SKILL_CONTENT_SOFT_LENGTH,
   SKILL_DESCRIPTION_MAX_LENGTH,
 } from "@onecli/api/validations/skills";
 import {
@@ -55,21 +56,18 @@ import { SkillFileList } from "./skill-file-list";
  * server is the validator; its message surfaces verbatim.
  */
 
-/** The GOVERNING cap is the server's: body + every extra file together. A
- * body-only counter would let a user fill it and still 422 on the sum. */
-const SKILL_TOTAL_MAX = 32_000;
-
 /** The footer line's id, so the Save/Create button is described by it. */
 const BLOCKER_ID = "skill-save-blocker";
+/** The long-body nudge's id, so the instructions field is described by it. */
+const LONG_BODY_HINT_ID = "skill-content-length-hint";
 
 /** A skill imported from a zip: files the hand-written editor can't take
- * whole (one it can't show or save as it is, or more than it holds), or a
- * body imported past its limit. The dialog lists its files instead of
- * editing them, and holds its body to its imported length. */
+ * whole (one it can't show or save as it is, or more than it holds). The
+ * dialog lists its files instead of editing them. Its body edits like any
+ * other: one limit, however the skill arrived. */
 const isImportedSkill = (skill: Skill): boolean =>
   skill.files.length > MAX_FILES_PER_SKILL ||
-  skill.files.some((file) => !file.editable) ||
-  skill.content.length > SKILL_CONTENT_MAX_LENGTH;
+  skill.files.some((file) => !file.editable);
 
 /** Why a Create/Save click did not save: the words for the footer, and the
  *  input the caret goes to. */
@@ -182,16 +180,15 @@ export const SkillDialog = ({
   const bodyReady = !editing || bodySeeded;
   // A skill imported from a zip: it edits the description and instructions
   // only, lists the files read-only, and its save sends no files, so the
-  // server keeps every one. Its body may change but not outgrow the import.
+  // server keeps every one.
   const importedSkill =
     editing && detail.data && isImportedSkill(detail.data) ? detail.data : null;
   const importedFiles = importedSkill?.files ?? null;
-  const totalChars =
-    content.length + files.reduce((sum, file) => sum + file.content.length, 0);
-  const totalMax = importedSkill
-    ? Math.max(SKILL_CONTENT_MAX_LENGTH, importedSkill.content.length)
-    : SKILL_TOTAL_MAX;
-  const overBudget = totalChars > totalMax;
+  // The server's cap is the body alone (files have their own per-file cap),
+  // so the counter is the body alone. Past the soft length it warns, never
+  // blocks: the agent reads the whole body every time the skill loads.
+  const overBudget = content.length > SKILL_CONTENT_MAX_LENGTH;
+  const longBody = !overBudget && content.length > SKILL_CONTENT_SOFT_LENGTH;
 
   const missingName = !editing && name.trim() === "";
   const missingDescription = description.trim() === "";
@@ -218,7 +215,7 @@ export const SkillDialog = ({
     }
     if (overBudget) {
       return {
-        message: "Too long to save. Shorten the instructions or files.",
+        message: "Too long to save. Shorten the instructions.",
         focusId: "skill-content",
       };
     }
@@ -390,13 +387,13 @@ export const SkillDialog = ({
                 Instructions (SKILL.md body)
                 <Required />
               </Label>
-              {/* Counts the body AND the files, because the server's cap is
-                  their sum, and says so in words, not colour alone. */}
+              {/* Says it in words, not colour alone. */}
               <span
                 aria-live="polite"
-                className={`text-xs ${overBudget ? "text-destructive" : "text-muted-foreground"}`}
+                className={`text-xs tabular-nums ${overBudget ? "text-destructive" : "text-muted-foreground"}`}
               >
-                {totalChars.toLocaleString()} / {totalMax.toLocaleString()}
+                {content.length.toLocaleString()} /{" "}
+                {SKILL_CONTENT_MAX_LENGTH.toLocaleString()}
                 {overBudget && " (too long to save)"}
               </span>
             </div>
@@ -409,10 +406,20 @@ export const SkillDialog = ({
                 rows={12}
                 required
                 aria-invalid={attempted && (missingContent || overBudget)}
+                aria-describedby={longBody ? LONG_BODY_HINT_ID : undefined}
                 className="resize-y font-mono"
               />
             ) : (
               <Skeleton className="h-56 w-full" />
+            )}
+            {longBody && (
+              <p
+                id={LONG_BODY_HINT_ID}
+                className="text-xs text-muted-foreground"
+              >
+                Long skill: the agent reads all of it each time it loads.
+                Consider moving reference sections into files.
+              </p>
             )}
           </div>
 

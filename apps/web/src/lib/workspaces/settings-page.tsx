@@ -1,4 +1,3 @@
-import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { db } from "@onecli/db";
 import { getWorkspaceQuota } from "@onecli/api/ee/services/quota-service";
@@ -10,16 +9,12 @@ import { WorkspaceTimezoneCard } from "./_components/workspace-timezone-card";
 import { WorkspaceAccessCard } from "@/ee/workspaces/_components/workspace-access-card";
 import { DeleteWorkspaceButton } from "./_components/delete-workspace-button";
 
-export const metadata: Metadata = {
-  title: "Workspace Settings",
-};
-
-interface Props {
-  params: Promise<{ workspaceId: string }>;
-}
-
-export default async function WorkspaceSettingsPage({ params }: Props) {
-  const { workspaceId } = await params;
+/** Settings > Workspace > Settings: rename, timezone, access, delete. */
+export default async function WorkspaceSettingsPage({
+  workspaceId,
+}: {
+  workspaceId: string;
+}) {
   const session = await getServerSession();
   if (!session) redirect("/auth/login");
 
@@ -48,33 +43,32 @@ export default async function WorkspaceSettingsPage({ params }: Props) {
     },
   });
   if (!workspace) redirect("/org");
-  // Manage-only pane (rename / share / delete). A member who can't manage is
-  // sent to Install rather than out of the workspace: it is the other pane in
-  // this section and the one they ARE entitled to.
-  if (!(await canManageWorkspace(user.id, workspace.id))) {
-    redirect(`/w/${workspace.id}/settings/install`);
-  }
 
-  // The delete guard is org-scoped ("can't delete the org's only workspace") to
-  // match the DELETE /v1/workspaces/:id check and the workspaces-list guard — not
-  // scoped to what this user created, so all three agree.
-  const orgWorkspaceCount = await db.workspace.count({
-    where: { organizationId: workspace.organizationId },
-  });
-
-  // The plan comes from the quota service, NOT raw subscriptionStatus: on
-  // non-billing editions the service reports the top tier, keeping this page
-  // in agreement with the workspaces list. Deriving "free" from the null
-  // status here showed a licensed self-host a dead-end Stripe upgrade CTA
-  // instead of Manage access (the license gate inside the card handles the
-  // unlicensed arm).
-  const { plan } = await getWorkspaceQuota(workspace.organizationId);
+  // Three independent reads, run together. The delete guard is org-scoped
+  // ("can't delete the org's only workspace") to match the DELETE
+  // /v1/workspaces/:id check and the workspaces-list guard, not scoped to
+  // what this user created, so all three agree. The plan comes from the
+  // quota service, NOT raw subscriptionStatus: on non-billing editions the
+  // service reports the top tier, keeping this page in agreement with the
+  // workspaces list. Deriving "free" from the null status here showed a
+  // licensed self-host a dead-end Stripe upgrade CTA instead of Manage
+  // access (the license gate inside the card handles the unlicensed arm).
+  const [canManage, orgWorkspaceCount, { plan }] = await Promise.all([
+    canManageWorkspace(user.id, workspace.id),
+    db.workspace.count({ where: { organizationId: workspace.organizationId } }),
+    getWorkspaceQuota(workspace.organizationId),
+  ]);
+  // Manage-only (rename / share / delete). The modal never offers the page
+  // to a viewer who can't manage the workspace (`visibleSettingsPages`);
+  // this is the backstop, and it renders nothing.
+  if (!canManage) return null;
 
   return (
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
-        title="General"
-        description="Rename this workspace, set the timezone its agents run in, or delete it. Billing and usage are in the sidebar under your organization."
+        character="drop-list"
+        title="Settings"
+        description="Rename this workspace, set the timezone its agents run in, or delete it."
       />
       <RenameWorkspaceForm
         workspaceId={workspace.id}

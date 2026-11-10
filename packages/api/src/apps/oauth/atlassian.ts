@@ -4,6 +4,7 @@ import type {
   OAuthExchangeResult,
   OAuthConfigField,
 } from "../types";
+import { completeCodeExchange } from "./code-exchange";
 
 export const buildAtlassianAuthUrl = ({
   appCredentials,
@@ -45,54 +46,15 @@ export const exchangeAtlassianCode = async ({
     );
   }
 
-  const tokenData = (await tokenRes.json()) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    scope?: string;
-    token_type?: string;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (tokenData.error || !tokenData.access_token) {
-    throw new Error(
-      tokenData.error_description ?? "Failed to exchange code for token",
-    );
-  }
-
-  const expiresAt = tokenData.expires_in
-    ? Math.floor(Date.now() / 1000) + tokenData.expires_in
-    : undefined;
-
-  const credentials: Record<string, unknown> = {
-    access_token: tokenData.access_token,
-    refresh_token: tokenData.refresh_token,
-    token_type: tokenData.token_type,
-    expires_at: expiresAt,
-  };
-
-  const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
-
-  let metadata: Record<string, unknown> | undefined;
-  const userRes = await fetch("https://api.atlassian.com/me", {
-    headers: { Authorization: `Bearer ${tokenData.access_token}` },
-  });
-
-  if (userRes.ok) {
-    const user = (await userRes.json()) as {
-      email?: string;
-      name?: string;
-      picture?: string;
-    };
-    metadata = {
+  return completeCodeExchange(
+    tokenRes,
+    "https://api.atlassian.com/me",
+    (user: { email?: string; name?: string; picture?: string }) => ({
       username: user.email,
       name: user.name,
       avatarUrl: user.picture,
-    };
-  }
-
-  return { credentials, scopes, metadata };
+    }),
+  );
 };
 
 export const atlassianConfigFields: OAuthConfigField[] = [

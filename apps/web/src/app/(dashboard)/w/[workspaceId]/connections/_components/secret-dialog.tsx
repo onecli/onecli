@@ -513,9 +513,10 @@ export const SecretDialog = ({
                 {!isEdit && !defaultType && (
                   <button
                     onClick={() => setStep("type")}
+                    aria-label="Back to secret types"
                     className="text-muted-foreground hover:text-foreground -ml-1 rounded-md p-1 transition-colors"
                   >
-                    <ArrowLeft className="size-4" />
+                    <ArrowLeft className="size-4" aria-hidden />
                   </button>
                 )}
                 <DialogTitle>

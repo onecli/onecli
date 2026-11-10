@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { directThreadId } from "@onecli/channels/slack";
 
 import { groupThreadId, interpretSlackEvent } from "./interpret";
 
@@ -146,6 +147,8 @@ describe("direct messages", () => {
       // A DM typed at the top level answers top-level — no thread is opened
       // for it (the card, not the loader, carries the progress there).
       replyThreadTs: null,
+      // Top level: no thread of its own to open a conversation for.
+      threadExternalId: null,
       // The triggering message's own ts — the receipt reaction's address.
       messageTs: "1111.0001",
     });
@@ -169,11 +172,14 @@ describe("direct messages", () => {
     });
   });
 
-  it("keeps a threaded DM on the SAME conversation as the DM itself", () => {
-    // §3.18: a user's DM is ONE thread — the same row their web chat reads.
-    // Threads inside it change WHERE the answer goes, never which
-    // conversation it belongs to. MUTATION-PROOF: address a DM thread as its
-    // own `<channel>:<ts>` conversation and this fails.
+  it("keeps a threaded DM on the person's direct row, and names the thread as a conversation of its own", () => {
+    // §3.18: a user's DM is ONE thread — the same row their web chat reads
+    // (`externalThreadId` stays the IM). A thread typed INSIDE it is a
+    // conversation of its own (`threadExternalId`: the IM + the root ts),
+    // opened off that row and run beside it, so a thread answers while the
+    // top level is busy. MUTATION-PROOF: address the thread AS the DM
+    // (`externalThreadId: <channel>:<ts>`) and the first assertion fails;
+    // drop `threadExternalId` and the second does.
     const threaded = interpretSlackEvent(
       dm({ thread_ts: "1111.0001", ts: "1111.0009" }),
       CTX,
@@ -183,6 +189,9 @@ describe("direct messages", () => {
       externalThreadId: (
         interpretSlackEvent(dm(), CTX) as { externalThreadId: string }
       ).externalThreadId,
+    });
+    expect(threaded).toMatchObject({
+      threadExternalId: directThreadId("D0001", "1111.0001"),
     });
   });
 
@@ -562,9 +571,9 @@ describe("junk resilience", () => {
   });
 
   it("classifies an unknown event type as an ignore naming the type", () => {
-    expect(interpretSlackEvent({ type: "reaction_added" }, CTX)).toEqual({
+    expect(interpretSlackEvent({ type: "pin_added" }, CTX)).toEqual({
       door: "ignore",
-      reason: "event:reaction_added",
+      reason: "event:pin_added",
     });
   });
 

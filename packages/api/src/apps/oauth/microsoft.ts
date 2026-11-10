@@ -4,6 +4,7 @@ import type {
   OAuthExchangeResult,
   OAuthConfigField,
 } from "../types";
+import { completeCodeExchange } from "./code-exchange";
 
 export const buildMicrosoftAuthUrl = ({
   appCredentials,
@@ -71,53 +72,18 @@ export const exchangeMicrosoftCode = async ({
     );
   }
 
-  const tokenData = (await tokenRes.json()) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    scope?: string;
-    token_type?: string;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (tokenData.error || !tokenData.access_token) {
-    throw new Error(
-      tokenData.error_description ?? "Failed to exchange code for token",
-    );
-  }
-
-  const expiresAt = tokenData.expires_in
-    ? Math.floor(Date.now() / 1000) + tokenData.expires_in
-    : undefined;
-
-  const credentials: Record<string, unknown> = {
-    access_token: tokenData.access_token,
-    refresh_token: tokenData.refresh_token,
-    token_type: tokenData.token_type,
-    expires_at: expiresAt,
-  };
-
-  const scopes = tokenData.scope?.split(" ").filter(Boolean) ?? [];
-
-  let metadata: Record<string, unknown> | undefined;
-  const userRes = await fetch("https://graph.microsoft.com/v1.0/me", {
-    headers: { Authorization: `Bearer ${tokenData.access_token}` },
-  });
-
-  if (userRes.ok) {
-    const user = (await userRes.json()) as {
+  return completeCodeExchange(
+    tokenRes,
+    "https://graph.microsoft.com/v1.0/me",
+    (user: {
       mail?: string;
       userPrincipalName?: string;
       displayName?: string;
-    };
-    metadata = {
+    }) => ({
       username: user.mail ?? user.userPrincipalName,
       name: user.displayName,
-    };
-  }
-
-  return { credentials, scopes, metadata };
+    }),
+  );
 };
 
 export const microsoftConfigFields: OAuthConfigField[] = [

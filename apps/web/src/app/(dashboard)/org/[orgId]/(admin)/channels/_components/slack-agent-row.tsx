@@ -16,6 +16,7 @@ import { AgentAvatar } from "@/lib/agents/_components/agent-avatar";
 import { slackAppRedirectUrl } from "@/lib/agents/slack-presence";
 import { useAttachAgentFromOrg } from "@/hooks/use-org-channels";
 import { openInstallPopup } from "@/lib/agents/install-popup";
+import { mergedAgentPagePath } from "@/lib/navigation";
 import type { ChannelTransport, OrgChannelAgent } from "@/lib/api";
 
 export interface SlackAgentRowProps {
@@ -27,7 +28,7 @@ export interface SlackAgentRowProps {
 
 /** The agent's own Slack page, where everything past "in Slack" lives. */
 const agentSlackHref = (workspaceId: string, agentId: string) =>
-  `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/channels`;
+  mergedAgentPagePath(workspaceId, agentId, "channels");
 
 /**
  * The one line under the name, in words, and the ONE action that moves the

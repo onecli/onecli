@@ -25,7 +25,7 @@ export const ClaimHero = ({ title, subtitle, children }: ClaimHeroProps) => (
 
     <div className="relative z-10 flex w-full max-w-md flex-col items-center text-center motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-2 animation-duration-[500ms]">
       <BrandLogo />
-      <h1 className="font-serif text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
+      <h1 className="text-3xl font-semibold tracking-tight break-words text-balance sm:text-4xl">
         {title}
       </h1>
       {subtitle && (

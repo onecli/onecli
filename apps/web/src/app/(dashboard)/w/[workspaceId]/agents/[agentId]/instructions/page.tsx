@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
-import { InstructionsSection } from "../_components/instructions-section";
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
-export const metadata: Metadata = {
-  title: "Instructions",
-};
+interface Props {
+  params: Promise<{ workspaceId: string; agentId: string }>;
+}
 
-export default function AgentInstructionsPage() {
-  return <InstructionsSection />;
+/** An old URL: Instructions is a block on the agent's Knowledge page. */
+export default async function AgentInstructionsPage({ params }: Props) {
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(workspaceId, agentId, "instructions");
 }

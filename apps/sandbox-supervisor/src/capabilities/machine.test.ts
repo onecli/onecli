@@ -59,9 +59,17 @@ describe("the machine fragment", () => {
       "read",
       "screenshot",
       "snapshot",
+      "check",
+      "upload e5 <file>",
+      "get text|value|href <el>",
     ]) {
       expect(flat).toContain(verb);
     }
+    // A confirm the page raises stops it; the agent must know the one verb
+    // that moves on (the driver refuses everything else while it is held).
+    expect(flat).toContain("`dialog accept` or");
+    expect(flat).toContain("`dialog dismiss`");
+    expect(flat).toContain("A `type` the field did not");
     expect(flat).toContain("a stale one is refused");
     // Observed live: an agent reused `e8` after the next `open` (the
     // button was `f1e8` by then). Refs right after a reply; role and name

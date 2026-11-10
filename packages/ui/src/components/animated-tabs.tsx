@@ -120,7 +120,7 @@ export const AnimatedTabList = ({
     >
       {children}
       <span
-        className="absolute -bottom-[1.5px] h-0.5 bg-foreground rounded-full transition-all duration-300 ease-out"
+        className="absolute -bottom-[1.5px] h-0.5 rounded-full bg-brand transition-all duration-300 ease-out"
         style={{ left: indicator.left, width: indicator.width }}
       />
     </div>

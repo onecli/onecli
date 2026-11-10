@@ -318,7 +318,10 @@ RUN python3 --version \
   # over loopback: the build has no network and needs none. A
   # button opens a native modal: its click must answer with the modal
   # line, a click behind it must be refused, and its own button must close
-  # it, the one shape an agent cannot work without. Both ways of naming an
+  # it, the one shape an agent cannot work without. A second button raises
+  # a confirm(): the click must answer with the question and stop (not
+  # decide), the next verb must be refused, and `dialog accept` must run
+  # the page on with the agent's answer. Both ways of naming an
   # element are driven: refs for the field, role and name for the buttons,
   # and a ref from before a reload is refused with what it is now. The daemon is
   # stopped and the browser killed by the profile path, then WAITED for,
@@ -328,7 +331,7 @@ RUN python3 --version \
   && timeout --kill-after=10s 300s setpriv --reuid node --regid node --init-groups sh -c ' \
        set -e; export HOME=/workspace/.home AGENT_HOME_DIR=/workspace/.home; mkdir -p "$HOME"; \
        trap "rc=\$?; [ \$rc -eq 0 ] || { echo \"browser gate: failed (exit \$rc)\"; ps -o pid,etime,stat,wchan:20,args --sort=pid; cat \$HOME/.chrome/onecli-browser.log 2>/dev/null; }" EXIT; trap "exit 124" TERM; \
-       printf "<title>Gate</title><h1>Hello</h1><a href=\"/two\">Second page</a><input aria-label=\"Name\"><button onclick=d.showModal()>Open</button><dialog id=d><h2>Quota Exceeded</h2><p>Try tomorrow.</p><form method=dialog><button>Dismiss</button></form></dialog>" > "$HOME/index.html"; \
+       printf "<title>Gate</title><h1>Hello</h1><a href=\"/two\">Second page</a><input aria-label=\"Name\"><button onclick=d.showModal()>Open</button><dialog id=d><h2>Quota Exceeded</h2><p>Try tomorrow.</p><form method=dialog><button>Dismiss</button></form></dialog><button onclick=out.textContent=String(confirm(q.textContent))>Delete</button><span id=q hidden>Delete everything?</span><p id=out></p>" > "$HOME/index.html"; \
        ( cd "$HOME" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 ) & srv=$!; \
        i=0; until curl --noproxy "*" -fsS -o /dev/null http://127.0.0.1:8765/; do i=$((i+1)); [ "$i" -lt 50 ] || { echo "browser gate: http.server never came up" >&2; exit 1; }; sleep 0.1; done; \
        out=$(onecli-browser open http://127.0.0.1:8765/); \
@@ -349,6 +352,11 @@ RUN python3 --version \
        out=$(onecli-browser click button "Dismiss"); \
        echo "$out" | grep -q "^modal " && { echo "browser gate: Dismiss did not close the modal: $out" >&2; exit 1; }; \
        ref=$(echo "$out" | sed -n "s/^\(f\?[0-9]*e[0-9]*\) button \"Open\".*/\1/p"); \
+       held=$(onecli-browser click button "Delete"); \
+       echo "$held" | grep -q "^dialog confirm: Delete everything?$" || { echo "browser gate: the click did not hold the confirm: $held" >&2; exit 1; }; \
+       onecli-browser read 2>&1 | grep -q "is stopped on a confirm" || { echo "browser gate: a verb ran past the held confirm" >&2; exit 1; }; \
+       onecli-browser dialog accept | grep -q "^dialog (answered): confirm: Delete everything? (accepted)$" || { echo "browser gate: dialog accept did not answer" >&2; exit 1; }; \
+       onecli-browser read | grep -q "^true$" || { echo "browser gate: the page did not see the accepted confirm" >&2; exit 1; }; \
        onecli-browser open http://127.0.0.1:8765/ >/dev/null; \
        onecli-browser click "$ref" 2>&1 | grep -q "it was button \"Open\", now f[0-9]*e[0-9]*" || { echo "browser gate: a ref from before the reload was not named" >&2; exit 1; }; \
        test -S "$HOME/.onecli/browser.sock"; \

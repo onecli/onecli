@@ -3,7 +3,6 @@ export {
   getResourceHooks,
   initResourceHooks,
 } from "./resource-hooks";
-export { type TeamHooks, getTeamHooks } from "./team-hooks";
 export { type ConnectionHooks, getConnectionHooks } from "./connection-hooks";
 export {
   type PolicyValidator,
