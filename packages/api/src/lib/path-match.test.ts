@@ -106,4 +106,42 @@ describe("isLlmHost", () => {
     expect(isLlmHost("generativelanguage.googleapis.com")).toBe(true);
     expect(isLlmHost("gmail.googleapis.com")).toBe(false);
   });
+
+  it("rejects adversarial domains containing provider names", () => {
+    expect(isLlmHost("not-anthropic.com")).toBe(false);
+    expect(isLlmHost("anthropic.com.evil.test")).toBe(false);
+    expect(isLlmHost("evil-openai.com")).toBe(false);
+    expect(isLlmHost("openai.com.attacker.com")).toBe(false);
+    expect(isLlmHost("mygroq.com")).toBe(false);
+    expect(isLlmHost("fakeopenrouter.ai")).toBe(false);
+    expect(isLlmHost("deepseek.com.example.org")).toBe(false);
+    expect(isLlmHost("notchatgpt.com")).toBe(false);
+  });
+
+  it("matches subdomains of LLM providers", () => {
+    expect(isLlmHost("beta.openai.com")).toBe(true);
+    expect(isLlmHost("sub.api.deepseek.com")).toBe(true);
+    expect(isLlmHost("CHATGPT.COM")).toBe(true);
+  });
+});
+
+describe("LLM provider suffix boundaries", () => {
+  it.each([
+    "anthropic.com",
+    "openai.com",
+    "chatgpt.com",
+    "deepseek.com",
+    "groq.com",
+    "openrouter.ai",
+    "moonshot.cn",
+    "generativelanguage.googleapis.com",
+  ])("keeps %s inside the provider domain", (domain) => {
+    expect(isLlmHost(domain.toUpperCase())).toBe(true);
+    expect(isLlmHost(`sub.api.${domain}:443`)).toBe(true);
+    expect(isLlmHost(`evil-${domain}:443`)).toBe(false);
+    expect(isLlmHost(`${domain}.evil.test`)).toBe(false);
+    expect(isLlmHost(`\u00e9${domain}`)).toBe(false);
+    expect(isLlmHost(`\u00e9.${domain}`)).toBe(true);
+    expect(isLlmHost(`\u3002${domain}`)).toBe(false);
+  });
 });
