@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { hostMatches, isLlmHost, pathMatches } from "./path-match";
+import { LLM_HOST_FRAGMENTS } from "./llm-hosts";
 
 // Fidelity cases mirrored from apps/gateway/crates/inject/src/lib.rs + connect.rs. If any
 // of these break, the port has drifted from the gateway's matcher.
@@ -105,5 +106,14 @@ describe("isLlmHost", () => {
     expect(isLlmHost("api.openai.com:443")).toBe(true);
     expect(isLlmHost("generativelanguage.googleapis.com")).toBe(true);
     expect(isLlmHost("gmail.googleapis.com")).toBe(false);
+  });
+
+  it("recognises every domain in LLM_HOST_FRAGMENTS", () => {
+    for (const domain of LLM_HOST_FRAGMENTS) {
+      expect(
+        isLlmHost(domain),
+        `isLlmHost should recognise "${domain}" from LLM_HOST_FRAGMENTS`,
+      ).toBe(true);
+    }
   });
 });
