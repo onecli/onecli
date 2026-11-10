@@ -366,7 +366,7 @@ export const Composer = ({
         />
         <Button
           variant="ghost"
-          size="icon"
+          size="icon-lg"
           onClick={() => fileInputRef.current?.click()}
           disabled={staged.length >= MAX_ATTACHMENTS_PER_MESSAGE}
           aria-label="Attach files"
@@ -399,12 +399,14 @@ export const Composer = ({
           aria-label="Message"
           autoFocus={autoFocus}
           rows={1}
-          className="field-sizing-content max-h-40 min-h-9 resize-none"
+          // py-[7px]: one line (20px) + padding + border = 36px, the same
+          // height as the icon-lg buttons beside it, so their edges line up.
+          className="field-sizing-content max-h-40 min-h-9 resize-none py-[7px]"
         />
         {onStop && (
           <Button
             variant="outline"
-            size="icon"
+            size="icon-lg"
             onClick={onStop}
             loading={stopPending}
             aria-label="Stop the agent"
@@ -416,7 +418,7 @@ export const Composer = ({
             spinner beside the arrow only made the button jump. `sendable`
             keeps it disabled while the send is in flight. */}
         <Button
-          size="icon"
+          size="icon-lg"
           onClick={submit}
           disabled={!sendable}
           aria-label="Send message"

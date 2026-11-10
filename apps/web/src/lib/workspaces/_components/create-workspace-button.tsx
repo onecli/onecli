@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
+import { workspaceLandingPath } from "@/lib/agents/agent-order";
 import {
   Dialog,
   DialogContent,
@@ -56,7 +57,9 @@ export const CreateWorkspaceButton = ({
         toast.error(result.error);
         return;
       }
-      router.push(`/w/${result.data.workspaceId}`);
+      // A new workspace has no agent yet: straight to its agents page,
+      // where the first one is made (the page its front door forwards to).
+      router.push(workspaceLandingPath(result.data.workspaceId, null));
     });
   };
 
@@ -83,7 +86,6 @@ export const CreateWorkspaceButton = ({
           current={quota.current}
           limit={quota.limit}
           plan={quota.plan}
-          organizationId={quota.organizationId}
         />
       ) : (
         <Dialog

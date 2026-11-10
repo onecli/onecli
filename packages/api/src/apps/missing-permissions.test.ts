@@ -30,6 +30,30 @@ describe("missingPermissions", () => {
     ).toEqual([]);
   });
 
+  // CQL search, page delete and comments each need a scope Confluence didn't
+  // always ask for. A connection made before then must be flagged for exactly
+  // those, so the dashboard offers a reconnect.
+  it("flags the Confluence scopes an older grant lacks", () => {
+    const olderGrant = [
+      "read:me",
+      "offline_access",
+      "read:confluence-content.all",
+      "write:confluence-content",
+      "read:confluence-space.summary",
+      "read:page:confluence",
+      "read:space:confluence",
+      "write:page:confluence",
+      "read:content:confluence",
+    ];
+    const added = [
+      "search:confluence",
+      "delete:page:confluence",
+      "write:comment:confluence",
+    ];
+    expect(scopesOf("confluence", olderGrant)).toEqual(added);
+    expect(scopesOf("confluence", [...olderGrant, ...added])).toEqual([]);
+  });
+
   it("never flags identity scopes", () => {
     expect(
       missingPermissions("google-drive", [

@@ -86,7 +86,7 @@ describe("the skills tools", () => {
     expect(schema.required).toEqual(["name", "description", "content"]);
     expect(schema.additionalProperties).toBe(false);
     // validations/skills.ts: SKILL_NAME_PATTERN / SKILL_NAME_MAX_LENGTH /
-    // SKILL_DESCRIPTION_MAX_LENGTH / SKILL_CONTENT_MAX_LENGTH.
+    // SKILL_DESCRIPTION_MAX_LENGTH / SKILL_TOOL_TEXT_MAX_LENGTH.
     expect(schema.properties.name?.pattern).toBe("^[a-z0-9]+(?:-[a-z0-9]+)*$");
     expect(schema.properties.name?.maxLength).toBe(64);
     expect(schema.properties.description?.maxLength).toBe(1024);
@@ -104,6 +104,18 @@ describe("the skills tools", () => {
       "your own agent skills",
     );
     expect(byName.get("skill_update")?.description).toContain("dashboard");
+    // A long skill can't ride the 32k tool pipe whole: the tool teaches the
+    // in-place edit and keeps every text field inside the pipe.
+    expect(byName.get("skill_update")?.description).toContain("IN PLACE");
+    const props = byName.get("skill_update")?.inputSchema.properties as Record<
+      string,
+      {
+        maxLength?: number;
+        items?: { properties: Record<string, { maxLength?: number }> };
+      }
+    >;
+    expect(props.append?.maxLength).toBe(24_000);
+    expect(props.edits?.items?.properties.find?.maxLength).toBe(24_000);
     expect(byName.get("skill_delete")?.description).toContain(
       "your own agent skills",
     );

@@ -2,42 +2,45 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { SidebarInset, SidebarProvider } from "@onecli/ui/components/sidebar";
-import { DashboardSidebar } from "@dashboard/dashboard-sidebar";
-import { DashboardHeader } from "@dashboard/dashboard-header";
-import { SettingsNav } from "@dashboard/settings-nav";
-import { SettingsMobileNav } from "@dashboard/settings-mobile-nav";
 import { useAuth } from "@/providers/auth-provider";
 import { checkDashboardRedirect } from "@/lib/user-plan";
-import { getDashboardRedirect } from "@/lib/dashboard/session-redirect";
+import {
+  getDashboardRedirect,
+  isOrgless,
+} from "@/lib/dashboard/session-redirect";
 import { apiFetch } from "@/lib/api-fetch";
-import { isAgentPagePath, matchAgentPage } from "@/lib/navigation";
+import { matchAgentPage } from "@/lib/navigation";
 import { isTheaterAgentSection } from "@/lib/agents/agent-sections";
 import { PlanGateProvider } from "@/lib/plan-gate";
+import { DashboardShell } from "@/lib/dashboard/shell/dashboard-shell";
+import { PendingDashboard } from "@/lib/dashboard/shell/pending-dashboard";
+import { PendingLanding } from "@/lib/dashboard/shell/pending-landing";
+import {
+  isAccountPath,
+  isRedirectOnlyPath,
+} from "@/lib/dashboard/redirect-only-routes";
+import { THEATER_FRAME } from "@/lib/dashboard/shell/shell-geometry";
 
 export default function DashboardLayout({
   children,
+  settings,
 }: {
   children: React.ReactNode;
+  /** The `@settings` slot: the Settings modal over the page, from
+   *  `?settings=<page>`. Null whenever the param is absent. */
+  settings?: React.ReactNode;
 }) {
   const { isAuthenticated, isLoading, signOut } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
+  // The session said this viewer belongs to no org: the account's
+  // addresses render the profile for them instead of forwarding.
+  const [orgless, setOrgless] = useState(false);
   const signOutRef = useRef(signOut);
   useEffect(() => {
     signOutRef.current = signOut;
   }, [signOut]);
-
-  // Both settings areas render the same left sub-nav pane: the org's
-  // (`/org/<id>/settings`) and the workspace's (`/w/<id>/settings`, which now
-  // holds General + Install).
-  const isSettings =
-    /^\/org\/[^/]+\/settings(\/|$)/.test(pathname) ||
-    /^\/w\/[^/]+\/settings(\/|$)/.test(pathname);
-  // The agent page owns its full height (its Chat section needs the raw
-  // cell), so the chrome skips the scrolling `max-w-6xl` container for it.
-  const isAgentPage = isAgentPagePath(pathname);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -82,6 +85,7 @@ export default function DashboardLayout({
 
     try {
       if (sessionData) {
+        setOrgless(isOrgless(sessionData));
         const sessionRedirect = getDashboardRedirect(sessionData, pathname);
         if (sessionRedirect) {
           router.replace(sessionRedirect);
@@ -109,58 +113,38 @@ export default function DashboardLayout({
     }
   }, [isAuthenticated, initSession]);
 
-  if (isLoading || (isAuthenticated && !ready)) {
-    return (
-      <div className="flex h-svh items-center justify-center">
-        <div className="text-brand h-8 w-8 animate-spin rounded-full border-2 border-current border-t-transparent" />
-      </div>
-    );
-  }
+  if (isLoading || (isAuthenticated && !ready)) return <PendingDashboard />;
 
   if (!isAuthenticated) {
     return null;
   }
 
+  // An old address only forwards: its page renders nothing and the server's
+  // answer lands once this layout has mounted. Until it does, the landing
+  // skeleton stays up (the same one as the wait above, so nothing moves),
+  // instead of drawing the old page's scope around an empty panel. The page
+  // mounts in the skeleton's panel, so its redirect goes through and an
+  // error shows where the page would be. The account's addresses forward
+  // the same way, unless the viewer has no org: then they are the page.
+  if (isRedirectOnlyPath(pathname) || (isAccountPath(pathname) && !orgless)) {
+    return <PendingLanding>{children}</PendingLanding>;
+  }
+
+  // The theater (the agent's full-page desktop) owns the whole viewport:
+  // no rail, sidebar or top bar around it.
   if (isTheaterAgentSection(matchAgentPage(pathname)?.section ?? "")) {
     return (
       <PlanGateProvider>
-        <main className="dark flex h-svh min-w-0 flex-col overflow-hidden bg-black text-white">
-          {children}
-        </main>
+        <main className={THEATER_FRAME}>{children}</main>
+        {settings}
       </PlanGateProvider>
     );
   }
 
   return (
     <PlanGateProvider>
-      <SidebarProvider
-        className="bg-background h-svh overflow-hidden"
-        style={{ "--sidebar-width-icon": "2rem" } as React.CSSProperties}
-      >
-        <DashboardSidebar />
-        <SidebarInset className="bg-background min-w-0 overflow-hidden rounded-none md:border md:rounded-xl md:peer-data-[variant=inset]:shadow-none md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-1">
-          <header className="flex h-12 shrink-0 items-center border-b">
-            <DashboardHeader />
-          </header>
-          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-            {isSettings && (
-              <aside className="hidden w-56 shrink-0 overflow-y-auto border-r px-6 pt-6 md:block">
-                <SettingsNav />
-              </aside>
-            )}
-            {isAgentPage ? (
-              children
-            ) : (
-              <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-                {isSettings && <SettingsMobileNav />}
-                <main className="mx-auto min-w-0 max-w-6xl p-4 sm:p-6">
-                  {children}
-                </main>
-              </div>
-            )}
-          </div>
-        </SidebarInset>
-      </SidebarProvider>
+      {settings}
+      <DashboardShell>{children}</DashboardShell>
     </PlanGateProvider>
   );
 }

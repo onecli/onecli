@@ -12,7 +12,6 @@ import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
-import { Skeleton } from "@onecli/ui/components/skeleton";
 import { MAX_JOINING_FOLLOW_UPS } from "@onecli/api/validations/conversation";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
@@ -36,7 +35,7 @@ import { useHasDesktop } from "@/hooks/use-has-desktop";
 import { usePortalHost } from "@/hooks/use-portal-host";
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { agentComputerPath, agentSectionPath } from "@/lib/navigation";
+import { agentComputerPath, mergedSectionPath } from "@/lib/navigation";
 import type { DesktopDockHandle } from "@/ee/desktop/desktop-dock";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
@@ -45,21 +44,15 @@ import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_com
 import type { TurnsPage } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
 import { Composer, type ComposerHandle } from "./composer";
+import { ComposerSkeleton } from "./composer-skeleton";
 import { FileDropZone } from "./file-drop-zone";
 import { OfflineBanner } from "./offline-banner";
+import { ThreadSkeleton } from "./thread-skeleton";
 
 // The agent's hosted desktop (hosted platform only). Lazy, so its code never
 // enters a self-host's static graph; rendered only on the cloud edition.
 const DesktopDock = dynamic(() =>
   import("@/ee/desktop/desktop-dock").then((m) => m.DesktopDock),
-);
-
-const ThreadSkeleton = () => (
-  <div className="flex-1 space-y-4 p-6">
-    <Skeleton className="ms-auto h-10 w-1/2 rounded-lg" />
-    <Skeleton className="h-16 w-2/3 rounded-lg" />
-    <Skeleton className="ms-auto h-10 w-1/3 rounded-lg" />
-  </div>
 );
 
 /**
@@ -330,9 +323,11 @@ export const DirectThreadSection = () => {
     );
   }
 
-  // The door hasn't answered yet — there is nothing to send to, so the
-  // composer waits with the thread rather than accepting a doomed message.
-  if (conversationId === undefined) return frame(<ThreadSkeleton />);
+  // The door hasn't answered yet: there is nothing to send to, so the
+  // composer's strip holds its place (a skeleton, never a live box that
+  // would accept a doomed message) and the real one replaces it in place.
+  if (conversationId === undefined)
+    return frame(<ThreadSkeleton />, <ComposerSkeleton />);
 
   const transcriptLoading = transcript.loading;
 
@@ -347,7 +342,7 @@ export const DirectThreadSection = () => {
             folded={folded}
             pending={pending}
             conversationId={conversationId}
-            modelsHref={agentSectionPath(pathname, agentId, "models")}
+            modelsHref={mergedSectionPath(pathname, agentId, "models")}
             computerHref={hasDesktop ? computerHref : undefined}
             onOpenComputer={
               hasDesktop

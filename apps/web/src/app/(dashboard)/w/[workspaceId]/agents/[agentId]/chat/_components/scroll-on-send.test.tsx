@@ -13,19 +13,35 @@ vi.mock("@onecli/ui/components/message-scroller", () => ({
 beforeEach(() => {
   scrollToMessage.mockClear();
   scrollToEnd.mockClear();
+  vi.unstubAllGlobals();
 });
+
+const reducedMotion = (matches: boolean) =>
+  vi.stubGlobal("matchMedia", () => ({ matches }));
 
 describe("ScrollOnSend", () => {
   it("puts a fresh send near the top, through the scroller", () => {
     // MUTATION-TESTED: a raw scrollTop write instead left the scroller
     // "following the bottom", so it hid the end button while the reply ran
     // below the fold.
+    reducedMotion(false);
     render(<ScrollOnSend sent={{ message: "ask" }} pin />);
     expect(scrollToMessage).toHaveBeenCalledExactlyOnceWith("pending", {
       align: "start",
       scrollMargin: PIN_SCROLL_MARGIN_PX,
+      // A glide, so the reader sees where their message went.
+      behavior: "smooth",
     });
     expect(scrollToEnd).not.toHaveBeenCalled();
+  });
+
+  it("jumps instead of gliding under reduced motion", () => {
+    reducedMotion(true);
+    render(<ScrollOnSend sent={{ message: "ask" }} pin />);
+    expect(scrollToMessage).toHaveBeenCalledExactlyOnceWith(
+      "pending",
+      expect.objectContaining({ behavior: "auto" }),
+    );
   });
 
   it("takes a follow-up to the end, so the reader sees it and follows again", () => {

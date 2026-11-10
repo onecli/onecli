@@ -7,7 +7,8 @@ import {
   type PeerTaskOutcome,
 } from "@onecli/agent-protocol";
 import {
-  activityForReasoning,
+  REASONING_TAIL_MAX,
+  activityForReasoningStream,
   activityForTool,
 } from "@onecli/agent-protocol/activity";
 import type { TurnEvent } from "@/lib/api/types";
@@ -33,6 +34,30 @@ export interface ToolCall {
   exitCode?: number;
 }
 
+/**
+ * One entry of a turn's work timeline, in the order it happened.
+ *
+ * - `tool`: a call (by its index in `tools`, so the timeline and every other
+ *   reader of `tools` see the same object).
+ * - `note`: what the agent SAID between two tool calls ("Now the config.").
+ *   Narration the run discarded from the answer, kept so the timeline can
+ *   show the thread of the work. Live only: history carries no deltas.
+ * - `thought`: a reasoning step's title ("Structuring content"), the
+ *   caption that stood when the step closed. Live only, for the same reason.
+ *
+ * SECURITY: `note` and `thought` text is UNTRUSTED sandbox output. It renders
+ * as TEXT, never markdown. `thought` is already bounded and control-stripped
+ * (`activityForReasoningStream`); `note` is bounded here (`MAX_NOTE_CHARS`).
+ */
+export type WorkStep =
+  | { kind: "tool"; index: number }
+  | { kind: "note"; text: string }
+  | { kind: "thought"; text: string };
+
+/** A note is a sentence or two between tools, not a document: past this it
+ *  is cut, so a runaway narration cannot grow the timeline unboundedly. */
+export const MAX_NOTE_CHARS = 600;
+
 /** One turn as the reader sees it: what was asked, what happened, what came back. */
 export interface RenderedTurn {
   turnId: string;
@@ -45,6 +70,16 @@ export interface RenderedTurn {
   /** Every tool call in the turn, in the order it started (an orphaned
    *  finish, in the order it finished). */
   tools: ToolCall[];
+  /** The turn's work in the order it happened: tool calls, the narration
+   *  between them, and the reasoning steps' titles. See `WorkStep`. */
+  steps: WorkStep[];
+  /**
+   * The reasoning streamed since the last tool call, glued back together.
+   * Internal to the fold (the caption is derived from it, never a single
+   * delta), and reset when a tool starts. Bounded (twice the tail the
+   * caption reads), so a long reasoning block cannot grow it.
+   */
+  reasoning: string;
   /**
    * What the agent said BEFORE its first tool call: its opening sentence,
    * usually the plan ("I'll fetch the docs."). Kept above the work while the
@@ -76,14 +111,16 @@ export interface RenderedTurn {
    * What the agent is doing RIGHT NOW, in a few words — the live loader
    * caption ("Reading a file", "Architecting the narrative arc").
    *
-   * Derived from the ephemeral stream, never from history: `thinking.delta`
-   * says it in the agent's own words, `tool.started` says it by name. It is
+   * Derived from the ephemeral stream, never from history: the accumulated
+   * reasoning says it in the agent's own words (`activityForReasoningStream`:
+   * a whole heading or sentence, never a fragment of one delta), and
+   * `tool.started` says it by name. It is
    * REPLACED as work moves and dropped the moment the turn ends, because it
    * describes the present — a finished turn has no current activity, and a
    * reader who joins late gets the answer, not a stale caption.
    *
    * UNTRUSTED: model text from a sandbox. Bounded and control-stripped at the
-   * source (`activityForReasoning`), and rendered as TEXT, never markup.
+   * source (`activityForReasoningStream`), and rendered as TEXT, never markup.
    */
   activity?: string;
   /** Set when the turn ended badly — rendered instead of a silent stop. */
@@ -148,6 +185,28 @@ const str = (payload: Record<string, unknown>, key: string): string =>
 
 const isInteger = (value: unknown): value is number => Number.isInteger(value);
 
+/** Cap a note at `MAX_NOTE_CHARS`, on a word boundary when one is near. */
+const boundNote = (text: string): string => {
+  const trimmed = text.trim();
+  if (trimmed.length <= MAX_NOTE_CHARS) return trimmed;
+  const window = trimmed.slice(0, MAX_NOTE_CHARS);
+  const space = window.lastIndexOf(" ");
+  return `${window.slice(0, space > MAX_NOTE_CHARS / 2 ? space : MAX_NOTE_CHARS).trimEnd()}…`;
+};
+
+/**
+ * Glue a reasoning delta on, bounded. Twice the tail the caption reads is
+ * kept, so the caption's own slice (which skips to the first sentence
+ * boundary) always has a cut to skip: a held string that STARTED mid-word
+ * would otherwise hand the caption a sentence's back half as a whole one.
+ */
+const appendReasoning = (held: string, delta: string): string => {
+  const next = held + delta;
+  return next.length > REASONING_TAIL_MAX * 2
+    ? next.slice(-REASONING_TAIL_MAX * 2)
+    : next;
+};
+
 /**
  * Fold the transcript into per-turn views.
  *
@@ -175,6 +234,8 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
       peerMessages: [],
       peerMessagesOpeningTask: new Set(),
       tools: [],
+      steps: [],
+      reasoning: "",
       ended: false,
     };
     byTurn.set(turnId, created);
@@ -199,19 +260,38 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         turn.liveText = "";
         break;
       case "tool.started": {
+        // The reasoning step is over: the caption it reached is its title on
+        // the timeline (once, never a repeat of the step before). A tool
+        // call closes the thought, so its last line counts as finished even
+        // without a newline. Thinking comes before the words that act on
+        // it, so the title goes in ahead of the note.
+        const thought = turn.reasoning
+          ? activityForReasoningStream(`${turn.reasoning}\n`)
+          : null;
+        const previous = turn.steps.at(-1);
+        if (
+          thought &&
+          !(previous?.kind === "thought" && previous.text === thought)
+        ) {
+          turn.steps.push({ kind: "thought", text: thought });
+        }
+        turn.reasoning = "";
         // The tool call CLOSES the current narration segment (the
-        // supervisor's answer rule in answer.ts, mirrored). Only the segment
-        // the FIRST tool closes is kept, as the lead; a blank one is never
-        // kept, so a model's stray newline cannot become the turn's opening
-        // line.
-        if (turn.tools.length === 0 && turn.liveText.trim()) {
-          turn.lead = turn.liveText;
+        // supervisor's answer rule in answer.ts, mirrored). The segment the
+        // FIRST tool closes is the lead; a later one becomes a timeline
+        // note. A blank one is never kept, so a model's stray newline cannot
+        // become the turn's opening line or an empty note.
+        if (turn.liveText.trim()) {
+          if (turn.tools.length === 0) turn.lead = turn.liveText;
+          else
+            turn.steps.push({ kind: "note", text: boundNote(turn.liveText) });
         }
         turn.liveText = "";
         turn.tools.push({
           callId: str(event.payload, "callId"),
           name: str(event.payload, "name"),
         });
+        turn.steps.push({ kind: "tool", index: turn.tools.length - 1 });
         // A started tool IS the current activity, and it outranks whatever
         // the agent was thinking a moment ago: the reasoning explains the
         // plan, the tool call is the plan happening.
@@ -237,6 +317,7 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
             name: str(event.payload, "name"),
             ...finished,
           });
+          turn.steps.push({ kind: "tool", index: turn.tools.length - 1 });
         }
         break;
       }
@@ -274,12 +355,17 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         turn.activity = undefined;
         break;
       case "thinking.delta": {
-        // The agent saying what it is about to do, in its own words — the
-        // line that makes the loader feel alive rather than generic. Only
-        // the first line survives (see `activityForReasoning`); null means
-        // the block said nothing worth showing, so the previous caption
-        // stands rather than blanking the row.
-        const said = activityForReasoning(str(event.payload, "text"));
+        // The agent saying what it is about to do, in its own words: the
+        // line that makes the loader feel alive rather than generic. Read
+        // from the ACCUMULATED reasoning, never one delta: a delta is cut
+        // wherever a network batch closed, so its first line starts
+        // mid-word. Null means no whole thought yet, so the previous caption
+        // stands rather than blanking or flashing a fragment.
+        turn.reasoning = appendReasoning(
+          turn.reasoning,
+          str(event.payload, "text"),
+        );
+        const said = activityForReasoningStream(turn.reasoning);
         if (said) turn.activity = said;
         break;
       }

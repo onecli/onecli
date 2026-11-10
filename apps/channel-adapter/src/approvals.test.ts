@@ -3459,3 +3459,151 @@ describe("Approve similar on a card", () => {
     expect(card).not.toContain("<@U1>");
   });
 });
+
+describe("a card's link to the agent's chat", () => {
+  // The review link is built from the web app URL and the presence's own
+  // ids, never from the request. The hostile-shaped ids prove each id is
+  // percent-encoded, so none can add a path segment.
+  const agent = { id: "ag/1?x", name: "Deploy Agent", workspaceId: "ws 1" };
+  const CHAT = "https://app.example.com/w/ws%201/agents/ag%2F1%3Fx/chat";
+  const bulkRequest = {
+    id: "ap-bulk",
+    method: "PATCH",
+    host: "acme.my.salesforce.com",
+    path: "/services/data/v62.0/composite/sobjects",
+    app: "salesforce",
+    summary: {
+      action: "Update 2 Contacts",
+      details: [],
+      bulk: {
+        objectLabel: "Contact",
+        fields: [{ api: "Title", label: "Title" }],
+        rows: ["Ada", "Grace"].map((name, i) => ({
+          id: `003${i}`,
+          name,
+          new: ["CTO"],
+          old: ["Old"],
+          ops: ["overwrite"],
+        })),
+        oldValuesRead: true,
+      },
+    },
+    agent: { id: agent.id, name: agent.name },
+  };
+  /** Uniform updates in one tagged batch: the card summarizes them and
+   *  links the chat for deciding one at a time. */
+  const update = (id: string, name: string, createdAt: string) =>
+    contact(id, name, {
+      method: "PATCH",
+      summary: {
+        action: `Update Contact ${name}`,
+        subject: { verb: "Update Contact", record: name, row: 0 },
+        details: [
+          { label: "Contact", value: `${name} (003QO00000Upd0pxAA)` },
+          { label: "Title", value: "After" },
+        ],
+      },
+      agent: { id: agent.id, name: agent.name },
+      batch: { id: "t1", label: "Set Title", total: 3 },
+      createdAt,
+    });
+
+  const managerWith = (appUrl: string | undefined) => {
+    const manager = createApprovalsManager({
+      controlPlane: createFakeControlPlane(),
+      gatewayUrl: gateway.url,
+      approvalsPollSeconds: 1,
+      ...(appUrl !== undefined && { appUrl }),
+      cardUiOf: () => slackApprovalCardUi,
+      threadAddressOf: () => unpackThreadAddress,
+      credentialOf: botTokenOf,
+      pacingMs: 25,
+      groupDebounceMs: 20,
+      onLog: () => {},
+    });
+    managers.push(manager);
+    manager.reconcile([presence({ agent })]);
+    return manager;
+  };
+
+  const viewTableUrls = (blocks: string | undefined): (string | undefined)[] =>
+    (
+      JSON.parse(blocks ?? "[]") as {
+        elements?: { text?: unknown; url?: string }[];
+      }[]
+    )
+      .flatMap((b) => b.elements ?? [])
+      .filter((el) => JSON.stringify(el.text).includes("View table"))
+      .map((el) => el.url);
+
+  it("a posted card's View table opens the agent's chat", async () => {
+    gateway.script.push({ status: 200, body: { requests: [bulkRequest] } });
+    managerWith("https://app.example.com");
+    await waitReal(
+      () => slack.callsTo("files.completeUploadExternal").length >= 1,
+      "bulk card posted",
+    );
+    const share = slack.callsTo("files.completeUploadExternal")[0]!;
+    expect(viewTableUrls(share.form.blocks)).toEqual([CHAT]);
+  });
+
+  it("without a web app URL the card has no View table", async () => {
+    gateway.script.push({ status: 200, body: { requests: [bulkRequest] } });
+    managerWith(undefined);
+    await waitReal(
+      () => slack.callsTo("files.completeUploadExternal").length >= 1,
+      "bulk card posted",
+    );
+    const share = slack.callsTo("files.completeUploadExternal")[0]!;
+    expect(viewTableUrls(share.form.blocks)).toEqual([]);
+    expect(share.form.blocks).not.toContain("View table");
+  });
+
+  it("a batch card links the chat on its first post and on every re-render", async () => {
+    const now = Date.now();
+    const at = (i: number) => new Date(now + i).toISOString();
+    gateway.script.push({
+      status: 200,
+      body: {
+        requests: [
+          update("ap-1", "Ada", at(0)),
+          update("ap-2", "Grace", at(1)),
+        ],
+      },
+    });
+    managerWith("https://app.example.com");
+    // 2 of 3 and fresh: nothing posts until the batch is in or goes quiet.
+    await waitReal(() => gateway.heldCount() > 0, "the loop's next poll");
+    gateway.releaseHeld(200, {
+      requests: [
+        update("ap-1", "Ada", at(0)),
+        update("ap-2", "Grace", at(1)),
+        update("ap-3", "Linus", at(2)),
+      ],
+    });
+    await waitReal(
+      () => slack.callsTo("chat.postMessage").length >= 1,
+      "batch card posted",
+    );
+    const link = `<${CHAT}|review each request in OneCLI>`;
+    expect(slack.callsTo("chat.postMessage")[0]!.form.blocks).toContain(link);
+    // A fourth row on the same task joins the card and re-renders it.
+    await waitReal(() => gateway.heldCount() > 0, "the loop's next poll");
+    gateway.releaseHeld(200, {
+      requests: [
+        update("ap-1", "Ada", at(0)),
+        update("ap-2", "Grace", at(1)),
+        update("ap-3", "Linus", at(2)),
+        update("ap-4", "Mary", at(3)),
+      ],
+    });
+    await waitReal(
+      () =>
+        slack
+          .callsTo("chat.update")
+          .some((call) => call.form.blocks?.includes("Mary")),
+      "batch card re-rendered with the fourth row",
+    );
+    expect(slack.callsTo("chat.update").at(-1)!.form.blocks).toContain(link);
+  });
+});

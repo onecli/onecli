@@ -89,6 +89,25 @@ const BOOT_DIAL_IN_GRACE_MS = 180_000;
  * is reachable. 3 min leaves a wide margin over a normal reconnect.
  */
 const INHERITED_RESUME_GRACE_MS = 180_000;
+/**
+ * How long a supervisor whose socket this copy CLOSED for silence
+ * (`onUnresponsive`) gets to come back before it is reported stopped. The
+ * inherited grace's reasoning holds here too: a live supervisor redials
+ * within a second and keeps retrying every <=15 s, so 3 min is a wide
+ * margin over a normal reconnect. A silent socket still gets the full
+ * reconnect grace when every socket on its copy went quiet together (the
+ * ws server reports only an isolated silence).
+ */
+const UNRESPONSIVE_RECONNECT_GRACE_MS = 180_000;
+/**
+ * How much later than this copy's own close the control plane's record of
+ * the drop may be stamped and still be THAT drop: the release is sent at
+ * the close and retried with backoff for at most ~46 s
+ * (`ws/channel-plane.ts`), so 90 s covers it with room. A drop stamped
+ * later than this is a newer one (the supervisor came back, then left
+ * again), which the ordinary graces judge instead.
+ */
+const UNRESPONSIVE_DROP_MATCH_MS = 90_000;
 
 /**
  * How a closed channel's container is looked at: this many looks, this far
@@ -192,7 +211,7 @@ export interface RunnerDeps {
   backend: SandboxBackend;
   controlPlane: ControlPlaneClient;
   wsServer: RunnerWsServer;
-  /** Cadence overrides — tests only (the ws server's pingIntervalMs
+  /** Cadence overrides, tests only (the ws server's liveness override
    * precedent); production uses the module constants. */
   startHeartbeatMs?: number;
   bootDialInGraceMs?: number;
@@ -205,6 +224,9 @@ export interface RunnerDeps {
   /** The interval between looks at a closed channel's container. Tests
    * only; production uses `CLOSED_CHANNEL_LOOK_MS`. */
   closedChannelLookMs?: number;
+  /** How long a supervisor closed for silence gets to come back. Tests
+   * only; production uses `UNRESPONSIVE_RECONNECT_GRACE_MS`. */
+  unresponsiveGraceMs?: number;
 }
 
 type StartItem = Extract<RunnerWorkItem, { kind: "sandbox.start" }>;
@@ -340,6 +362,7 @@ export const createRunner = ({
   bootDialInGraceMs = BOOT_DIAL_IN_GRACE_MS,
   inheritedResumeGraceMs = INHERITED_RESUME_GRACE_MS,
   closedChannelLookMs = CLOSED_CHANNEL_LOOK_MS,
+  unresponsiveGraceMs = UNRESPONSIVE_RECONNECT_GRACE_MS,
 }: RunnerDeps): Runner => {
   let running = false;
   /** Set the moment `stop` begins: the sockets that close from then on are
@@ -1052,6 +1075,7 @@ export const createRunner = ({
       ...(item.resumeSessionRef && {
         resumeSessionRef: item.resumeSessionRef,
       }),
+      ...(item.forkSessionRef && { forkSessionRef: item.forkSessionRef }),
       ...(item.ephemeralSession && { ephemeralSession: true as const }),
       // Delivery-only memory context (step 8) — forwarded verbatim; the
       // supervisor concatenates, the transcript never sees it.
@@ -1358,6 +1382,48 @@ export const createRunner = ({
   const strayStopped = new Set<string>();
 
   /**
+   * Stop a container still running although its sandbox is parked (a
+   * stray), through the deliberate stop's own body, once the control plane
+   * agrees no start has taken it: the claim moves the row to `stopping`
+   * under this copy, fenced on the container, so a start that got there
+   * first wins and this stands down. The stop's `stopped` then lands like
+   * any stop's. One stop per container; a refused claim or a failed stop
+   * drops the ref so a later pass retries.
+   */
+  const stopStray = async (
+    sandboxId: string,
+    containerRef: string,
+  ): Promise<void> => {
+    strayStopped.add(containerRef);
+    if (!(await controlPlane.claimStrayStop(sandboxId, containerRef))) {
+      strayStopped.delete(containerRef);
+      return;
+    }
+    log("warn", "stopping a running container whose sandbox is parked", {
+      sandboxId,
+    });
+    chains.enqueue(sandboxId, async () => {
+      try {
+        await stopContainer(sandboxId, containerRef);
+        await enqueueReport([
+          {
+            kind: "sandbox.status",
+            sandboxId,
+            status: "stopped",
+            observedContainerRef: containerRef,
+          },
+        ]);
+      } catch (error) {
+        strayStopped.delete(containerRef);
+        log("warn", "stopping a stray container failed; retrying", {
+          sandboxId,
+          error: String(error),
+        });
+      }
+    });
+  };
+
+  /**
    * Sandboxes the control plane believed `running` that had NO backend
    * snapshot on the PREVIOUS reconcile pass — the vanished-pod arm's memory.
    * Absence must be observed on two consecutive passes before it is
@@ -1586,39 +1652,10 @@ export const createRunner = ({
       case "stray":
         /**
          * A STRAY: running, no channel, and the control plane already parked
-         * its row. A report would change nothing, so it is stopped, through
-         * the deliberate stop's own body, once the control plane agrees no
-         * start has taken it (the claim moves the row to `stopping` under
-         * this copy, fenced on the container). The stop's `stopped` then
-         * lands like any stop's.
+         * its row. A report would change nothing, so it is stopped
+         * (`stopStray`).
          */
-        strayStopped.add(containerRef);
-        if (!(await controlPlane.claimStrayStop(sandboxId, containerRef))) {
-          strayStopped.delete(containerRef);
-          return [];
-        }
-        log("warn", "stopping a running container whose sandbox is parked", {
-          sandboxId,
-        });
-        chains.enqueue(sandboxId, async () => {
-          try {
-            await stopContainer(sandboxId, containerRef);
-            await enqueueReport([
-              {
-                kind: "sandbox.status",
-                sandboxId,
-                status: "stopped",
-                observedContainerRef: containerRef,
-              },
-            ]);
-          } catch (error) {
-            strayStopped.delete(containerRef);
-            log("warn", "stopping a stray container failed; retrying", {
-              sandboxId,
-              error: String(error),
-            });
-          }
-        });
+        await stopStray(sandboxId, containerRef);
         return [];
       case "channelless":
       case "dead":
@@ -1894,6 +1931,99 @@ export const createRunner = ({
   });
 
   /**
+   * A SUPERVISOR THIS COPY CLOSED FOR SILENCE (the ws server's liveness
+   * check, which fires this only while other sockets on this copy kept
+   * answering). Its container usually still reads `running`: the sandbox is
+   * stalled, not exited, so the closed-socket looks above call it alive, and
+   * without this the reconciler would wait out the whole reconnect grace
+   * (`SESSION_RESUME_GRACE_MS`, ~15.5 min) meant for a supervisor that is
+   * merely between copies. A live supervisor redials within a second, so
+   * this one gets `unresponsiveGraceMs` (3 min), then the control plane's
+   * channel facts decide. Only the drop this copy made counts: a channel
+   * that is anything but `dropped` on this container since about the
+   * close (held again, a newer spawn, a start, a holder that died after
+   * the supervisor moved to it, a later drop) is the ordinary graces'
+   * business, and this says nothing. On this copy's own drop:
+   *
+   * - the row still `running`: reported `stopped`, stamped with the
+   *   container, the reconciler's channelless report, so the strand law
+   *   revives or fails its turns and the next one boots a fresh sandbox (a
+   *   start replaces the frozen container);
+   * - the row already parked (`stopped`/`failed`): the frozen container is
+   *   a stray and is stopped through the stray stop's claim.
+   *
+   * Any copy may do this: every report and claim is fenced on the
+   * container, so a start that replaced it meanwhile is never touched. A
+   * listing that fails is left to the reconciler. Timers are unref'd and
+   * dropped on `stop`: a copy going away hands the case to the reconciler.
+   */
+  const unresponsiveTimers = new Map<string, NodeJS.Timeout>();
+  /** Judgments running now, so `settle` can wait for them like the sweep. */
+  const judging = new Set<Promise<void>>();
+
+  const judgeUnresponsive = async (
+    sandboxId: string,
+    containerRef: string,
+    closedAt: number,
+  ): Promise<void> => {
+    if (stopping || lifecycleInFlight.has(sandboxId)) return;
+    if (wsServer.connection(sandboxId)) return;
+    if (reportedDead.has(containerRef) || strayStopped.has(containerRef)) {
+      return;
+    }
+    const assigned = await controlPlane.listAssignedSandboxes();
+    const channel = assigned.channels?.[sandboxId];
+    const ourDrop =
+      channel?.containerRef === containerRef &&
+      channel.channel === "dropped" &&
+      channel.since !== null &&
+      channel.since <= closedAt + UNRESPONSIVE_DROP_MATCH_MS;
+    if (!ourDrop) return;
+    const believed = assigned.statuses?.[sandboxId];
+    if (believed === "stopped" || believed === "failed") {
+      await stopStray(sandboxId, containerRef);
+      return;
+    }
+    if (believed !== "running") return;
+    reportedDead.add(containerRef);
+    log("warn", "reporting a sandbox stopped: its supervisor stayed silent", {
+      sandboxId,
+      graceMs: unresponsiveGraceMs,
+    });
+    await enqueueReport([
+      {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+        observedContainerRef: containerRef,
+      },
+    ]);
+  };
+
+  wsServer.onUnresponsive((sandboxId, containerRef) => {
+    if (stopping) return;
+    const closedAt = Date.now();
+    clearTimeout(unresponsiveTimers.get(sandboxId));
+    const timer = setTimeout(() => {
+      if (unresponsiveTimers.get(sandboxId) === timer) {
+        unresponsiveTimers.delete(sandboxId);
+      }
+      const judgment = judgeUnresponsive(sandboxId, containerRef, closedAt)
+        .catch((error: unknown) => {
+          // The reconciler's ordinary grace still covers it.
+          log("warn", "could not judge a silent supervisor's sandbox", {
+            sandboxId,
+            error: String(error),
+          });
+        })
+        .finally(() => judging.delete(judgment));
+      judging.add(judgment);
+    }, unresponsiveGraceMs);
+    timer.unref?.();
+    unresponsiveTimers.set(sandboxId, timer);
+  });
+
+  /**
    * Route one claimed item onto its sandbox's chain. Cross-sandbox
    * order is NOT preserved — per-sandbox order is, and that is where every
    * documented ordering invariant lives. At `lifecycleConcurrency: 1` the
@@ -1996,8 +2126,10 @@ export const createRunner = ({
     // Deliveries (attachment pulls) ride their own per-sandbox chains; a
     // drain that ignored them would report settled with a turn in hand.
     await Promise.all([...deliveryChains.values()]);
-    // The closed-socket sweep too (it may be looking at a dead container).
+    // The closed-socket sweep too (it may be looking at a dead container),
+    // and any silent supervisor's judgment in progress.
     await closedSweep;
+    await Promise.all([...judging]);
     await reportChain;
   };
 
@@ -2090,6 +2222,8 @@ export const createRunner = ({
       stopping = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (reconcileTimer) clearInterval(reconcileTimer);
+      for (const timer of unresponsiveTimers.values()) clearTimeout(timer);
+      unresponsiveTimers.clear();
       for (const sandboxId of [...startHeartbeats.keys()]) {
         stopStartHeartbeat(sandboxId);
       }

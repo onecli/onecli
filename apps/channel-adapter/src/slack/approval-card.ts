@@ -1021,7 +1021,8 @@ const rowsCardBlocks = (view: GroupCardView): unknown[] => {
   // A tagged batch still arriving offers no Approve all yet: the reviewer
   // never approves part of a list believing it is the whole task. Deny all
   // (the safe direction) stays. The manager re-renders the card when the
-  // batch completes or goes quiet (`batchSettlesAt`).
+  // batch completes, or when it goes quiet (approvals.ts
+  // `scheduleSettleRender`).
   const arrival = batchArrival(
     total,
     [...view.live, ...view.settled].map((a) => a.createdAt),

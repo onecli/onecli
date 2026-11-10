@@ -1,10 +1,13 @@
-import { redirect } from "next/navigation";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
+/** An old URL: the org settings index opened General, now Settings >
+ *  Organization > General. Straight there, not through `settings/general`
+ *  (a second redirect). */
 export default async function OrgSettingsPage({
   params,
 }: {
   params: Promise<{ orgId: string }>;
 }) {
   const { orgId } = await params;
-  redirect(`/org/${orgId}/settings/general`);
+  await redirectToSettingsModal({ organizationId: orgId }, "general");
 }

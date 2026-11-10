@@ -96,9 +96,12 @@ export const confluencePermissions: AppPermissionDefinition = {
         {
           id: "create_comment",
           name: "Add comment",
-          description: "Add a comment to a Confluence page",
+          description: "Add a comment or reply to Confluence content",
           hostPattern: "api.atlassian.com",
-          pathPattern: "/ex/confluence/*/wiki/api/v2/pages/*/footer-comments",
+          // v2 creates every footer comment on this one collection; the page,
+          // blog post or parent comment goes in the body. There is no
+          // per-page POST route.
+          pathPattern: "/ex/confluence/*/wiki/api/v2/footer-comments",
           method: "POST",
         },
       ],

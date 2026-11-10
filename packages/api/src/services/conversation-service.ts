@@ -1,5 +1,6 @@
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
+import { visibleTo } from "./conversation-visibility";
 import { isPlatformJobRun } from "./platform-jobs";
 import {
   CONVERSATION_SOURCES,
@@ -35,36 +36,27 @@ export interface CreateConversationInput {
 }
 
 /**
- * The direct-thread privacy fence (step 6's per-user amendment to §3.18): a
- * direct conversation is one user's private thread with the agent, visible
- * ONLY to its owner — group/source conversations stay visible to the whole
- * workspace. Expressed as a `where` fragment so every reader composes it into
- * its one fenced query, and a foreign thread reads NOT_FOUND rather than
- * "forbidden" (existence is never confirmed).
- *
- * Every public read/write path takes the viewer EXPLICITLY, as a required
- * parameter — so a new call site cannot compile without deciding who is
- * looking.
+ * The private-thread fence is `visibleTo` (conversation-visibility.ts):
+ * every reader here composes it into its one fenced query.
  */
-const visibleTo = (viewerUserId: string): Prisma.ConversationWhereInput => ({
-  OR: [{ direct: false }, { userId: viewerUserId }],
-});
 
 /**
  * The PLATFORM's door (step 7): load a conversation for a caller that is not
  * a person — a cron fire writing into its own run-conversation. Two
  * deliberate differences from `requireConversation`: there is no viewer (the
- * platform is not "looking", it is executing), and direct threads are
- * REFUSED outright — a system write into someone's private thread must go
- * through a purpose-built path (the delivery materializer), never through
- * the generic one, so a bug can't quietly speak as the platform in a DM.
+ * platform is not "looking", it is executing), and PRIVATE threads (any
+ * owned conversation: a direct thread, or a DM thread opened inside one)
+ * are REFUSED outright — a system write into someone's private thread must
+ * go through a purpose-built path (the delivery materializer), never
+ * through the generic one, so a bug can't quietly speak as the platform in
+ * a DM.
  */
 export const requireSystemConversation = async (
   workspaceId: string,
   conversationId: string,
 ) => {
   const conversation = await db.conversation.findFirst({
-    where: { id: conversationId, agent: { workspaceId }, direct: false },
+    where: { id: conversationId, agent: { workspaceId }, userId: null },
     select: { ...conversationSelect, harnessSessionRef: true, lastSeq: true },
   });
   if (!conversation) {
@@ -75,13 +67,14 @@ export const requireSystemConversation = async (
 
 /**
  * The purpose-built path the doctrine above demands: a PLATFORM wake turn
- * running INSIDE the direct thread the watched work belongs to, so the
+ * running INSIDE the private thread the watched work belongs to, so the
  * report is the turn itself instead of a materialized copy from a hidden
  * conversation. Deliberately the mirror image of `requireSystemConversation`:
- * this door admits ONLY direct threads, only for the named agent — and it is
- * reachable solely through `TurnOrigin.directWake`, which every route stamps
- * server-side and none exposes. The creator/owner fence (who may be woken
- * into this thread) lives at the fire site, which holds both rows.
+ * this door admits ONLY owned threads (a direct thread, or a DM thread
+ * opened inside one), only for the named agent — and it is reachable solely
+ * through `TurnOrigin.directWake`, which every route stamps server-side and
+ * none exposes. The creator/owner fence (who may be woken into this thread)
+ * lives at the fire site, which holds both rows.
  */
 export const requireDirectWakeConversation = async (
   workspaceId: string,
@@ -93,7 +86,7 @@ export const requireDirectWakeConversation = async (
       id: conversationId,
       agentId,
       agent: { workspaceId },
-      direct: true,
+      userId: { not: null },
     },
     select: { ...conversationSelect, harnessSessionRef: true, lastSeq: true },
   });
@@ -299,6 +292,80 @@ export const ensureSourcedConversation = async (
       err.code === "P2002"
     ) {
       const winner = await find();
+      if (winner) return winner;
+    }
+    throw err;
+  }
+};
+
+/**
+ * Get-or-create the conversation of a THREAD opened inside a user's DM: a
+ * sourced conversation (`source` = the provider, `externalRef` = the
+ * thread's address) that is nonetheless the user's OWN — `userId` carries
+ * the author, so the visibility fence reads it exactly like their direct
+ * thread (a teammate can never read it), while `direct` stays false so the
+ * one-direct-row-per-user invariant, and every reader built on "the user's
+ * direct thread" (web chat, approval routing, failure notices), is
+ * untouched.
+ *
+ * The DM's top level stays the user's direct conversation (shared with the
+ * web chat); each thread under it is a separate context that runs in
+ * parallel with it, the way a channel thread already does. The first turn
+ * forks the direct conversation's harness session (dispatch reads
+ * `fork_session_ref`), so the thread inherits what the DM knew when it was
+ * opened.
+ *
+ * Race-safe on `conversations(agent_id, source, external_ref)` like
+ * `ensureSourcedConversation`. A row that exists under this address with a
+ * DIFFERENT owner is refused (NOT_FOUND, never "forbidden"): a DM thread's
+ * address embeds the IM channel, which is one user's, so this is a defense
+ * against a forged address, not a product case.
+ */
+export const ensureDirectThreadConversation = async (
+  workspaceId: string,
+  agentId: string,
+  userId: string,
+  input: { source: ConversationSource; externalRef: string },
+) => {
+  const find = () =>
+    db.conversation.findFirst({
+      where: {
+        agentId,
+        source: input.source,
+        externalRef: input.externalRef,
+        agent: { workspaceId, kind: "hosted" },
+      },
+      select: conversationSelect,
+    });
+  const owned = (row: Awaited<ReturnType<typeof find>>) => {
+    if (!row) return null;
+    if (row.userId !== userId) {
+      throw new ServiceError("NOT_FOUND", "Conversation not found");
+    }
+    return row;
+  };
+
+  const existing = owned(await find());
+  if (existing) return existing;
+
+  const agent = await requireHostedAgent(workspaceId, agentId);
+
+  try {
+    return await db.conversation.create({
+      data: {
+        agentId: agent.id,
+        source: input.source,
+        externalRef: input.externalRef,
+        userId,
+      },
+      select: conversationSelect,
+    });
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      const winner = owned(await find());
       if (winner) return winner;
     }
     throw err;

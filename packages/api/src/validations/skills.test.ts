@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  SKILL_CONTENT_MAX_LENGTH,
   SKILL_DESCRIPTION_MAX_LENGTH,
+  SKILL_TOOL_TEXT_MAX_LENGTH,
   cleanSkillDescription,
   createOrgSkillSchema,
   createSkillSchema,
@@ -107,5 +109,80 @@ describe("every door stores a clean description", () => {
       description: "d".repeat(SKILL_DESCRIPTION_MAX_LENGTH + 1),
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("one body limit, and a tool door that fits its pipe", () => {
+  const at = "x".repeat(SKILL_CONTENT_MAX_LENGTH);
+  const over = `${at}x`;
+
+  it("the dashboard doors take a body up to 120,000, however it arrived", () => {
+    expect(SKILL_CONTENT_MAX_LENGTH).toBe(120_000);
+    expect(updateSkillSchema.safeParse({ content: at }).success).toBe(true);
+    expect(updateSkillSchema.safeParse({ content: over }).success).toBe(false);
+    const create = { name: "n", description: "d", content: at, agentId: "a" };
+    expect(createSkillSchema.safeParse(create).success).toBe(true);
+    expect(
+      createSkillSchema.safeParse({ ...create, content: over }).success,
+    ).toBe(false);
+  });
+
+  it("no longer caps body + files together", () => {
+    const result = createSkillSchema.safeParse({
+      name: "n",
+      description: "d",
+      agentId: "a",
+      content: "x".repeat(40_000),
+      files: [{ path: "a.md", content: "y".repeat(20_000) }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("a whole body over the tool door's own limit is refused", () => {
+    // The tool-args pipe (32k) can't carry the 120,000 body limit whole, so
+    // skill_create and a whole skill_update hold their body to the tool
+    // door's limit; a longer skill changes in place (edits / append).
+    const whole = "x".repeat(SKILL_TOOL_TEXT_MAX_LENGTH + 1);
+    expect(
+      skillUpdateArgsSchema.safeParse({ name: "n", content: whole }).success,
+    ).toBe(false);
+    expect(
+      skillCreateArgsSchema.safeParse({
+        name: "n",
+        description: "d",
+        content: whole,
+      }).success,
+    ).toBe(false);
+    // Plain Markdown at that limit fits the pipe JSON-encoded.
+    const markdown = "- step\n".repeat(SKILL_TOOL_TEXT_MAX_LENGTH / 7);
+    expect(
+      JSON.stringify({ name: "n", content: markdown }).length,
+    ).toBeLessThan(32_000);
+  });
+
+  it("skill_update edits in place: edits and append, never with content", () => {
+    expect(
+      skillUpdateArgsSchema.safeParse({
+        name: "n",
+        edits: [{ find: "a", replace: "" }],
+        append: "more",
+      }).success,
+    ).toBe(true);
+    expect(
+      skillUpdateArgsSchema.safeParse({
+        name: "n",
+        content: "all",
+        append: "more",
+      }).success,
+    ).toBe(false);
+    expect(
+      skillUpdateArgsSchema.safeParse({ name: "n", edits: [] }).success,
+    ).toBe(false);
+    expect(
+      skillUpdateArgsSchema.safeParse({
+        name: "n",
+        edits: [{ find: "", replace: "x" }],
+      }).success,
+    ).toBe(false);
   });
 });

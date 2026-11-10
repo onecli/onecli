@@ -139,7 +139,7 @@ export const LibraryPickerDialog = ({
             {isOrg ? "Library preview" : "Add from library"}
           </DialogTitle>
           <DialogDescription>
-            {isOrg && "Agents add these from their own Skills page. "}
+            {isOrg && "Agents add these from their own Knowledge page. "}
             {listing.data
               ? `${listing.data.repo} @ ${listing.data.commitSha.slice(0, 7)} · read-only, follows the repo`
               : "Skills from your organization's GitHub repo"}

@@ -53,6 +53,12 @@ vi.mock("@/hooks/use-channels", () => ({
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: mocks.toastError },
 }));
+// The card sits on the agent's Contacts page; its org-setup link opens the
+// Settings modal over it.
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/w/ws-1/agents/ag-1/contacts",
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 const { SlackAttachCard } = await import("./slack-attach-card");
 
@@ -111,7 +117,6 @@ describe("the events arm popup", () => {
         agentId="ag-1"
         posture={posture("events", ["events"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -142,7 +147,6 @@ describe("the events arm popup", () => {
         agentId="ag-1"
         posture={posture("events", ["events"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -169,7 +173,6 @@ describe("the events arm popup", () => {
         agentId="ag-1"
         posture={posture("socket", ["socket"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -193,7 +196,6 @@ describe("the socket arm's one-click install", () => {
         agentId="ag-1"
         posture={posture("socket", ["events", "socket"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -223,7 +225,6 @@ describe("the socket arm's one-click install", () => {
         agentId="ag-1"
         posture={posture("socket", ["events", "socket"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -252,7 +253,6 @@ describe("the socket arm's one-click install", () => {
         posture={posture("socket", ["events", "socket"])}
         pendingTransport="socket"
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming
         resumeAppId="A777"
@@ -286,7 +286,6 @@ describe("the socket arm's one-click install", () => {
         posture={posture("socket", ["events", "socket"])}
         pendingTransport="socket"
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming
         resumeAppId="A777"
@@ -307,7 +306,6 @@ describe("the socket arm's one-click install", () => {
         posture={posture("socket", ["events", "socket"])}
         pendingTransport="socket"
         hasOrgCredentials={false}
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming
         resumeAppId="A777"
@@ -326,7 +324,6 @@ describe("the socket arm's one-click install", () => {
         agentId="ag-1"
         posture={posture("socket", ["socket"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,
@@ -342,7 +339,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events", "socket"])}
         hasOrgCredentials
@@ -362,7 +358,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={p}
         hasOrgCredentials
@@ -376,7 +371,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events", "socket"])}
         pendingTransport="socket"
@@ -400,7 +394,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events", "socket"])}
         hasOrgCredentials
@@ -428,7 +421,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events")}
         hasOrgCredentials
@@ -445,7 +437,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events", "socket"])}
         hasOrgCredentials={false}
@@ -481,7 +472,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events", "socket"])}
         pendingTransport="socket"
@@ -504,7 +494,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events"])}
         hasOrgCredentials={false}
@@ -514,9 +503,10 @@ describe("the mode picker", () => {
     expect(
       screen.getByText("Connect Slack for your organization first"),
     ).toBeInTheDocument();
+    // Settings > Slack, over the page the admin is on.
     expect(
       screen.getByRole("link", { name: "Set up Slack for the organization" }),
-    ).toHaveAttribute("href", "/org/org-1/channels");
+    ).toHaveAttribute("href", "/w/ws-1/agents/ag-1/contacts?settings=slack");
   });
 
   it("…but a MEMBER gets ask-an-admin copy, never a link that silently bounces", () => {
@@ -525,7 +515,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin={false}
         posture={posture("events", ["events"])}
         hasOrgCredentials={false}
@@ -551,7 +540,6 @@ describe("the mode picker", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("socket", ["events", "socket"])}
         hasOrgCredentials
@@ -580,7 +568,6 @@ describe("the resume escape hatch", () => {
         posture={posture("socket", ["socket"])}
         pendingTransport="socket"
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming
       />,
@@ -599,7 +586,6 @@ describe("the resume escape hatch", () => {
     render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("socket", ["socket"])}
         pendingTransport="socket"
@@ -625,7 +611,6 @@ describe("the resume escape hatch", () => {
     const { rerender } = render(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events"])}
         hasOrgCredentials
@@ -642,7 +627,6 @@ describe("the resume escape hatch", () => {
     rerender(
       <SlackAttachCard
         agentId="ag-1"
-        organizationId="org-1"
         viewerIsOrgAdmin
         posture={posture("events", ["events"])}
         pendingTransport="events"
@@ -663,7 +647,6 @@ describe("the resume escape hatch", () => {
         agentId="ag-1"
         posture={posture("socket", ["socket"])}
         hasOrgCredentials
-        organizationId="org-1"
         viewerIsOrgAdmin
         resuming={false}
       />,

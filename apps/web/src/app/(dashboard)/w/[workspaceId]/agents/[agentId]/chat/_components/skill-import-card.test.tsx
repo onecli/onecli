@@ -49,7 +49,7 @@ describe("<SkillImportCard />", () => {
     expect(card).not.toHaveTextContent("more not added");
     expect(screen.getByRole("link", { name: "Open skills" })).toHaveAttribute(
       "href",
-      "/w/ws-1/agents/ag-1/skills",
+      "/w/ws-1/agents/ag-1/knowledge#skills",
     );
   });
 

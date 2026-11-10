@@ -51,7 +51,7 @@ export const SsoLoginContent = () => {
       <BrandLogo />
 
       <div className="mb-8 text-center">
-        <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight sm:text-5xl">
+        <h1 className="text-3xl font-semibold tracking-tight">
           Single sign-on
         </h1>
         <p className="text-muted-foreground mt-3 text-lg">
