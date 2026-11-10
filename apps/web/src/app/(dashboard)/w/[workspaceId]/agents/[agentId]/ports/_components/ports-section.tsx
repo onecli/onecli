@@ -1,5 +1,6 @@
 "use client";
 
+import { PageHeader } from "@dashboard/page-header";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Network } from "lucide-react";
@@ -97,14 +98,11 @@ export const PortsSection = () => {
 
   return (
     <div className="max-w-2xl space-y-6">
-      <div>
-        <h2 className="text-base font-semibold text-pretty">Ports</h2>
-        <p className="text-muted-foreground text-sm text-pretty">
-          Share a service running on this agent’s computer (a dev server, a
-          Docker container) at a private link. Only signed-in members of this
-          workspace can open it.
-        </p>
-      </div>
+      <PageHeader
+        title="Ports"
+        character="drop"
+        description="Share a service running on this agent’s computer (a dev server, a Docker container) at a private link. Only signed-in members of this workspace can open it."
+      />
 
       {isPending ? (
         <ul

@@ -9,21 +9,7 @@
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = std::env::var("GATEWAY_TEST_DATABASE_URL") else {
-        assert!(
-            std::env::var("CI").is_err(),
-            "GATEWAY_TEST_DATABASE_URL must be set in CI: the gateway DB tests must not silently skip"
-        );
-        eprintln!("skipping: GATEWAY_TEST_DATABASE_URL unset");
-        return None;
-    };
-    Some(
-        db::create_pool(&url)
-            .await
-            .expect("connect to test database"),
-    )
-}
+use crate::test_support::test_pool;
 
 struct World {
     pool: PgPool,

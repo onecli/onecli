@@ -14,6 +14,7 @@ import { configureAmplify } from "@/ee/auth/amplify-config";
 import { clearClientAuthState } from "@/ee/auth/logout-cleanup";
 import { apiFetch } from "@/lib/api-fetch";
 import { BrandLogo } from "@/lib/components/brand-logo";
+import { postAuthLanding } from "@/lib/auth/post-auth-landing";
 
 const ALLOWED_EMAIL = "test@onecli.sh";
 
@@ -62,9 +63,7 @@ const ReviewerLoginPage = () => {
           () => {},
         );
         const data = (await res.json()) as { workspaceId?: string };
-        router.replace(
-          data.workspaceId ? `/w/${data.workspaceId}` : "/workspaces",
-        );
+        router.replace(await postAuthLanding(data.workspaceId));
       } else {
         setError("Session sync failed.");
         setLoading(false);
@@ -80,7 +79,7 @@ const ReviewerLoginPage = () => {
       <BrandLogo />
 
       <div className="mb-8 text-center">
-        <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight sm:text-5xl">
+        <h1 className="text-3xl font-semibold tracking-tight">
           Reviewer Login
         </h1>
         <p className="text-muted-foreground mt-3 text-lg">

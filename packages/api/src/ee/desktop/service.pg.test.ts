@@ -15,6 +15,7 @@ import {
   runnerWorkResponseSchema,
 } from "@onecli/agent-protocol";
 import { proofDatabaseUrl } from "../../testing/pg-proof";
+import { grantModelKey } from "../../testing/model-key-grant";
 
 const PROOF_URL = proofDatabaseUrl();
 const P = "dsk-";
@@ -143,36 +144,11 @@ const seedAgent = async (
     },
   });
   // A granted model key, so a resume turn queues instead of failing at
-  // birth as `no_model_key` (the conversation proof's grant shape).
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}key-${seq}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}key-${seq}`,
-      name: `${P}key-${seq}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId: agent.id }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
+  // birth as `no_model_key`.
+  await grantModelKey(db, {
+    workspaceId: WORKSPACE,
+    agentId: agent.id,
+    name: `${P}key-${seq}`,
   });
   return agent.id;
 };

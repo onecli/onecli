@@ -39,3 +39,17 @@ describe("Groups nav visibility (cloud)", () => {
     }
   });
 });
+
+// Billing & usage is one Settings modal page; the sidebar keys rows by URL,
+// so a Usage row beside Billing would open the same page under two names.
+describe("Billing nav (cloud)", () => {
+  it("premise: this lane bills", () => {
+    expect(CAPS.billing).toBe(true);
+  });
+
+  it("offers one Billing row and no Usage row", () => {
+    const shown = titles();
+    expect(shown.filter((t) => t === "Billing")).toHaveLength(1);
+    expect(shown).not.toContain("Usage");
+  });
+});

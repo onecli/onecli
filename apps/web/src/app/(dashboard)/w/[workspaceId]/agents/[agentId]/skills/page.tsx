@@ -1,17 +1,11 @@
-import type { Metadata } from "next";
-import { SkillsSection } from "@/lib/skills/skills-section";
-
-export const metadata: Metadata = {
-  title: "Skills",
-};
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
 interface Props {
-  params: Promise<{ agentId: string }>;
+  params: Promise<{ workspaceId: string; agentId: string }>;
 }
 
-/** Skills are a property of the AGENT (§3.18 as amended): this section shows
- *  what this agent carries — its own rows plus the tiers it inherits. */
+/** An old URL: Skills is a block on the agent's Knowledge page. */
 export default async function AgentSkillsPage({ params }: Props) {
-  const { agentId } = await params;
-  return <SkillsSection tier="agent" agentId={agentId} />;
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(workspaceId, agentId, "skills");
 }

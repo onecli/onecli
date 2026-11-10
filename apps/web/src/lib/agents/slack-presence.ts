@@ -24,7 +24,14 @@ export const slackAppRedirectUrl = (appId: string, teamId: string): string =>
 export const slackAppSettingsUrl = (appId: string): string =>
   `https://api.slack.com/apps/${encodeURIComponent(appId)}/general`;
 
-/** The same page scrolled to its "Display Information" card (Slack's own
- * `<a name="display">`), where the app's profile icon is set. */
+/** The same page scrolled to its "Display Information" card, where the app's
+ * profile icon is set. Slack's page has no anchor for that card (a `#display`
+ * link opened at the top), so this is a text fragment. It targets the card's
+ * "App icon & Preview" label, not its heading: the browser centres the match,
+ * so aiming at the heading left the card half below the fold, while this
+ * brings the card up and highlights where the icon is uploaded. A browser
+ * without text fragments just opens the page. */
+const SLACK_ICON_SETTINGS_FRAGMENT = "#:~:text=App%20icon%20%26%20Preview";
+
 export const slackAppIconSettingsUrl = (appId: string): string =>
-  `${slackAppSettingsUrl(appId)}#display`;
+  `${slackAppSettingsUrl(appId)}${SLACK_ICON_SETTINGS_FRAGMENT}`;

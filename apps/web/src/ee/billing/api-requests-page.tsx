@@ -7,7 +7,9 @@ import { PlanUsageContent } from "@/ee/billing/_components/plan-usage-content";
 import { CurrentPlanCard } from "@/ee/billing/_components/current-plan-card";
 import { CAPS } from "@/lib/env";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
+import { orgHomePath } from "@/lib/navigation";
 import { requireOrgAdmin } from "@/ee/auth/require-org-admin";
+import { PageHeader } from "@dashboard/page-header";
 
 export default async function ApiRequestsPage() {
   const { organizationId } = await resolveOrgContext();
@@ -15,7 +17,7 @@ export default async function ApiRequestsPage() {
   // Usage/quota tracking is a billing surface: editions without billing hide
   // it from nav and shouldn't serve the route either — send direct navigations
   // to the org's workspaces.
-  if (!CAPS.billing) redirect(`/org/${organizationId}/workspaces`);
+  if (!CAPS.billing) redirect(orgHomePath(organizationId));
 
   // Defense-in-depth alongside the (admin) route-group guard — usage reads are
   // member-readable at the data layer, so the page guards itself too.
@@ -28,12 +30,11 @@ export default async function ApiRequestsPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Usage</h1>
-        <p className="text-muted-foreground text-sm">
-          Track your plan usage and API requests.
-        </p>
-      </div>
+      <PageHeader
+        title="Usage"
+        description="Track your plan usage and API requests."
+        character="drop-think"
+      />
 
       <CurrentPlanCard subscription={subscription} />
       <PlanUsageContent data={usage} />

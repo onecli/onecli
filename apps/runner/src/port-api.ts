@@ -37,7 +37,7 @@ export const PORT_STREAM_UPGRADE = "onecli-port-stream";
  * open is refused as `not_allowed`) always re-pulls, so a share made inside
  * the window still works on its first request.
  */
-export const ALLOWLIST_FRESH_MS = 5_000;
+const ALLOWLIST_FRESH_MS = 5_000;
 
 const STREAM_PATH =
   /^\/v1\/sandboxes\/([A-Za-z0-9_-]{1,100})\/ports\/(\d{1,5})\/stream$/;

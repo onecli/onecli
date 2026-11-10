@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "@/lib/api/types";
 import {
+  MAX_NOTE_CHARS,
   foldTranscript,
   highestSeq,
   mergeEvents,
@@ -240,7 +241,7 @@ describe("foldTranscript", () => {
         text: "Architecting the narrative arc\nthen I will consider…",
       }),
     ]);
-    // First line only — the intent, not the digression.
+    // The closed line — the intent, not the half-written digression.
     expect(working[0]?.activity).toBe("Architecting the narrative arc");
 
     // A started tool OUTRANKS the reasoning: the plan is now happening.
@@ -266,10 +267,85 @@ describe("foldTranscript", () => {
     // Null (nothing worth showing) must not blank the row — the previous
     // caption is still the truest thing we know.
     const turns = foldTranscript([
-      event("t1", "thinking.delta", { text: "Checking the CI logs" }),
+      event("t1", "thinking.delta", { text: "Checking the CI logs." }),
       event("t1", "thinking.delta", { text: "   \n  " }),
     ]);
-    expect(turns[0]?.activity).toBe("Checking the CI logs");
+    expect(turns[0]?.activity).toBe("Checking the CI logs.");
+  });
+
+  it("never captions a fragment of a reasoning delta (the field bug)", () => {
+    // Network batches cut the reasoning stream at arbitrary characters. Read
+    // per delta, the caption showed "d memory first, then review…" and
+    // "ngs must be picked up before any wo". Folded, only whole thoughts.
+    const reasoning =
+      "**Laying out the plan for the recurring check**\n\n" +
+      "I need to read memory first, then review my open PRs for new CI failures. " +
+      "If the lock is held I should stop, plus open findings must be picked up first. " +
+      "**Choosing the top finding**\n\nThen I can pick it and validate it.";
+    const captions = new Set<string>();
+    const events: TurnEvent[] = [];
+    for (let i = 0, k = 0; i < reasoning.length; k++) {
+      const n = [62, 48, 97, 35, 110][k % 5]!;
+      events.push(
+        event("t1", "thinking.delta", { text: reasoning.slice(i, i + n) }),
+      );
+      i += n;
+      const activity = foldTranscript(events)[0]?.activity;
+      if (activity) captions.add(activity);
+    }
+    expect(captions).toEqual(
+      new Set([
+        "Laying out the plan for the recurring check",
+        "Choosing the top finding",
+      ]),
+    );
+  });
+
+  it("records the work in order: thoughts, tool calls and the notes between them", () => {
+    const [turn] = foldTranscript([
+      event("t1", "thinking.delta", { text: "**Reading the logs**\nFirst " }),
+      event("t1", "text.delta", { text: "I'll check the logs." }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "tool.finished", { callId: "c1", name: "bash", output: "" }),
+      event("t1", "thinking.delta", {
+        text: "The build is fine, so the config",
+      }),
+      event("t1", "text.delta", { text: "Now the config." }),
+      event("t1", "tool.started", { callId: "c2", name: "read" }),
+      event("t1", "text.delta", { text: "All good." }),
+      event("t1", "text", { text: "All good." }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turn?.lead).toBe("I'll check the logs.");
+    expect(turn?.steps).toEqual([
+      { kind: "thought", text: "Reading the logs" },
+      { kind: "tool", index: 0 },
+      // A tool call closes the thought: its unfinished line still counts.
+      { kind: "thought", text: "The build is fine, so the config" },
+      { kind: "note", text: "Now the config." },
+      { kind: "tool", index: 1 },
+    ]);
+    // The lead is not a note: it already renders above the work.
+    expect(turn?.steps.filter((s) => s.kind === "note")).toHaveLength(1);
+  });
+
+  it("puts an orphaned finish on the timeline too", () => {
+    const [turn] = foldTranscript([
+      event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
+    ]);
+    expect(turn?.steps).toEqual([{ kind: "tool", index: 0 }]);
+  });
+
+  it("bounds a runaway note", () => {
+    const [turn] = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text.delta", { text: "word ".repeat(1_000) }),
+      event("t1", "tool.started", { callId: "c2", name: "bash" }),
+    ]);
+    const note = turn?.steps.find((s) => s.kind === "note");
+    expect(note?.kind === "note" && note.text.length).toBeLessThanOrEqual(
+      MAX_NOTE_CHARS + 1,
+    );
   });
 
   it("clears the activity on a failed turn too", () => {

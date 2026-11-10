@@ -71,6 +71,12 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
+// Where an org opens for the viewer (its first agent); the pg suite and
+// `home-landing.test.ts` pin the lookup itself.
+vi.mock("@/lib/dashboard/home-landing", () => ({
+  resolveOrgHome: async (orgId: string) => `/w/ws-of-${orgId}/agents/a1/chat`,
+}));
+
 // The screens are stubbed to their props: this suite is about WHICH screen
 // renders with WHAT, not about their markup.
 vi.mock("./_components/join-form", () => ({
@@ -200,7 +206,7 @@ describe("/join — a token that cannot be redeemed", () => {
     state.acceptedOrgId = "org-lizo";
     await renderJoin("tok-1");
 
-    expect(state.redirectedTo).toBe("/org/org-lizo/workspaces");
+    expect(state.redirectedTo).toBe("/w/ws-of-org-lizo/agents/a1/chat");
     expect(screen.queryByTestId("join-unavailable")).toBeNull();
     // Redirected before any explanation was even computed.
     expect(state.reasonReads).toBe(0);

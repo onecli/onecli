@@ -34,6 +34,7 @@ export const TryDemoCommand = ({ command, highlight }: TryDemoCommandProps) => {
         variant="ghost"
         size="icon"
         className="absolute top-1.5 right-1.5"
+        aria-label="Copy command"
         onClick={() => copy(command)}
       >
         {copied ? (

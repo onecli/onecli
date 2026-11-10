@@ -223,7 +223,14 @@ describe.skipIf(!PROOF_URL)("/join over real PostgreSQL", () => {
 
     signInAs(INVITEE);
     await renderJoin(token);
-    expect(state.redirectedTo).toBe(`/org/${ORG}/workspaces`);
+    // Straight to where the org opens for them (the workspace the accept
+    // provisioned, which has no agent yet), not through the org's
+    // forwarding URL.
+    const own = await db.workspace.findFirstOrThrow({
+      where: { organizationId: ORG, createdByUserId: INVITEE },
+      select: { id: true },
+    });
+    expect(state.redirectedTo).toBe(`/w/${own.id}/agents`);
     expect(screen.queryByRole("heading")).toBeNull();
   });
 

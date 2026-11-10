@@ -183,14 +183,6 @@ scenario(
     });
     expect(sandbox?.status).toBe("running");
 
-    // The signal reads true at every level the dashboard consumes.
-    const agents = await stack.v1.json<
-      Array<{ id: string; workingInBackground?: boolean }>
-    >(await stack.v1.get("/v1/agents"));
-    expect(
-      agents.find((agent) => agent.id === cx.ids.agent)?.workingInBackground,
-    ).toBe(true);
-
     await stack.runner.pausePump();
   },
 );

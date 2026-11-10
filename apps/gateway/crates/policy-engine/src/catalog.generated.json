@@ -2095,7 +2095,7 @@
         "api.atlassian.com"
       ],
       "paths": [
-        "/ex/confluence/*/wiki/api/v2/pages/*/footer-comments"
+        "/ex/confluence/*/wiki/api/v2/footer-comments"
       ],
       "methods": [
         "POST"

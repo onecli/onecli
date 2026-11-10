@@ -10,13 +10,6 @@ import {
 import { initEntitlementForTests } from "../../lib/entitlements";
 
 const state = vi.hoisted(() => ({
-  memberCreates: [] as Record<string, unknown>[],
-  workspaceCreates: [] as Record<string, unknown>[],
-  invitationUpdates: [] as Record<string, unknown>[],
-  invitationUpserts: [] as Record<string, unknown>[],
-  invitation: null as Record<string, unknown> | null,
-  memberByEmail: null as Record<string, unknown> | null,
-  transactionOps: [] as unknown[][],
   membership: null as Record<string, unknown> | null,
   memberUpdates: [] as Record<string, unknown>[],
   memberDeletes: [] as Record<string, unknown>[],
@@ -43,15 +36,6 @@ const cognito = vi.hoisted(() => ({
 
 vi.mock("../sso/cognito-user-service", () => cognito);
 
-// createInvitation gates new seats through the quota assert and cleans
-// expired provision placeholders first — spy on both to pin ordering and the
-// resend exemption without dragging in their real db reads.
-const quota = vi.hoisted(() => ({
-  assertCanInviteMember: vi.fn(async () => {}),
-}));
-
-vi.mock("./quota-service", () => quota);
-
 // removeMember deletes truly-personal workspaces via workspace-service.deleteWorkspace
 // — stub it so the real cascade (a callback $transaction) doesn't run, and so we
 // can assert exactly which workspaces were deleted.
@@ -70,11 +54,6 @@ vi.mock("../../lib/gateway-invalidate", () => ({
 vi.mock("@onecli/db", () => ({
   db: {
     organizationMember: {
-      create: (args: Record<string, unknown>) => {
-        state.memberCreates.push(args);
-        return args;
-      },
-      findFirst: async () => state.memberByEmail,
       findUnique: async () => state.membership,
       update: async (args: Record<string, unknown>) => {
         state.memberUpdates.push(args);
@@ -88,10 +67,6 @@ vi.mock("@onecli/db", () => ({
       findMany: async () => state.reconcileMembers,
     },
     workspace: {
-      create: (args: Record<string, unknown>) => {
-        state.workspaceCreates.push(args);
-        return args;
-      },
       findMany: async (args: Record<string, unknown>) => {
         state.workspaceFindManyArgs.push(args);
         return state.personalWorkspaces;
@@ -117,26 +92,11 @@ vi.mock("@onecli/db", () => ({
           group: { roleMapping: { role: m.role, priority: m.priority } },
         })),
     },
-    invitation: {
-      findUnique: async () => state.invitation,
-      update: (args: Record<string, unknown>) => {
-        state.invitationUpdates.push(args);
-        return args;
-      },
-      upsert: async (args: Record<string, unknown>) => {
-        state.invitationUpserts.push(args);
-        return { id: "inv-1", token: "tok-1" };
-      },
-    },
     groupRoleMapping: {
       count: async () => state.mappingCount,
     },
     auditLog: {
       create: async (args: Record<string, unknown>) => args,
-    },
-    $transaction: async (ops: unknown[]) => {
-      state.transactionOps.push(ops);
-      return ops;
     },
   },
 }));
@@ -151,13 +111,6 @@ import {
 } from "./team-service";
 
 beforeEach(() => {
-  state.memberCreates = [];
-  state.workspaceCreates = [];
-  state.invitationUpdates = [];
-  state.invitationUpserts = [];
-  state.invitation = null;
-  state.memberByEmail = null;
-  state.transactionOps = [];
   state.membership = null;
   state.memberUpdates = [];
   state.memberDeletes = [];
@@ -172,8 +125,6 @@ beforeEach(() => {
   cognito.revokeUserAccess.mockClear();
   cognito.restoreUserAccess.mockClear();
   workspaceService.deleteWorkspace.mockClear();
-  quota.assertCanInviteMember.mockClear();
-  quota.assertCanInviteMember.mockResolvedValue(undefined);
 });
 
 // This suite exercises licensed features — run it entitled. The unlicensed

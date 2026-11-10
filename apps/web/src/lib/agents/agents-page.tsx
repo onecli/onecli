@@ -13,6 +13,7 @@ export default function CloudAgentsPage() {
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
         title="Agents"
+        character="drop"
         description="Create an agent to get started."
       />
       <Suspense>

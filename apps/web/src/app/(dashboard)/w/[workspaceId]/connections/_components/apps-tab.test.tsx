@@ -2,6 +2,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SettingsModalProvider } from "@/lib/settings-modal/modal-context";
 import { AppsTab } from "./apps-tab";
 
 // The unit: the Connections grid's GitHub App "Connect" offers installations
@@ -10,12 +11,15 @@ import { AppsTab } from "./apps-tab";
 const hoisted = vi.hoisted(() => ({
   shared: [] as unknown[],
   openPopup: vi.fn(),
+  push: vi.fn(),
+  pathname: "/w/ws-1/connections",
+  search: "q=GitHub%20App",
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  usePathname: () => "/w/ws-1/connections",
-  useSearchParams: () => new URLSearchParams("q=GitHub%20App"),
+  useRouter: () => ({ push: hoisted.push, replace: vi.fn() }),
+  usePathname: () => hoisted.pathname,
+  useSearchParams: () => new URLSearchParams(hoisted.search),
 }));
 vi.mock("@/lib/connect-popup", () => ({ openConnectPopup: hoisted.openPopup }));
 vi.mock("@/hooks/use-connections", () => ({
@@ -48,6 +52,8 @@ vi.mock("./github-app-connect-dialog", () => ({
 
 afterEach(() => {
   hoisted.shared = [];
+  hoisted.pathname = "/w/ws-1/connections";
+  hoisted.search = "q=GitHub%20App";
   vi.clearAllMocks();
 });
 
@@ -75,5 +81,55 @@ describe("AppsTab GitHub App Connect", () => {
     await waitFor(() => expect(hoisted.openPopup).toHaveBeenCalled());
     expect(hoisted.openPopup.mock.calls[0]?.[0]).toBe("github-app");
     expect(screen.queryByText("Connect GitHub App dialog")).toBeNull();
+  });
+});
+
+describe("AppsTab app rows", () => {
+  const clickRow = async (ui: React.ReactNode) => {
+    const user = userEvent.setup();
+    render(ui);
+    const row = (await screen.findByText("GitHub App")).closest("div.group");
+    if (!row) throw new Error("no GitHub App row");
+    await user.click(row);
+  };
+
+  it("opens the app's page on a route page", async () => {
+    await clickRow(<AppsTab />);
+    expect(hoisted.push).toHaveBeenCalledWith(
+      "/w/ws-1/connections/apps/github-app",
+    );
+  });
+
+  it("opens the app's detail inside the Settings modal, and scopes an org connect to the modal's org", async () => {
+    hoisted.pathname = "/w/ws-1/agents/ag-1/chat";
+    hoisted.search = "settings=shared-apps&q=GitHub%20App";
+    await clickRow(
+      <SettingsModalProvider
+        value={{
+          page: "shared-apps",
+          organizationId: "org-1",
+          workspaceId: "ws-1",
+        }}
+      >
+        <AppsTab
+          pageScope="organization"
+          basePath="/org/org-1/settings/global-connections"
+        />
+      </SettingsModalProvider>,
+    );
+    expect(hoisted.push).toHaveBeenCalledWith(
+      "/w/ws-1/agents/ag-1/chat?settings=shared-apps&app=github-app",
+    );
+
+    const user = userEvent.setup();
+    const row = screen.getByText("GitHub App").closest("div.group");
+    const button = row?.querySelector("button");
+    if (!button) throw new Error("no Connect button on the GitHub App row");
+    await user.click(button);
+    await waitFor(() => expect(hoisted.openPopup).toHaveBeenCalled());
+    expect(hoisted.openPopup.mock.calls[0]?.[1]).toMatchObject({
+      workspaceId: "ws-1",
+      orgId: "org-1",
+    });
   });
 });

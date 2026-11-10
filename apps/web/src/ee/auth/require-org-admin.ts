@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
+import { orgHomePath } from "@/lib/navigation";
 import { requireRole } from "@onecli/api/ee/services/authorization-service";
 
 /**
@@ -19,6 +20,6 @@ export const requireOrgAdmin = async () => {
   try {
     await requireRole(userId, organizationId, "admin");
   } catch {
-    redirect(`/org/${organizationId}/workspaces`);
+    redirect(orgHomePath(organizationId));
   }
 };
