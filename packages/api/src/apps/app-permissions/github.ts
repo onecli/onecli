@@ -21,6 +21,15 @@ const githubGroups: AppToolGroup[] = [
         method: "GET",
       },
       {
+        id: "get_current_user",
+        name: "Get authenticated user",
+        description:
+          "Get the profile of the currently authenticated user (token validation)",
+        hostPattern: "api.github.com",
+        pathPattern: "/user",
+        method: "GET",
+      },
+      {
         id: "list_repos",
         name: "List repositories",
         description: "List repositories for the authenticated user",

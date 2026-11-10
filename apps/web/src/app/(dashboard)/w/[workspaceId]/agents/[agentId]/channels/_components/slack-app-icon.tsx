@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { Pencil } from "lucide-react";
 import { AppIcon } from "@/lib/components/app-icon";
 import {
@@ -28,10 +29,12 @@ export const SlackAppIcon = ({ iconUrl, editUrl }: SlackAppIconProps) => {
   const [brokenUrl, setBrokenUrl] = useState<string | null>(null);
   const face =
     iconUrl && iconUrl !== brokenUrl ? (
-      // Plain <img>: a Slack CDN URL the optimizer would only proxy.
+      // Load the Slack CDN URL directly; it does not need an optimizer proxy.
       // Decorative, the app's handle sits right beside it.
-      <img
+      <Image
         src={iconUrl}
+        unoptimized
+        loading="eager"
         alt=""
         aria-hidden
         width={40}
