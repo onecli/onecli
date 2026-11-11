@@ -21,7 +21,7 @@ export const googleDrive: AppDefinition = {
       "email",
       "profile",
       "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/drive",
     ],
     permissions: [
       {
@@ -31,9 +31,9 @@ export const googleDrive: AppDefinition = {
         access: "read",
       },
       {
-        scope: "https://www.googleapis.com/auth/drive.file",
-        name: "Manage app files",
-        description: "Create and edit files opened or created by OneCLI",
+        scope: "https://www.googleapis.com/auth/drive",
+        name: "Manage files",
+        description: "Create, edit, move, and delete all your Drive files",
         access: "write",
       },
       {
