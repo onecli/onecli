@@ -461,7 +461,8 @@ export const agentChannelRoutes = () => {
   // GET /agents/:agentId/approvals — the agent's one-shot action approvals
   // (the dashboard's pending list + history). Workspace-fenced at the
   // query inside the service; a personal ask lists only to its decider;
-  // ?status narrows.
+  // ?status narrows. Each row names its conversation + turn when the
+  // caller could open that conversation (see listActionApprovals).
   app.get("/:agentId/approvals", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);

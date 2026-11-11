@@ -647,6 +647,75 @@ describe.skipIf(!PROOF_URL)("fences", () => {
     }
   });
 
+  it("the list names each ask's conversation + turn, but never a teammate's direct thread", async () => {
+    const stage = await seedStage("origin");
+    const direct = await db.conversation.create({
+      data: { agentId: stage.agentId, direct: true, userId: OWNER },
+      select: { id: true },
+    });
+    const directTurn = await db.turn.create({
+      data: {
+        conversationId: direct.id,
+        message: "from my DM",
+        status: "running",
+        source: "web",
+        userId: OWNER,
+      },
+      select: { id: true },
+    });
+    approvals.registerActionHandler("test.origin", async () => {});
+    try {
+      const shared = await approvals.requestActionApproval({
+        agentId: stage.agentId,
+        conversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+        action: "test.origin",
+        payload: {},
+        summary: "asked in a shared thread",
+      });
+      const fromDm = await approvals.requestActionApproval({
+        agentId: stage.agentId,
+        conversationId: direct.id,
+        originTurnId: directTurn.id,
+        action: "test.origin",
+        payload: {},
+        summary: "asked in the owner's DM",
+      });
+      const orphan = await approvals.requestActionApproval({
+        agentId: stage.agentId,
+        action: "test.origin",
+        payload: {},
+        summary: "asked outside any conversation",
+      });
+      const origins = async (viewer: string) =>
+        Object.fromEntries(
+          (
+            await approvals.listActionApprovals({
+              workspaceId: WORKSPACE,
+              agentId: stage.agentId,
+              viewerUserId: viewer,
+            })
+          ).map((a) => [a.id, [a.conversationId, a.originTurnId]]),
+        );
+
+      // A shared thread is anyone's to open: every viewer gets its address.
+      // The DM's address is its owner's alone, though the ask itself lists
+      // to the workspace as before.
+      expect(await origins(OWNER)).toEqual({
+        [shared.id]: [stage.conversationId, stage.turnId],
+        [fromDm.id]: [direct.id, directTurn.id],
+        [orphan.id]: [null, null],
+      });
+      expect(await origins(OUTSIDER)).toEqual({
+        [shared.id]: [stage.conversationId, stage.turnId],
+        [fromDm.id]: [null, null],
+        [orphan.id]: [null, null],
+      });
+    } finally {
+      approvals.unregisterActionHandler("test.origin");
+    }
+  });
+
   it("registering the same action twice throws; requesting an unregistered action throws", async () => {
     approvals.registerActionHandler("test.dupe", async () => {});
     try {
