@@ -3,6 +3,8 @@
 import { resolveWorkspaceContext } from "@/lib/actions/resolve-user";
 import type { ResolveOptions } from "@/lib/actions/resolve-user";
 import { apiOrigin, appOrigin } from "@onecli/api/lib/public-origins";
+import { originFromHeaders } from "@onecli/api/lib/app-origin";
+import { headers } from "next/headers";
 import {
   deleteSecret as deleteSecretService,
   updateSecret as updateSecretService,
@@ -48,10 +50,13 @@ export const getInstallInfo = async (options?: ResolveOptions) => {
     });
   }
 
+  const headerList = await headers();
+  const requestOrigin = originFromHeaders(headerList);
+
   return {
     apiKey: keyResult.apiKey,
-    appUrl: appOrigin(),
-    apiUrl: apiOrigin(),
+    appUrl: appOrigin(requestOrigin),
+    apiUrl: apiOrigin(requestOrigin),
   };
 };
 
