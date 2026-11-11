@@ -1,6 +1,7 @@
 import { createReadStream, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import type {
   HarnessBackgroundTask,
@@ -96,12 +97,15 @@ const mapStatus = (
   };
 };
 
-/** Read [offset, offset+limit) of a file as UTF-8, tolerating truncation. */
+/** Read the raw bytes [offset, offset+limit) of a file, tolerating truncation.
+ * Bytes, not text: the caller advances its offset by exactly what was read,
+ * and decodes through a per-task decoder so a character split across reads
+ * (or a byte that is not UTF-8) never shifts the offset. */
 const readSlice = async (
   path: string,
   offset: number,
   limit: number,
-): Promise<string> => {
+): Promise<Buffer> => {
   const chunks: Buffer[] = [];
   const stream = createReadStream(path, {
     start: offset,
@@ -110,7 +114,7 @@ const readSlice = async (
   for await (const chunk of stream) {
     chunks.push(chunk as Buffer);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 };
 
 export const createJcodeBackgroundTasks = (options?: {
@@ -121,6 +125,9 @@ export const createJcodeBackgroundTasks = (options?: {
   const dir = options?.dir ?? join(tmpdir(), "jcode-bg-tasks");
   /** Per-task consumed-output offsets (bytes). */
   const offsets = new Map<string, number>();
+  /** Per-task UTF-8 decoders: hold a trailing partial character until the
+   * rest of its bytes arrive on a later poll. */
+  const decoders = new Map<string, StringDecoder>();
   /** Non-bash tool_names we already mentioned. */
   const skippedTools = new Set<string>();
   let floodWarned = false;
@@ -191,10 +198,21 @@ export const createJcodeBackgroundTasks = (options?: {
             if (stat.size - offset > MAX_BACKLOG_BYTES) {
               offset = stat.size - MAX_DELTA_BYTES;
               marker = GAP_MARKER;
+              // Skipping ahead abandons any partial character held back.
+              decoders.delete(parsed.task_id);
             }
             const limit = Math.min(stat.size - offset, MAX_DELTA_BYTES);
-            const data = await readSlice(outputPath, offset, limit);
-            offsets.set(parsed.task_id, offset + Buffer.byteLength(data));
+            const bytes = await readSlice(outputPath, offset, limit);
+            offsets.set(parsed.task_id, offset + bytes.length);
+            let decoder = decoders.get(parsed.task_id);
+            if (!decoder) {
+              decoder = new StringDecoder("utf8");
+              decoders.set(parsed.task_id, decoder);
+            }
+            // A finished task never writes again: flush what is held back.
+            const data =
+              decoder.write(bytes) +
+              (status === "running" ? "" : decoder.end());
             if (marker || data) outputDelta = marker + data;
           }
         } catch {
@@ -217,7 +235,10 @@ export const createJcodeBackgroundTasks = (options?: {
         });
         // A terminal task's output never grows again — drop its offset so the
         // map cannot accrue an entry per task across a long container life.
-        if (status !== "running") offsets.delete(parsed.task_id);
+        if (status !== "running") {
+          offsets.delete(parsed.task_id);
+          decoders.delete(parsed.task_id);
+        }
       }
       return tasks;
     },
