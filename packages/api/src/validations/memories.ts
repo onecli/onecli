@@ -45,6 +45,9 @@ export {
 export const MEMORY_CONTENT_MAX_LENGTH = 12_000;
 export const MEMORY_SEARCH_QUERY_MAX_LENGTH = 500;
 
+/** The key whose file (`memory/index.md`) is the generated index. */
+const MEMORY_INDEX_KEY = "index";
+
 const keyField = z
   .string()
   .trim()
@@ -53,7 +56,12 @@ const keyField = z
   .regex(
     MEMORY_KEY_PATTERN,
     'Keys are lowercase words separated by single hyphens, like "deploy-notes"',
-  );
+  )
+  // `memory/index.md` is the generated memory index: a memory keyed `index`
+  // would project onto that same path and be overwritten by it on every sync.
+  .refine((key) => key !== MEMORY_INDEX_KEY, {
+    message: `"${MEMORY_INDEX_KEY}" is reserved: memory/index.md is the generated memory index`,
+  });
 
 const singleLine = (value: string) => !value.includes("\n");
 
