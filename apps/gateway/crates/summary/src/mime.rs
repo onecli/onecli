@@ -280,20 +280,34 @@ fn decode_rfc2047(input: &str) -> String {
     }
     let mut out = String::new();
     let mut rest = input;
+    let mut prev_encoded = false;
     while let Some(start) = rest.find("=?") {
-        out.push_str(&rest[..start]);
+        let gap = &rest[..start];
         let after = &rest[start + 2..];
         let parts: Vec<&str> = after.splitn(3, '?').collect();
         if parts.len() < 3 {
+            out.push_str(gap);
             out.push_str("=?");
             rest = after;
+            prev_encoded = false;
             continue;
         }
         let Some(end) = parts[2].find("?=") else {
+            out.push_str(gap);
             out.push_str("=?");
             rest = after;
+            prev_encoded = false;
             continue;
         };
+        // RFC 2047 §6.2: whitespace between two adjacent encoded-words is not
+        // displayed. Long subjects are split into several words this way.
+        let gap_is_space = gap
+            .bytes()
+            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'));
+        if !(prev_encoded && gap_is_space) {
+            out.push_str(gap);
+        }
+        prev_encoded = true;
         let encoded = &parts[2][..end];
         let tail = &parts[2][end + 2..];
         let decoded = match parts[1].to_ascii_uppercase().as_str() {
@@ -388,6 +402,30 @@ mod tests {
         assert_eq!(decode_rfc2047("=?UTF-8?B?8J+Ymg==?="), "\u{1F61A}");
         assert_eq!(decode_rfc2047("=?UTF-8?Q?Hi_there?="), "Hi there");
         assert_eq!(decode_rfc2047("plain subject"), "plain subject");
+    }
+
+    #[test]
+    fn rfc2047_whitespace_between_adjacent_encoded_words_is_dropped() {
+        // RFC 2047 §6.2: whitespace separating two encoded-words is not part of
+        // the text. Mail libraries split long non-ASCII subjects this way.
+        assert_eq!(
+            decode_rfc2047("=?UTF-8?Q?Quarterly_rep?= =?UTF-8?Q?ort?="),
+            "Quarterly report"
+        );
+        assert_eq!(
+            decode_rfc2047("=?UTF-8?B?44GT44KT?=\t=?UTF-8?B?44Gr44Gh44Gv?="),
+            "こんにちは"
+        );
+        // Folded header: the continuation is unfolded to a single space first.
+        let msg = "Subject: =?UTF-8?Q?Caf=C3=A9_?=\r\n =?UTF-8?Q?menu?=\r\n\r\nbody";
+        assert_eq!(parse(msg.as_bytes()).subject.as_deref(), Some("Café menu"));
+        // Whitespace next to plain text is still kept.
+        assert_eq!(
+            decode_rfc2047("Re: =?UTF-8?Q?Caf=C3=A9?= menu"),
+            "Re: Café menu"
+        );
+        // A malformed token is not an encoded-word, so its whitespace stays.
+        assert_eq!(decode_rfc2047("=?UTF-8?Q?a?= =?broken"), "a =?broken");
     }
 
     #[test]
