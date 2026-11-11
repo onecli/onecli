@@ -44,6 +44,16 @@ test("provision persists the detected bind host (the revert trap is dead)", () =
   rmSync(r.home, { recursive: true, force: true });
 });
 
+test("provision persists an explicit PostgreSQL bind override", () => {
+  const r = run(["--provision-url-env"], {
+    ONECLI_BIND_HOST: "172.17.0.1",
+    ONECLI_POSTGRES_BIND_HOST: "192.168.1.50",
+  });
+  assert.equal(r.status, 0);
+  assert.match(readEnv(r), /^ONECLI_POSTGRES_BIND_HOST=192\.168\.1\.50$/m);
+  rmSync(r.home, { recursive: true, force: true });
+});
+
 test("a non-loopback bind freezes ONECLI_EXTERNAL_URL with the frozen comment", () => {
   const r = run(["--provision-url-env"], { ONECLI_BIND_HOST: "10.0.0.5" });
   assert.equal(r.status, 0);
@@ -504,9 +514,15 @@ const BS = String.fromCharCode(92); // a single backslash
 const escLine = (key, v) => `${key}="${v.split("\n").join(`${BS}n`)}"`;
 const FAKE_MATERIAL =
   [
-    escLine("SSH_CA_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----\nFAKECA\n-----END PRIVATE KEY-----\n"),
+    escLine(
+      "SSH_CA_PRIVATE_KEY",
+      "-----BEGIN PRIVATE KEY-----\nFAKECA\n-----END PRIVATE KEY-----\n",
+    ),
     'TERMINATOR_CA_PUBLIC_KEY="ssh-ed25519 FAKECALINE"',
-    escLine("TERMINATOR_HOST_KEY", "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEHOST\n-----END OPENSSH PRIVATE KEY-----\n"),
+    escLine(
+      "TERMINATOR_HOST_KEY",
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEHOST\n-----END OPENSSH PRIVATE KEY-----\n",
+    ),
   ].join("\n") + "\n";
 const SSH_DOCKER_STUB = [
   'import { appendFileSync, readFileSync } from "node:fs";',
@@ -556,11 +572,17 @@ test("provisions the SSH front door's coupled key material", () => {
   const r = runSshStubbed("ONECLI_EXTERNAL_URL=http://box.example:10254\n");
   assert.match(r.env, /^SSH_CA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n/m);
   assert.match(r.env, /^TERMINATOR_CA_PUBLIC_KEY="ssh-ed25519 FAKECALINE"$/m);
-  assert.match(r.env, /^TERMINATOR_HOST_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\\n/m);
+  assert.match(
+    r.env,
+    /^TERMINATOR_HOST_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\\n/m,
+  );
   // SSH_HOST derives from the external URL's hostname; SSH_PORT is NEVER
   // written here (compose's ONECLI_SSH_PORT is the single knob).
   assert.match(r.env, /^SSH_HOST=box\.example$/m);
-  assert.ok(!/^SSH_PORT=/m.test(r.env), "SSH_PORT must not be written by the compose door");
+  assert.ok(
+    !/^SSH_PORT=/m.test(r.env),
+    "SSH_PORT must not be written by the compose door",
+  );
   // Each multi-line PEM is ONE physical line (\n-escaped), never raw newlines.
   for (const line of r.env.split("\n"))
     assert.ok(!line.startsWith("-----"), "a PEM leaked as a raw line: " + line);
