@@ -106,6 +106,17 @@ describe("markdownToMrkdwn", () => {
     expect(markdownToMrkdwn("*done*")).toBe("_done_");
   });
 
+  it("leaves free-standing markers alone (operators are not emphasis)", () => {
+    expect(markdownToMrkdwn("x ** 2 + y ** 2 is the squared norm")).toBe(
+      "x ** 2 + y ** 2 is the squared norm",
+    );
+    expect(markdownToMrkdwn("a __ b __ c")).toBe("a __ b __ c");
+    expect(markdownToMrkdwn("5 ~~ 6 and 7 ~~ 8")).toBe("5 ~~ 6 and 7 ~~ 8");
+    expect(markdownToMrkdwn("a**b**c, __d e__ and ~~f~~")).toBe(
+      "a*b*c, *d e* and ~f~",
+    );
+  });
+
   it("keeps multi-line emphasis literal instead of corrupting the lines between", () => {
     expect(markdownToMrkdwn("**a\nb** end")).toBe("**a\nb** end");
     expect(markdownToMrkdwn("***\n**bold**")).toBe("\n*bold*");
@@ -325,6 +336,18 @@ describe("GFM tables", () => {
     );
     expect(out).toContain("Name   State");
     expect(out).toContain("donna  old");
+  });
+
+  it("keeps operators and globs in cells and link labels", () => {
+    const out = markdownToMrkdwn(
+      "| Pattern | Note |\n|---|---|\n| *.ts and *.tsx | sources |\n| 2 * 3 * 4 | product |\n| x ** 2 + y ** 2 | norm |",
+    );
+    expect(out).toContain("*.ts and *.tsx   sources");
+    expect(out).toContain("2 * 3 * 4        product");
+    expect(out).toContain("x ** 2 + y ** 2  norm");
+    expect(markdownToMrkdwn("[2 * 3 * 4](https://example.com)")).toBe(
+      "<https://example.com|2 * 3 * 4>",
+    );
   });
 
   it("handles alignment colons and ragged rows", () => {
