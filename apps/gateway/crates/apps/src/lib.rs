@@ -354,6 +354,23 @@ static GOOGLE_REFRESH: RefreshConfig = RefreshConfig {
     stale_token_error_codes: &[],
 };
 
+/// GitHub App user access tokens can expire and their refresh tokens rotate
+/// on every refresh. Classic OAuth App tokens omit the lifetime fields and
+/// remain unaffected by the expiry-driven refresh path.
+static GITHUB_REFRESH: RefreshConfig = RefreshConfig {
+    endpoint: TokenEndpoint::Fixed {
+        url: "https://github.com/login/oauth/access_token",
+        alternates: &[],
+    },
+    requested_lifetimes: None,
+    client_id_env: "GITHUB_CLIENT_ID",
+    client_secret_env: "GITHUB_CLIENT_SECRET",
+    body_format: TokenBodyFormat::Json,
+    client_auth: ClientCredentialMethod::Body,
+    max_lifetime_secs: None,
+    stale_token_error_codes: &[],
+};
+
 /// Refresh config for Supabase Management API OAuth (uses Basic auth).
 static SUPABASE_REFRESH: RefreshConfig = RefreshConfig {
     endpoint: TokenEndpoint::Fixed {
@@ -847,7 +864,7 @@ static APP_PROVIDERS: &[AppProvider] = &[
                 credential_host_field: None,
             },
         ],
-        refresh: None,
+        refresh: Some(&GITHUB_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
         credential_params: &[],
@@ -4289,6 +4306,112 @@ mod tests {
                 value: "Bearer ghp_test123".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn github_oauth_refresh_uses_github_token_endpoint_and_json_client_auth() {
+        let config = refresh_config("github").expect("github should have refresh config");
+        assert_eq!(
+            config
+                .endpoint_for_connection(&serde_json::json!({}))
+                .as_deref(),
+            Some("https://github.com/login/oauth/access_token")
+        );
+        assert!(matches!(config.body_format, TokenBodyFormat::Json));
+        assert!(matches!(config.client_auth, ClientCredentialMethod::Body));
+        assert_eq!(config.client_id_env, "GITHUB_CLIENT_ID");
+        assert_eq!(config.client_secret_env, "GITHUB_CLIENT_SECRET");
+    }
+
+    #[tokio::test]
+    async fn github_refresh_sends_saved_refresh_token_and_returns_rotated_pair() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local token endpoint");
+        let addr = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept refresh request");
+            let mut reader = BufReader::new(socket);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read request header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some(value) = line
+                    .strip_prefix("content-length:")
+                    .or_else(|| line.strip_prefix("Content-Length:"))
+                {
+                    content_length = value.trim().parse::<usize>().expect("content length");
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader
+                .read_exact(&mut body)
+                .await
+                .expect("read JSON request body");
+            let request: serde_json::Value =
+                serde_json::from_slice(&body).expect("refresh request JSON");
+
+            let mut socket = reader.into_inner();
+            let response = serde_json::json!({
+                "access_token": "new-access-token",
+                "expires_in": 28_800,
+                "refresh_token": "rotated-refresh-token",
+                "refresh_token_expires_in": 15_897_600,
+                "token_type": "bearer"
+            })
+            .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response.len(),
+                        response
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write token response");
+            request
+        });
+
+        let token_url: &'static str = Box::leak(format!("http://{addr}/token").into_boxed_str());
+        let config = RefreshConfig {
+            endpoint: TokenEndpoint::Fixed {
+                url: token_url,
+                alternates: &[],
+            },
+            requested_lifetimes: None,
+            client_id_env: "ONECLI_GITHUB_REFRESH_TEST_UNSET_ID",
+            client_secret_env: "ONECLI_GITHUB_REFRESH_TEST_UNSET_SECRET",
+            body_format: TokenBodyFormat::Json,
+            client_auth: ClientCredentialMethod::Body,
+            max_lifetime_secs: None,
+            stale_token_error_codes: &[],
+        };
+
+        let result = refresh_access_token(
+            &config,
+            "old-refresh-token",
+            Some("test-client-id"),
+            Some("test-client-secret"),
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("refresh succeeds");
+        let request = server.await.expect("server task");
+
+        assert_eq!(request["grant_type"], "refresh_token");
+        assert_eq!(request["client_id"], "test-client-id");
+        assert_eq!(request["client_secret"], "test-client-secret");
+        assert_eq!(request["refresh_token"], "old-refresh-token");
+        assert_eq!(result.0, "new-access-token");
+        assert!(result.1 > 0);
+        assert_eq!(result.2.as_deref(), Some("rotated-refresh-token"));
     }
 
     #[test]

@@ -98,6 +98,9 @@ export const github: AppDefinition = {
 
       const tokenData = (await tokenRes.json()) as {
         access_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        refresh_token_expires_in?: number;
         scope?: string;
         token_type?: string;
         error?: string;
@@ -114,6 +117,17 @@ export const github: AppDefinition = {
         access_token: tokenData.access_token,
         token_type: tokenData.token_type,
       };
+      if (tokenData.refresh_token) {
+        credentials.refresh_token = tokenData.refresh_token;
+        if (tokenData.expires_in) {
+          credentials.expires_at =
+            Math.floor(Date.now() / 1000) + tokenData.expires_in;
+        }
+        if (tokenData.refresh_token_expires_in) {
+          credentials.refresh_token_expires_at =
+            Math.floor(Date.now() / 1000) + tokenData.refresh_token_expires_in;
+        }
+      }
       const scopes = tokenData.scope?.split(",").filter(Boolean) ?? [];
 
       let metadata: Record<string, unknown> | undefined;
