@@ -50,9 +50,6 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "app-availability/_components/rule-card.tsx",
     "app-availability/_components/rule-list.tsx",
     "app-availability/api.ts",
-    "app-availability/app-availability-page.cloud.test.tsx",
-    "app-availability/app-availability-page.onprem.test.tsx",
-    "app-availability/app-availability-page.tsx",
     "app-availability/use-app-availability.ts",
     "apps/request-app-action.ts",
     "apps/request-app-dialog.tsx",
@@ -70,22 +67,18 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "auth/turnstile-script.ts",
     "auth/use-turnstile.test.tsx",
     "auth/use-turnstile.ts",
-    "billing/_components/agents-quota-warning.tsx",
     "billing/_components/api-requests-content.tsx",
     "billing/_components/billing-interval-toggle.tsx",
     "billing/_components/current-plan-card.tsx",
     "billing/_components/info-tip.tsx",
-    "billing/_components/integration-calls-warning.tsx",
     "billing/_components/over-quota-banner.tsx",
     "billing/_components/payment-issue-banner.test.tsx",
     "billing/_components/payment-issue-banner.tsx",
-    "billing/_components/plan-badge.tsx",
     "billing/_components/plan-paywall-dialog.tsx",
     "billing/_components/plan-switch-dialog.tsx",
     "billing/_components/plan-usage-content.tsx",
     "billing/_components/quota-limit-dialog.tsx",
     "billing/_components/security-trust-bar.tsx",
-    "billing/_components/sidebar-quota.tsx",
     "billing/_components/upgrade-to-team-button.tsx",
     "billing/_components/usage-bar.tsx",
     "billing/actions.ts",
@@ -115,6 +108,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "desktop/clipboard/desktop-clipboard.ts",
     "desktop/clipboard/novnc-clipboard.test.ts",
     "desktop/desktop-ask-line.tsx",
+    "desktop/desktop-chat-stage.tsx",
     "desktop/desktop-control-pill.test.tsx",
     "desktop/desktop-control-pill.tsx",
     "desktop/desktop-dock-card.tsx",
@@ -123,7 +117,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "desktop/desktop-header-chip.tsx",
     "desktop/desktop-placeholder.tsx",
     "desktop/desktop-screen.tsx",
-    "desktop/desktop-theater-overlay.tsx",
+    "desktop/desktop-status-dot.tsx",
     "desktop/desktop-theater-page.test.tsx",
     "desktop/desktop-theater-page.tsx",
     "desktop/desktop-theater.tsx",
@@ -164,6 +158,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "groups/groups-page.tsx",
     "policy-editor/_components/resource-scope-fields.tsx",
     "review/reviewer-login-page.tsx",
+    "settings/_components/add-identity-provider-dialog.tsx",
     "settings/_components/copyable-value.tsx",
     "settings/_components/delete-org-card.tsx",
     "settings/_components/domain-txt-record.tsx",
@@ -175,7 +170,9 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "settings/_components/scim-card.tsx",
     "settings/_components/sso-connection-details.tsx",
     "settings/_components/sso-it-panel.tsx",
+    "settings/_components/sso-panel.tsx",
     "settings/_components/sso-setup-form.tsx",
+    "settings/_components/sso-tabs.tsx",
     "settings/actions.ts",
     "settings/org-general-page.tsx",
     "settings/org-sso-page.tsx",
@@ -197,6 +194,7 @@ exports[`enterprise-license boundary > the licensed file set changes only by del
     "slack-read/slack-read-tile.tsx",
     "slack-read/your-slack-row.test.tsx",
     "slack-read/your-slack-row.tsx",
+    "team/_components/claim-form.test.tsx",
     "team/_components/claim-form.tsx",
     "team/_components/claim-hero.tsx",
     "team/_components/claim-sign-in.tsx",
@@ -1001,9 +999,6 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "TurnstileOptions",
     "useTurnstile",
   ],
-  "apps/web/src/ee/billing/_components/agents-quota-warning.tsx": [
-    "AgentsQuotaWarning",
-  ],
   "apps/web/src/ee/billing/_components/api-requests-content.tsx": [
     "ApiRequestsContent",
   ],
@@ -1018,17 +1013,11 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   "apps/web/src/ee/billing/_components/info-tip.tsx": [
     "InfoTip",
   ],
-  "apps/web/src/ee/billing/_components/integration-calls-warning.tsx": [
-    "IntegrationCallsWarning",
-  ],
   "apps/web/src/ee/billing/_components/over-quota-banner.tsx": [
     "OverQuotaBanner",
   ],
   "apps/web/src/ee/billing/_components/payment-issue-banner.tsx": [
     "PaymentIssueBanner",
-  ],
-  "apps/web/src/ee/billing/_components/plan-badge.tsx": [
-    "PlanBadge",
   ],
   "apps/web/src/ee/billing/_components/plan-paywall-dialog.tsx": [
     "PlanPaywallDialog",
@@ -1046,9 +1035,6 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   ],
   "apps/web/src/ee/billing/_components/security-trust-bar.tsx": [
     "SecurityTrustBar",
-  ],
-  "apps/web/src/ee/billing/_components/sidebar-quota.tsx": [
-    "SidebarQuota",
   ],
   "apps/web/src/ee/billing/_components/upgrade-to-team-button.tsx": [
     "UpgradeToTeamButton",
@@ -1143,6 +1129,10 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   "apps/web/src/ee/desktop/desktop-ask-line.tsx": [
     "DesktopAskLine",
   ],
+  "apps/web/src/ee/desktop/desktop-chat-stage.tsx": [
+    "DesktopChatStage",
+    "DesktopChatStageProps",
+  ],
   "apps/web/src/ee/desktop/desktop-control-pill.tsx": [
     "DesktopControlPill",
     "DesktopControlPillProps",
@@ -1168,9 +1158,9 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "SCREEN_TRANSITION_NAME",
     "streamHostOf",
   ],
-  "apps/web/src/ee/desktop/desktop-theater-overlay.tsx": [
-    "DesktopTheaterOverlay",
-    "DesktopTheaterOverlayProps",
+  "apps/web/src/ee/desktop/desktop-status-dot.tsx": [
+    "DesktopStatusDot",
+    "desktopStatusLabel",
   ],
   "apps/web/src/ee/desktop/desktop-theater-page.tsx": [
     "DesktopTheaterPage",
@@ -1290,6 +1280,9 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
     "ResourceScopeFields",
     "ResourceScopeFieldsProps",
   ],
+  "apps/web/src/ee/settings/_components/add-identity-provider-dialog.tsx": [
+    "AddIdentityProviderDialog",
+  ],
   "apps/web/src/ee/settings/_components/copyable-value.tsx": [
     "CopyableValue",
   ],
@@ -1324,8 +1317,15 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   "apps/web/src/ee/settings/_components/sso-it-panel.tsx": [
     "SsoItPanel",
   ],
+  "apps/web/src/ee/settings/_components/sso-panel.tsx": [
+    "SsoPanelHeader",
+  ],
   "apps/web/src/ee/settings/_components/sso-setup-form.tsx": [
     "SsoSetupForm",
+    "SsoType",
+  ],
+  "apps/web/src/ee/settings/_components/sso-tabs.tsx": [
+    "SsoTabs",
   ],
   "apps/web/src/ee/settings/actions.ts": [
     "createOrganizationAction",
@@ -1422,7 +1422,6 @@ exports[`enterprise-license boundary > the licensed symbol set changes only by d
   "apps/web/src/ee/team/actions.ts": [
     "changeTeamMemberRole",
     "getOrgSubscriptionStatus",
-    "getUserOrgRole",
   ],
   "apps/web/src/ee/workspaces/_components/workspace-access-card.tsx": [
     "WorkspaceAccessCard",

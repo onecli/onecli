@@ -168,4 +168,18 @@ describe("ChatThread send pin", () => {
     expect(generating(thread({ pending: { message: "ask" } }))).toBe("true");
     expect(generating(thread({}))).toBe("false");
   });
+
+  it("answers a fresh send with Thinking… at once, but not a follow-up", () => {
+    // The gap between send and the turn row landing is otherwise silent.
+    thread({ pending: { message: "ask" }, pinnedSend: true });
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+  });
+
+  it("leaves a follow-up's caption to the live run", () => {
+    thread({
+      turns: [turn("t1"), turn("t2", "running")],
+      pending: { message: "follow-up" },
+    });
+    expect(screen.queryByText("Thinking…")).toBeNull();
+  });
 });

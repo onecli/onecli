@@ -1,8 +1,9 @@
 "use client";
 
+import { PageHeader } from "@dashboard/page-header";
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { CalendarClock, Loader2, Play, Square } from "lucide-react";
+import { CalendarClock, Play, Square } from "lucide-react";
 import { toast } from "sonner";
 import { isActiveEvalRun } from "@onecli/api/validations/evals";
 import { Button } from "@onecli/ui/components/button";
@@ -21,6 +22,7 @@ import { RunResults } from "./run-results";
 import { ScheduleDialog } from "./schedule-dialog";
 import { ScheduleSummary } from "./schedule-summary";
 import { useAgentEvalApps } from "./use-agent-eval-apps";
+import { SectionSkeleton } from "@/lib/dashboard/shell/section-skeleton";
 
 /**
  * The agent's Evals: test questions with known answers, asked of the live
@@ -52,13 +54,7 @@ export const EvalsSection = () => {
     (view.data?.questions.length ?? 0) > 0,
   );
 
-  if (view.isPending)
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 className="text-muted-foreground size-5 animate-spin" />
-        <span className="sr-only">Loading evals</span>
-      </div>
-    );
+  if (view.isPending) return <SectionSkeleton label="Loading evals" />;
   if (view.isError)
     return (
       <div
@@ -96,48 +92,46 @@ export const EvalsSection = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold">Evals</h2>
-          <p className="text-muted-foreground text-sm">
-            Ask your agent questions you know the answers to, and see what
-            changed after you edit it.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {!schedule && (
-            <Button size="sm" variant="outline" onClick={openSchedule}>
-              <CalendarClock />
-              Schedule
-            </Button>
-          )}
-          {activeRun && (
+      <PageHeader
+        title="Evals"
+        character="cloud-think"
+        description="Ask your agent questions you know the answers to, and see what changed after you edit it."
+        action={
+          <div className="flex flex-wrap gap-2">
+            {!schedule && (
+              <Button size="sm" variant="outline" onClick={openSchedule}>
+                <CalendarClock />
+                Schedule
+              </Button>
+            )}
+            {activeRun && (
+              <Button
+                size="sm"
+                variant="outline"
+                loading={stop.isPending}
+                onClick={() =>
+                  stop.mutate(activeRun.id, {
+                    onSuccess: () => toast.success("Tests stopped"),
+                    onError: (error) => toast.error(error.message),
+                  })
+                }
+              >
+                {!stop.isPending && <Square />}
+                Stop
+              </Button>
+            )}
             <Button
               size="sm"
-              variant="outline"
-              loading={stop.isPending}
-              onClick={() =>
-                stop.mutate(activeRun.id, {
-                  onSuccess: () => toast.success("Tests stopped"),
-                  onError: (error) => toast.error(error.message),
-                })
-              }
+              disabled={questions.length === 0}
+              loading={busy}
+              onClick={runTests}
             >
-              {!stop.isPending && <Square />}
-              Stop
+              {!busy && <Play />}
+              {busy ? "Running tests…" : "Run tests"}
             </Button>
-          )}
-          <Button
-            size="sm"
-            disabled={questions.length === 0}
-            loading={busy}
-            onClick={runTests}
-          >
-            {!busy && <Play />}
-            {busy ? "Running tests…" : "Run tests"}
-          </Button>
-        </div>
-      </div>
+          </div>
+        }
+      />
 
       {schedule && (
         <ScheduleSummary schedule={schedule} onEdit={openSchedule} />

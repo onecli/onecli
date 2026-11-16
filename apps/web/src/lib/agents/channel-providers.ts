@@ -46,7 +46,6 @@ export interface AttachCardProps {
   posture: { transport: ChannelTransport; available?: ChannelTransport[] };
   pendingTransport?: ChannelTransport;
   hasOrgCredentials: boolean;
-  organizationId: string;
   viewerIsOrgAdmin: boolean;
   resuming: boolean;
   removed: boolean;
@@ -70,10 +69,6 @@ export interface ChannelProviderUi extends ChannelProviderDisplay {
   id: string;
   PresenceCard: ComponentType<PresenceCardProps>;
   AttachCard: ComponentType<AttachCardProps>;
-  /** Optional: a pointer under a connected presence to where people's own
-   * accounts are managed (Contacts, "acts as you"; licensed). Rendered only
-   * when the instance is entitled. */
-  ReadAccessCard?: ComponentType<{ agentId: string; agentName: string }>;
 }
 
 /**

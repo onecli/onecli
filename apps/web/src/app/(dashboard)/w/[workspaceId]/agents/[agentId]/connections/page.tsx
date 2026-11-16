@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 import { AgentConnectionsSection } from "../_components/agent-connections-section";
+import { AgentAppsHeader } from "../_components/agent-apps-header";
 import { AttachParamDialog } from "../_components/attach-param-dialog";
 
 export const metadata: Metadata = {
@@ -18,6 +19,7 @@ export default async function AgentConnectionsPage({ params }: Props) {
   const { agentId } = await params;
   return (
     <Suspense>
+      <AgentAppsHeader />
       <AgentConnectionsSection agentId={agentId} />
       <AttachParamDialog />
     </Suspense>

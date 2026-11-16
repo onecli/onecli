@@ -158,14 +158,17 @@ export const AppConfigForm = ({
   }, [hasStatus, settings]);
 
   // On first load, open the section by default when custom credentials are
-  // enabled or there are no platform defaults to fall back on. Adjusted during
-  // render (guarded) so the section mounts already-open — no open/close flash;
-  // never overrides an explicit reveal() or later refetches.
+  // enabled, or when there is nothing to fall back on AND nothing connected
+  // yet (the page's only next step is these fields). A connected app keeps
+  // it collapsed: the accounts are the page, the form is a footnote.
+  // Adjusted during render (guarded) so the section mounts already-open,
+  // no open/close flash; never overrides an explicit reveal() or later
+  // refetches.
   if (!loading && !openInitialized) {
     setOpenInitialized(true);
     // Org-inherited credentials behave like platform defaults here: the app is
     // usable without workspace-level setup, so the section stays collapsed.
-    if (enabled || (!hasEnvDefaults && !orgInherited)) {
+    if (enabled || (!hasEnvDefaults && !orgInherited && !isConnected)) {
       setOpenValue("credentials");
     }
   }
@@ -307,16 +310,17 @@ export const AppConfigForm = ({
           </span>
         </AccordionTrigger>
         <AccordionContent className="pb-1">
-          <Card className="p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">
+          <Card className="gap-4 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 space-y-0.5">
+                <p
+                  id={`${idPrefix}-custom-label`}
+                  className="text-sm font-medium"
+                >
                   Use your own developer credentials
                 </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {scopeNote}
-                </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
+                <p className="text-muted-foreground text-xs">
+                  {scopeNote}{" "}
                   {enabled
                     ? "Your custom credentials are active."
                     : hasCredentials
@@ -333,7 +337,12 @@ export const AppConfigForm = ({
                   />
                 )}
               </div>
-              <Switch checked={enabled} onCheckedChange={handleToggle} />
+              <Switch
+                checked={enabled}
+                onCheckedChange={handleToggle}
+                aria-labelledby={`${idPrefix}-custom-label`}
+                className="mt-0.5"
+              />
             </div>
 
             {/* Guide, then the URI to register, then the credentials it

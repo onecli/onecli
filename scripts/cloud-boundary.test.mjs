@@ -278,7 +278,7 @@ const CLOUD_IMPLEMENTATION_TERMS = [
   /\bkata guests?\b/i,
   ...SUBSTRATE_LITERALS,
   /#1300\b/,
-  /(^|[^\w#&])#(803|834|1335|1375|1401|1412|1470|1495)\b/,
+  /(^|[^\w#&])#(783|803|834|869|1335|1375|1401|1412|1470|1495)\b/,
   // The hosted agent desktop is licensed hosted-platform code: its plan and
   // the screen server it runs are named only inside ee/ and cloud-only dirs.
   /\bplans\/desktop-takeover\b/,

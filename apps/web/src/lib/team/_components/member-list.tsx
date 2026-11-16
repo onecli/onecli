@@ -225,7 +225,11 @@ export const MemberList = ({
                     {isYou && !isOwner ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label="Your membership"
+                          >
                             <MoreVertical className="size-4" />
                           </Button>
                         </DropdownMenuTrigger>
@@ -245,7 +249,11 @@ export const MemberList = ({
                       !isYou && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={`Manage ${member.email}`}
+                            >
                               <MoreVertical className="size-4" />
                             </Button>
                           </DropdownMenuTrigger>

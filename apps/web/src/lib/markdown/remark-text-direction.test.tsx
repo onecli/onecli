@@ -28,7 +28,11 @@ describe("remarkTextDirection via ChatMarkdown", () => {
   it("renders a Hebrew answer RTL, keeping English-only paragraphs and code LTR", () => {
     const { container } = render(<ChatMarkdown text={HEBREW_ANSWER} />);
     expect(container.firstElementChild).toHaveAttribute("dir", "rtl");
-    const paragraphs = [...container.querySelectorAll(":scope > div > p")];
+    // Top-level paragraphs only (not ones inside a list or quote), however
+    // deep the renderer's own wrappers nest them.
+    const paragraphs = [...container.querySelectorAll("p")].filter(
+      (p) => !p.closest("li, blockquote"),
+    );
     expect(paragraphs.map((p) => p.getAttribute("dir"))).toEqual([
       "rtl",
       "ltr",

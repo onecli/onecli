@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { GET_PROPERTIES } from "./get-property";
 import { REF, ROLE } from "./target";
 
 /**
@@ -36,15 +37,44 @@ const url = z.string().min(1).max(8_192);
 const text = z.string().max(65_536);
 const key = z.string().min(1).max(64);
 const scrollDirection = z.enum(["down", "up"]);
+/** A filesystem path as the agent typed it; the daemon resolves and contains it. */
+const filePath = z.string().min(1).max(4_096);
 
 export const requestSchema = z.discriminatedUnion("verb", [
   z.object({ verb: z.literal("open"), url }),
-  z.object({ verb: z.literal("snapshot"), full: z.boolean().optional() }),
+  z.object({
+    verb: z.literal("snapshot"),
+    full: z.boolean().optional(),
+    /** Only this element's subtree (a form, a dialog, a table). */
+    within: targetSchema.optional(),
+  }),
   z.object({ verb: z.literal("click"), target: targetSchema }),
-  z.object({ verb: z.literal("type"), target: targetSchema, text }),
+  z.object({
+    verb: z.literal("type"),
+    target: targetSchema,
+    text,
+    /**
+     * The text is a secret (read from stdin): a reply about it never
+     * repeats it, and neither does a refusal.
+     */
+    secret: z.boolean().optional(),
+  }),
   z.object({ verb: z.literal("press"), key }),
   z.object({ verb: z.literal("select"), target: targetSchema, value: text }),
   z.object({ verb: z.literal("hover"), target: targetSchema }),
+  z.object({ verb: z.literal("check"), target: targetSchema }),
+  z.object({ verb: z.literal("uncheck"), target: targetSchema }),
+  z.object({
+    verb: z.literal("upload"),
+    target: targetSchema,
+    /** Absolute (the command resolves them against its cwd); the daemon contains them under the home. */
+    paths: z.array(filePath).min(1).max(32),
+  }),
+  z.object({
+    verb: z.literal("get"),
+    property: z.enum(GET_PROPERTIES),
+    target: targetSchema,
+  }),
   z.object({
     verb: z.literal("scroll"),
     direction: scrollDirection,
@@ -55,7 +85,9 @@ export const requestSchema = z.discriminatedUnion("verb", [
   z.object({ verb: z.literal("read") }),
   z.object({
     verb: z.literal("screenshot"),
-    path: z.string().max(4_096).optional(),
+    path: filePath.optional(),
+    /** The whole scroll height, not just the viewport. */
+    full: z.boolean().optional(),
   }),
   z.object({ verb: z.literal("tabs") }),
   z.object({ verb: z.literal("tab"), id: z.string().min(1).max(32) }),
@@ -70,6 +102,13 @@ export const requestSchema = z.discriminatedUnion("verb", [
     ms: z.number().int().positive().max(60_000).optional(),
   }),
   z.object({ verb: z.literal("eval"), js: text }),
+  /** Answer the JavaScript dialog (confirm, prompt) the page is holding. */
+  z.object({
+    verb: z.literal("dialog"),
+    answer: z.enum(["accept", "dismiss"]),
+    /** What a prompt is answered with (accept only). */
+    text: z.string().max(4_096).optional(),
+  }),
   z.object({ verb: z.literal("stop") }),
 ]);
 export type Request = z.infer<typeof requestSchema>;
@@ -104,6 +143,19 @@ export interface ModalInfo {
   actions: ModalAction[];
 }
 
+/**
+ * A JavaScript dialog (`confirm`, `prompt`) the page raised and the driver
+ * is HOLDING: the page is stopped on it until the agent answers with
+ * `dialog accept` or `dialog dismiss`. An `alert` is never held: it has
+ * one answer, and the driver gives it (`dialog` on the reply).
+ */
+export interface PendingDialog {
+  type: "confirm" | "prompt";
+  message: string;
+  /** A prompt's prefilled answer. */
+  defaultValue?: string;
+}
+
 /** What the daemon answers. `ok: false` carries one short, actionable error. */
 export type Reply =
   | {
@@ -120,8 +172,20 @@ export type Reply =
       tabs?: TabInfo[];
       /** `eval`'s JSON result. */
       value?: unknown;
+      /**
+       * What `get` read, printed as is and alone (no url or title line), so
+       * `$(onecli-browser get value e3)` is the value. Null when the element
+       * has no such thing (a `value` of a heading, an `href` off a link).
+       */
+      got?: string | null;
       /** A JavaScript dialog the page raised and the driver answered. */
       dialog?: string;
+      /**
+       * A JavaScript dialog the page raised that the driver is holding for
+       * the agent to answer. While it is set, the page is stopped: no other
+       * field of this reply was read from it, and no other verb runs.
+       */
+      pending?: PendingDialog;
       /**
        * The page's own dialogs blocking it now ("Quota exceeded"): an
        * agent that acts past one is clicking behind it.

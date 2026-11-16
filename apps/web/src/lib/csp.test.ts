@@ -78,7 +78,9 @@ describe("buildCsp", () => {
       "'self' 'unsafe-inline' https://fonts.googleapis.com",
     );
     expect(map.get("font-src")).toBe("'self' https://fonts.gstatic.com");
-    expect(map.get("img-src")).toBe("'self' data: blob: https:");
+    // Plus the api's own origin: avatars are served from it, and on an http
+    // (local / self-host) deployment `https:` alone would block them.
+    expect(map.get("img-src")).toMatch(/^'self' data: blob: https: \S+$/);
     expect(map.get("frame-src")).toBe("https://js.stripe.com");
     expect(map.get("frame-ancestors")).toBe("'none'");
     expect(map.get("base-uri")).toBe("'self'");

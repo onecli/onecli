@@ -37,10 +37,6 @@ export interface Agent {
   lastSeenAt: string | null;
   /** The avatar's public (key-fenced) URL, or null for the default mark. */
   imageUrl?: string | null;
-  /** Live background work is holding this agent's computer up right now
-   * (step 13's held-awake signal, in agent vocabulary). Optional: an older
-   * API answers without it, and absent must read as false, never a crash. */
-  workingInBackground?: boolean;
 }
 
 export interface CreatedAgent {
@@ -94,9 +90,6 @@ export interface AgentDetail {
   recentRequestAt: string | null;
   /** The avatar's public (key-fenced) URL, or null for the default mark. */
   imageUrl?: string | null;
-  /** Live background work is holding this agent's computer up right now
-   * (step 13's held-awake signal). Optional for older APIs; absent = false. */
-  workingInBackground?: boolean;
 }
 
 export interface DropboxFolder {

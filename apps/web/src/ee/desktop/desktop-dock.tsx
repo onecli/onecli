@@ -13,7 +13,7 @@ import { useDesktop } from "./use-desktop";
 import { agentComputerPath } from "@/lib/navigation";
 import { DesktopDockCard } from "./desktop-dock-card";
 import { registerDock } from "./dock-registry";
-import { DesktopTheaterOverlay } from "./desktop-theater-overlay";
+import { DesktopChatStage } from "./desktop-chat-stage";
 import { transitionDesktop } from "./desktop-transition";
 import { useCardFits, useDesktopDockPrefs } from "./use-desktop-dock-prefs";
 import { useThrowable, type DockCorner } from "./use-throwable";
@@ -37,9 +37,10 @@ export interface DesktopDockHandle {
   expand: () => void;
 }
 
-/** The card and theater own mutually exclusive stream lifetimes. The card
+/** The card and the stage own mutually exclusive stream lifetimes. The card
  * rests in a corner of the chat and can be thrown to another (useThrowable);
- * the chat is the only place it may go. Minimized, nothing floats over the
+ * the chat is the only place it may go. Expanded, it grows to fill the chat
+ * above the composer (DesktopChatStage). Minimized, nothing floats over the
  * chat: the agent header's Computer button is the way back, reached through
  * the dock registry while this dock is mounted. */
 export const DesktopDock = ({
@@ -90,10 +91,15 @@ export const DesktopDock = ({
   const restoreFocus = useCallback(() => {
     const target = opener.current?.isConnected
       ? opener.current
-      : (dock.current?.querySelector("button") ??
+      : (dock.current?.querySelector<HTMLElement>("[data-desktop-card-open]") ??
         document.querySelector<HTMLElement>("[data-desktop-header-chip]"));
     target?.focus({ preventScroll: true });
   }, []);
+
+  const collapse = useCallback(() => {
+    changeOpen(false);
+    requestAnimationFrame(restoreFocus);
+  }, [changeOpen, restoreFocus]);
 
   const ready = data !== undefined && cardFits !== null;
   const showCard = ready && prefs.mode === "card" && cardFits;
@@ -104,7 +110,7 @@ export const DesktopDock = ({
     // The header button leaves as the card arrives: focus follows it.
     requestAnimationFrame(() =>
       dock.current
-        ?.querySelector<HTMLElement>("button")
+        ?.querySelector<HTMLElement>("[data-desktop-card-open]")
         ?.focus({ preventScroll: true }),
     );
   }, [update]);
@@ -150,10 +156,11 @@ export const DesktopDock = ({
   useEffect(() => {
     if (!ready) return;
     return registerDock(agentId, {
-      cardShowing: cardOnScreen,
+      // Grown to fill the chat counts too: the header needs no opener then.
+      cardShowing: cardOnScreen || expanded,
       show: opensTheater ? expand : restore,
     });
-  }, [agentId, ready, cardOnScreen, opensTheater, expand, restore]);
+  }, [agentId, ready, cardOnScreen, expanded, opensTheater, expand, restore]);
 
   if (!data || cardFits === null) return null;
   return (
@@ -183,20 +190,21 @@ export const DesktopDock = ({
           </div>
         )}
       </div>
-      <DesktopTheaterOverlay
-        agentId={agentId}
-        agentName={agentName}
-        state={data}
-        open={expanded}
-        onOpenChange={changeOpen}
-        onRestoreFocus={restoreFocus}
-        onPopOut={() => {
-          update({ mode: "chip" });
-          setExpanded(false);
-        }}
-        theaterHref={theaterHref}
-        chatHost={theaterChatHost}
-      />
+      {expanded && (
+        <div className="absolute inset-0 z-20">
+          <DesktopChatStage
+            agentId={agentId}
+            agentName={agentName}
+            state={data}
+            onClose={collapse}
+            onPopOut={() => {
+              update({ mode: "chip" });
+              setExpanded(false);
+            }}
+            theaterHref={theaterHref}
+          />
+        </div>
+      )}
     </>
   );
 };

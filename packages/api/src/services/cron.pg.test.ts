@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { grantModelKey } from "../testing/model-key-grant.js";
 import { MODEL_PROVIDER_ERROR_MESSAGE } from "../validations/conversation.js";
 
 /**
@@ -180,39 +181,8 @@ const seedAgent = async (suffix: string, workspaceId = WORKSPACE) => {
   return agent.id;
 };
 
-/** Door-1 pass: an injectable LLM key, seeded the way the product does it. */
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
+const grantLlmKey = (agentId: string, suffix: string) =>
+  grantModelKey(db, { workspaceId: WORKSPACE, agentId, name: `${P}${suffix}` });
 
 const seedSandbox = async (suffix: string, agentId: string, status: string) => {
   await db.sandbox.create({

@@ -1,15 +1,16 @@
-"use client";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-import { BitwardenSetup } from "../../_components/bitwarden-setup";
-import { VaultPageFrame } from "../../_components/vault-page-frame";
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
 
-export default function BitwardenPage() {
-  return (
-    <VaultPageFrame
-      title="Bitwarden"
-      description="Fetch credentials on-demand from your Bitwarden vault. Nothing is stored on the server."
-    >
-      <BitwardenSetup />
-    </VaultPageFrame>
-  );
+/** An old URL: Settings > Apps, the Bitwarden setup
+ *  (`?settings=apps&vault=bitwarden`). */
+export default async function BitwardenPage({ params, searchParams }: Props) {
+  const { workspaceId } = await params;
+  await redirectToSettingsModal({ workspaceId }, "apps", {
+    ...(await searchParams),
+    vault: "bitwarden",
+  });
 }

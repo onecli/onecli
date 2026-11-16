@@ -21,9 +21,12 @@ export const confluence: AppDefinition = {
       "read:confluence-content.all",
       "write:confluence-content",
       "read:confluence-space.summary",
+      "search:confluence",
       "read:page:confluence",
       "read:space:confluence",
       "write:page:confluence",
+      "delete:page:confluence",
+      "write:comment:confluence",
       "read:content:confluence",
     ],
     permissions: [
@@ -46,6 +49,15 @@ export const confluence: AppDefinition = {
         access: "read",
       },
       {
+        // CQL search (/wiki/rest/api/search) accepts only this scope (or the
+        // granular read:content-details:confluence). Without it Atlassian
+        // answers 401 "scope does not match", while page reads still work.
+        scope: "search:confluence",
+        name: "Search content",
+        description: "Find pages, blogs, and comments with CQL search",
+        access: "read",
+      },
+      {
         scope: "read:page:confluence",
         name: "Read pages (v2)",
         description: "View pages and content via the v2 REST API",
@@ -55,6 +67,21 @@ export const confluence: AppDefinition = {
         scope: "write:page:confluence",
         name: "Write pages (v2)",
         description: "Create and update pages via the v2 REST API",
+        access: "write",
+      },
+      // The v2 API takes granular scopes only, and its write scopes are split
+      // per action: write:page:confluence doesn't cover deleting a page, and
+      // no page scope covers posting a comment.
+      {
+        scope: "delete:page:confluence",
+        name: "Delete pages (v2)",
+        description: "Delete pages via the v2 REST API",
+        access: "write",
+      },
+      {
+        scope: "write:comment:confluence",
+        name: "Write comments (v2)",
+        description: "Add and edit comments via the v2 REST API",
         access: "write",
       },
       {

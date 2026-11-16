@@ -5,7 +5,7 @@ import { ServiceError } from "./errors";
 import { agentTokenIsUserVisible } from "./agent-token-visibility";
 import { agentImageUrlOrNull } from "./agent-image-service";
 import { LAST_SEEN_WINDOW_MS } from "../lib/agent-activity";
-import { agentIdsWithLiveBackgroundWork, signalWork } from "./due-work";
+import { signalWork } from "./due-work";
 import { pickRunnerForSandbox } from "./placement";
 import { requestAgentRestart, requestSandboxRespawn } from "./sandbox-service";
 import { closeRuntimeInterval } from "./runtime-ledger";
@@ -129,7 +129,7 @@ export interface CreateAgentInput {
 }
 
 export const listAgents = async (workspaceId: string) => {
-  const [agents, lastSeenRows, backgroundBusy] = await Promise.all([
+  const [agents, lastSeenRows] = await Promise.all([
     db.agent.findMany({
       where: { workspaceId },
       select: {
@@ -168,10 +168,6 @@ export const listAgents = async (workspaceId: string) => {
       },
       _max: { createdAt: true },
     }),
-    // The held-awake signal (step 13): which agents hold a box up with live
-    // background work right now. One grouped query in due-work — the same
-    // predicate the idle-stop claim enforces, so the signal cannot drift.
-    agentIdsWithLiveBackgroundWork(workspaceId),
   ]);
 
   const lastSeenByAgent = new Map(
@@ -187,7 +183,6 @@ export const listAgents = async (workspaceId: string) => {
     })),
     imageUrl: agentImageUrlOrNull(a.id, imageKey),
     lastSeenAt: lastSeenByAgent.get(a.id) ?? null,
-    workingInBackground: backgroundBusy.has(a.id),
   }));
 };
 
@@ -223,18 +218,15 @@ export const getAgentDetail = async (workspaceId: string, agentId: string) => {
   });
   if (!agent) throw new ServiceError("NOT_FOUND", "Agent not found");
 
-  const [recent, backgroundBusy] = await Promise.all([
-    db.requestLog.findFirst({
-      where: {
-        workspaceId,
-        agentId,
-        createdAt: { gte: new Date(Date.now() - RECENT_REQUEST_WINDOW_MS) },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { createdAt: true },
-    }),
-    agentIdsWithLiveBackgroundWork(workspaceId),
-  ]);
+  const recent = await db.requestLog.findFirst({
+    where: {
+      workspaceId,
+      agentId,
+      createdAt: { gte: new Date(Date.now() - RECENT_REQUEST_WINDOW_MS) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
 
   const { imageKey, ...agentRest } = agent;
   return {
@@ -245,7 +237,6 @@ export const getAgentDetail = async (workspaceId: string, agentId: string) => {
     })),
     imageUrl: agentImageUrlOrNull(agent.id, imageKey),
     recentRequestAt: recent?.createdAt ?? null,
-    workingInBackground: backgroundBusy.has(agentId),
   };
 };
 

@@ -196,7 +196,7 @@ describe("actions", () => {
     );
     expect(screen.getByRole("menuitem", { name: /View runs/ })).toHaveAttribute(
       "href",
-      "/w/ws-1/activity?tab=runs&agent=ag-1&view=webhook&webhook=wh-1",
+      "/w/ws-1/agents/ag-1/activity?view=webhook&webhook=wh-1",
     );
   });
 

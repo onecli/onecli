@@ -1,5 +1,6 @@
 import { apiFetch } from "@/lib/api-fetch";
-import { getUserDefaultOrgId } from "@/lib/auth/default-org";
+import { workspacePath } from "@/lib/navigation";
+import { defaultLandingAction } from "@/lib/workspaces/actions";
 
 export const resolveHomeRedirect = async (): Promise<string> => {
   // A provision claim in flight: same bootstrap suppression as an invitation
@@ -44,14 +45,17 @@ export const resolveHomeRedirect = async (): Promise<string> => {
   }
   const data = (await res.json()) as { workspaceId?: string };
 
-  // Validate the last-viewed-org cookie against the user's actual memberships
-  // (falls back to their first org if it's stale/foreign), so a cookie left
-  // over from a previous account can never misroute into an org they don't
-  // belong to.
-  const defaultOrgId = await getUserDefaultOrgId();
-  if (defaultOrgId) return `/org/${defaultOrgId}/workspaces`;
+  // The default org's first workspace and agent, resolved here so the home
+  // page goes straight there: through the org's workspaces URL the shell
+  // would render empty first, then forward. The org is the last-viewed one
+  // validated against the user's actual memberships (their first org when
+  // the cookie is stale or foreign), so a cookie left over from a previous
+  // account can never misroute into an org they don't belong to. A failed
+  // lookup takes `/org`, which resolves the same default server-side.
+  const home = await defaultLandingAction().catch(() => "/org");
+  if (home) return home;
 
-  if (data.workspaceId) return `/w/${data.workspaceId}`;
+  if (data.workspaceId) return workspacePath(data.workspaceId);
 
   return "/create-org";
 };

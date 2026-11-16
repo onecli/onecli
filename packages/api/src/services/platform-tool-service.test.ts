@@ -598,6 +598,56 @@ describe("the skill tools", () => {
     );
   });
 
+  it("skill_update forwards an in-place edit and audits field names only", async () => {
+    const response = await call("skill_update", {
+      name: "release-checklist",
+      edits: [
+        { find: "- Run smoke tests", replace: "- Run smoke tests\n- Tag" },
+      ],
+      append: "## Notes",
+    });
+    expect(response.ok).toBe(true);
+    expect(skillService.updateAgentSkillByName).toHaveBeenCalledWith(
+      "ag-1",
+      "org-1",
+      "release-checklist",
+      {
+        edits: [
+          { find: "- Run smoke tests", replace: "- Run smoke tests\n- Tag" },
+        ],
+        append: "## Notes",
+      },
+    );
+    // The audit names what changed, never the text.
+    expect(audit.recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: {
+          skillId: SKILL.id,
+          name: "release-checklist",
+          fields: "edits,append",
+          agentId: "ag-1",
+          viaAgent: "true",
+        },
+      }),
+    );
+  });
+
+  it("an edit that lost a race reaches the model as a retryable refusal", async () => {
+    skillService.updateAgentSkillByName.mockRejectedValue(
+      new ServiceError(
+        "CONFLICT",
+        "The skill changed while this edit was being applied. Nothing was changed",
+      ),
+    );
+    const response = await call("skill_update", {
+      name: "release-checklist",
+      append: "more",
+    });
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain("Nothing was changed");
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
   it("a no-op update audits nothing and says so", async () => {
     skillService.updateAgentSkillByName.mockResolvedValue({
       skill: SKILL,
@@ -1287,6 +1337,20 @@ describe("the webhook tools", () => {
       untouched();
     },
   );
+
+  it("a thread the owner opened inside their Slack DM is their private chat too", async () => {
+    // Sourced (not `direct`) yet owned: private like the direct thread.
+    state.conversation = {
+      id: "conv-1",
+      source: "slack",
+      direct: false,
+      userId: "user-9",
+      externalRef: "D1:1.2",
+    };
+    const response = await call("list_webhooks", {});
+    expect(response.ok).toBe(true);
+    expect(webhookService.listWebhooks).toHaveBeenCalled();
+  });
 
   it.each(ARMS)("%s refuses an automated run", async (tool, args) => {
     state.conversation = {

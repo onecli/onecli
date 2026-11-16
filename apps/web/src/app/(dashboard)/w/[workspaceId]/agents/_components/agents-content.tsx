@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { AgentIcon } from "@/lib/agents/agent-icon";
+import { Character } from "@/lib/components/character";
 import { useAgents } from "@/hooks/use-agents";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
 import { sortAgentsOldestFirst } from "@/lib/agents/agent-order";
@@ -118,9 +118,7 @@ export const AgentsContent = ({
   const hasAgents = agentList.length > 0;
   return (
     <Card className="flex flex-col items-center justify-center gap-4 py-16 text-center">
-      <div className="bg-muted flex size-12 items-center justify-center rounded-full">
-        <AgentIcon className="text-muted-foreground size-6" />
-      </div>
+      <Character name="cloud" size={72} className="-mb-1" />
       <div>
         <p className="text-sm font-medium">
           {hasAgents ? "Create an agent" : "No agents yet"}

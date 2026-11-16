@@ -1,19 +1,23 @@
-import { Suspense } from "react";
-import type { Metadata } from "next";
-import { ChannelsSection } from "./_components/channels-section";
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
-export const metadata: Metadata = {
-  // The rail says "Slack" — the provider a user recognizes — so the tab does
-  // too. The route stays `channels`: that is the provider-neutral layer.
-  title: "Slack",
-};
+interface Props {
+  params: Promise<{ workspaceId: string; agentId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
 
-/** `ChannelsSection` consumes the `?connected=slack` install-return param, so
- *  it needs the Suspense boundary `useSearchParams` requires. */
-export default function AgentChannelsPage() {
-  return (
-    <Suspense>
-      <ChannelsSection />
-    </Suspense>
+/**
+ * An old URL: the Slack card sits on top of the agent's Contacts page. The
+ * install return (`?connected=slack`) goes along, query intact.
+ */
+export default async function AgentChannelsPage({
+  params,
+  searchParams,
+}: Props) {
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(
+    workspaceId,
+    agentId,
+    "channels",
+    await searchParams,
   );
 }

@@ -404,9 +404,9 @@ const fireBucket = async (bucket: WakeBucket): Promise<void> => {
 };
 
 /**
- * Partition the claimed watches: direct-origin watches whose fence passes
+ * Partition the claimed watches: private-origin watches whose fence passes
  * group into per-conversation buckets (one consolidated in-origin turn
- * each); no-origin, non-direct-origin, and creator/owner-mismatch watches
+ * each); no-origin, shared-origin, and creator/owner-mismatch watches
  * take the hidden path unchanged. An UNAUTHORIZED subject is neither — the
  * watch is CANCELED outright (hidden-firing it would still deliver into
  * the departed subject's thread via the settle chain).
@@ -423,7 +423,7 @@ const partitionDue = async (
     originIds.length > 0
       ? await db.conversation.findMany({
           where: { id: { in: originIds } },
-          select: { id: true, agentId: true, direct: true, userId: true },
+          select: { id: true, agentId: true, userId: true },
         })
       : [];
   const byId = new Map(conversations.map((row) => [row.id, row]));
@@ -434,14 +434,14 @@ const partitionDue = async (
     const origin = watch.originConversationId
       ? byId.get(watch.originConversationId)
       : undefined;
-    // The fence: direct thread, same agent, and the creator — when one is
-    // recorded — must BE the thread owner. Platform-armed watches carry no
-    // creator (their context had no verified turn); for those the thread
-    // owner becomes the access subject, so "no foothold after access loss"
+    // The fence: a private thread (owned: the direct thread, or a DM thread
+    // opened inside it), same agent, and the creator — when one is recorded
+    // — must BE the thread owner. Platform-armed watches carry no creator
+    // (their context had no verified turn); for those the thread owner
+    // becomes the access subject, so "no foothold after access loss"
     // transfers to the person whose DM the report lands in.
     const ownerSubject =
       origin &&
-      origin.direct &&
       origin.agentId === watch.agentId &&
       origin.userId &&
       (watch.createdByUserId === null ||

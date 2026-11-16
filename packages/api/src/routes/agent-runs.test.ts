@@ -72,7 +72,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.auditCreate.mockResolvedValue({});
   mocks.listRuns.mockResolvedValue(page);
-  mocks.getRun.mockResolvedValue({ run: privateRun, viewedOthersDirect: true });
+  mocks.getRun.mockResolvedValue({
+    run: privateRun,
+    viewedOthersPrivateThread: true,
+  });
 });
 
 describe("Runs lists", () => {
@@ -155,7 +158,7 @@ describe("Runs private read audit (detail)", () => {
   it("does not audit an own or shared run", async () => {
     mocks.getRun.mockResolvedValueOnce({
       run: privateRun,
-      viewedOthersDirect: false,
+      viewedOthersPrivateThread: false,
     });
     expect((await app.request("/agent/runs/turn")).status).toBe(200);
     expect(mocks.auditCreate).not.toHaveBeenCalled();

@@ -1,10 +1,19 @@
-import { Suspense } from "react";
-import { GlobalAppsPage } from "../_components/global-apps-page";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function OrgConnectionsPage() {
-  return (
-    <Suspense>
-      <GlobalAppsPage />
-    </Suspense>
+interface Props {
+  params: Promise<{ orgId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/** An old URL: Settings > Organization > Shared apps. */
+export default async function OrgConnectionsPage({
+  params,
+  searchParams,
+}: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal(
+    { organizationId: orgId },
+    "shared-apps",
+    await searchParams,
   );
 }

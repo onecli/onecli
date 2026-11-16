@@ -9,7 +9,6 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { toast } from "sonner";
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
@@ -34,7 +33,7 @@ import {
 } from "@/hooks/use-crons";
 import type { AgentCron } from "@/lib/api";
 import type { CronOutcome } from "@onecli/api/validations/crons";
-import { agentScheduleRunsPath } from "@/lib/navigation";
+import { useAgentActivityPaths } from "@/lib/dashboard/use-agent-activity-paths";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   SCHEDULE_CELL,
@@ -73,7 +72,7 @@ export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
   const runNow = useRunCronNow(agentId);
   const { refetch } = useCrons(agentId);
   const remove = useDeleteCron(agentId);
-  const pathname = usePathname();
+  const activityPaths = useAgentActivityPaths();
   const outcome = cron.lastOutcome && OUTCOME_LABEL[cron.lastOutcome];
 
   return (
@@ -242,7 +241,7 @@ export const CronRow = ({ agentId, cron, onEdit }: CronRowProps) => {
               Edit
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
-              <Link href={agentScheduleRunsPath(pathname, agentId, cron.id)}>
+              <Link href={activityPaths.scheduleRuns(agentId, cron.id)}>
                 <History className="size-4" aria-hidden />
                 History
               </Link>

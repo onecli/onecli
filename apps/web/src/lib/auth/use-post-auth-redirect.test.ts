@@ -39,6 +39,19 @@ vi.mock("@/lib/api-fetch", () => ({
   apiFetch: (...args: unknown[]) => apiFetch(...args),
 }));
 
+// The landing lookup: where the session's workspace opens (its first
+// agent). `landing.test.ts` pins the lookup and its fallbacks.
+const postAuthLanding = vi.fn();
+vi.mock("@/lib/auth/post-auth-landing", () => ({
+  postAuthLanding: (...args: unknown[]) => postAuthLanding(...args),
+}));
+// The joined org's landing (its first agent). `landing.test.ts` pins the
+// lookup's own fallback to the org's home.
+const orgLanding = vi.fn();
+vi.mock("@/lib/dashboard/landing", () => ({
+  orgLanding: (...args: unknown[]) => orgLanding(...args),
+}));
+
 import { usePostAuthRedirect } from "./use-post-auth-redirect";
 
 const response = (ok: boolean, status: number, body: unknown) =>
@@ -53,6 +66,12 @@ const realLocation = window.location;
 beforeEach(() => {
   apiFetch.mockReset();
   replace.mockReset();
+  postAuthLanding
+    .mockReset()
+    .mockImplementation(async (ws?: string) => `/w/${ws}/agents/first/chat`);
+  orgLanding
+    .mockReset()
+    .mockImplementation(async (org: string) => `/w/ws-of-${org}/agents/a/chat`);
   assign.mockReset();
   localStorage.clear();
   Object.defineProperty(window, "location", {
@@ -148,8 +167,9 @@ describe("usePostAuthRedirect — the invitation arm", () => {
     renderHook(() => usePostAuthRedirect({ invitationToken: "tok-1" }));
 
     await waitFor(() => {
-      expect(assign).toHaveBeenCalledWith("/org/org-joined/workspaces");
+      expect(assign).toHaveBeenCalledWith("/w/ws-of-org-joined/agents/a/chat");
     });
+    expect(orgLanding).toHaveBeenCalledWith("org-joined");
     // A full navigation, not a router push: the server components below
     // rendered for someone who was not a member yet.
     expect(replace).not.toHaveBeenCalled();
@@ -224,7 +244,7 @@ describe("usePostAuthRedirect — a parked join link", () => {
     renderHook(() => usePostAuthRedirect({ invitationToken: "tok-fresh" }));
 
     await waitFor(() => {
-      expect(assign).toHaveBeenCalledWith("/org/org-fresh/workspaces");
+      expect(assign).toHaveBeenCalledWith("/w/ws-of-org-fresh/agents/a/chat");
     });
     expect(apiFetch).toHaveBeenCalledWith("/v1/auth/session?fromInvitation=1");
     expect(apiFetch).toHaveBeenCalledWith(
@@ -239,14 +259,15 @@ describe("usePostAuthRedirect — a parked join link", () => {
     );
   });
 
-  it("a plain sign-in with nothing parked takes the ordinary home route", async () => {
+  it("a plain sign-in with nothing parked lands straight on the workspace's first agent", async () => {
     apiFetch.mockResolvedValue(response(true, 200, { workspaceId: "ws-1" }));
 
     renderHook(() => usePostAuthRedirect());
 
     await waitFor(() => {
-      expect(replace).toHaveBeenCalledWith("/w/ws-1");
+      expect(replace).toHaveBeenCalledWith("/w/ws-1/agents/first/chat");
     });
+    expect(postAuthLanding).toHaveBeenCalledWith("ws-1");
     expect(apiFetch).toHaveBeenCalledWith("/v1/auth/session");
     expect(assign).not.toHaveBeenCalled();
   });

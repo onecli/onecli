@@ -40,6 +40,8 @@ const rendered = (over: Partial<RenderedTurn> & { turnId: string }) =>
     peerMessages: [],
     peerMessagesOpeningTask: new Set<number>(),
     tools: [],
+    steps: [],
+    reasoning: "",
     ended: true,
     ...over,
   }) satisfies RenderedTurn;

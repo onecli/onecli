@@ -10,6 +10,7 @@ export default async function OrgGeneralPage() {
     return (
       <div className="flex flex-1 flex-col gap-4">
         <PageHeader
+          character="cloud-list"
           title="Organization"
           description="You are not part of any organization."
         />
@@ -23,6 +24,7 @@ export default async function OrgGeneralPage() {
   return (
     <div className="flex flex-1 flex-col gap-6">
       <PageHeader
+        character="cloud-list"
         title="Organization"
         description={
           isAdmin

@@ -555,6 +555,32 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     );
   });
 
+  it("an agent's own SKILL.md names skill_update; an org one points at the dashboard", async () => {
+    // An agent read the bare "Managed by OneCLI" as "not yours to edit" and
+    // sent its person to the dashboard for a change it can make itself.
+    const agent = await seedAgent("composer-header");
+    await skillService.createSkill(
+      WORKSPACE,
+      { name: "mine", description: "d", content: "body", agentId: agent },
+      CREATOR,
+    );
+    await skillService.createOrgSkill(
+      ORG,
+      { name: "shared", description: "d", content: "body" },
+      CREATOR,
+    );
+    const files = await syncService.buildHomeFileSet(agent);
+    const md = (name: string) =>
+      files.find((f) => f.path === `.agents/skills/${name}/SKILL.md`)?.content;
+    expect(md("mine")).toContain(
+      "This is your own skill: change it with skill_update.",
+    );
+    expect(md("shared")).toContain(
+      "(organization skill) — regenerated from the dashboard",
+    );
+    expect(md("shared")).not.toContain("skill_update");
+  });
+
   it("a description stored before the doors cleaned it reaches the agent clean", async () => {
     const agent = await seedAgent("composer-dirty");
     // Written straight to the database, as rows from before the fix are.
@@ -691,15 +717,16 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
     expect(item.parts.at(-1)?.files).toEqual([]);
   });
 
-  it("the AUTHORING caps fit inside MAX_SYNC_PARTS at 3-byte encoding", async () => {
+  it("the skill and memory COUNT caps fit inside MAX_SYNC_PARTS at 3-byte encoding", async () => {
     // The caps count UTF-16 chars; the frame budget counts UTF-8 bytes. A
     // CJK agent that fills its caps is 3× the ASCII size, which is what
     // silently truncated every non-Latin agent at the old cap of 64. This
     // pins the sizing rule, not the current number.
     const agent = await seedAgent("composer-cjk");
     const sb = await seedSandbox("composer-cjk", agent);
-    // Both tiers at their caps (10 agent + 20 org), each skill at
-    // MAX_SKILL_TOTAL_CHARS.
+    // Both tiers at their skill caps (10 agent + 20 org), each a large
+    // 32,000-char hand-written skill (the tier byte budgets, not the body
+    // limit, bound bigger ones: see the IMPORT budgets test below).
     await db.$executeRaw`
       INSERT INTO "skills" ("id", "scope", "agent_id", "name", "description", "content", "created_at", "updated_at")
       SELECT ${P} || 'cjk-a-' || i, 'agent', ${agent}, 'cjk-a-' || i, 'd', repeat('世', 32000), now(), now()
@@ -777,7 +804,7 @@ describe.skipIf(!PROOF_URL)("the composer", () => {
   });
 
   it("a SKILL.md too big for one frame still ships, as chunks", async () => {
-    // The import limit lets a SKILL.md body run to 120k characters; in CJK
+    // The body limit lets a SKILL.md run to 120k characters; in CJK
     // that renders past one frame, so it rides as a chunked blob.
     const agent = await seedAgent("composer-bigmd");
     const sb = await seedSandbox("composer-bigmd", agent);

@@ -2,11 +2,12 @@
 import { render, screen, within } from "@testing-library/react";
 import type { ComponentType } from "react";
 import { describe, expect, it, vi } from "vitest";
-import BitwardenPage from "../vaults/bitwarden/page";
-import OnePasswordPage from "../vaults/onepassword/page";
+import { BitwardenVaultPage } from "./bitwarden-vault-page";
+import { OnePasswordVaultPage } from "./onepassword-vault-page";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/ws-1/connections/vaults/bitwarden",
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 // The setup flows own their data fetching; these tests cover the page frame.
@@ -25,14 +26,14 @@ describe.each<{
 }>([
   {
     name: "Bitwarden",
-    Page: BitwardenPage,
+    Page: BitwardenVaultPage,
     description:
       "Fetch credentials on-demand from your Bitwarden vault. Nothing is stored on the server.",
     setup: "bitwarden setup",
   },
   {
     name: "1Password",
-    Page: OnePasswordPage,
+    Page: OnePasswordVaultPage,
     description:
       "Resolve secrets on-demand from 1Password using a service account. Nothing is stored on the server.",
     setup: "1password setup",

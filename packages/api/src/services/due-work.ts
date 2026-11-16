@@ -81,9 +81,9 @@ const liveSshSessionExists = () => Prisma.sql`EXISTS (
 /**
  * §3.9 KEEP-AWAKE, as one SQL fragment with one definition — the stops arm
  * negates it, the ceiling counts it, the eviction arm requires it, and the
- * dashboard signal joins on it (so a live SSH session lights the dashboard's
- * "working in the background" badge too — accepted: one definition beats a
- * split predicate, and a held-open box IS busy from a capacity standpoint).
+ * operator's held-awake reads join on it (so a live SSH session counts as
+ * held too — accepted: one definition beats a split predicate, and a
+ * held-open box IS busy from a capacity standpoint).
  *
  * ENGAGEMENT, not existence (idle servers and forgotten `bg` tasks once held
  * boxes for days). Three live shapes hold a box up, and all three are
@@ -250,6 +250,13 @@ export interface DueTurn {
   agentId: string;
   message: string;
   resumeSessionRef: string | null;
+  /**
+   * The session this conversation's FIRST session forks from: a DM thread
+   * (a sourced conversation with an owner and no session yet) inherits its
+   * owner's direct conversation's transcript. Absent once the conversation
+   * has a session of its own, and for every other conversation.
+   */
+  forkSessionRef?: string;
   /** Run on a fresh harness session that ends with the turn (a platform
    * job's run: see the claim mapping). Absent = the conversation's session. */
   ephemeralSession?: true;
@@ -355,6 +362,9 @@ interface ClaimedTurnRow {
   message: string;
   source: string;
   harness_session_ref: string | null;
+  /** The owner's direct conversation's session, for a DM thread's first
+   * session to fork from (see `DueTurn.forkSessionRef`); null otherwise. */
+  fork_session_ref: string | null;
   gate: string | null;
   /** The conversation's chosen context size (context fit); null = default. */
   context_tokens: number | null;
@@ -422,6 +432,80 @@ interface SendNowRow {
  * work compete for a runner's attention but not for the same slots.
  */
 const TURN_LIMIT = 5;
+
+/**
+ * How many PERSON turns one agent runs at once, across its conversations.
+ * Different conversations run in parallel on the agent's one sandbox (one
+ * harness session each) — that is what lets a DM thread answer while the
+ * DM's top level is busy — but the sandbox is one computer with one set of
+ * files, and every parallel turn pays its own model context, so the
+ * parallelism is bounded. A person's turn past the cap stays queued, in
+ * arrival order, and claims when a slot frees; it is never refused.
+ *
+ * Counts turns people typed (`PLATFORM_AUTHORED_SOURCES` excluded, so a
+ * cron or watch run neither takes a person's slot nor waits for one) that
+ * are in flight (a `joining` follow-up is a message inside one of those,
+ * not a run of its own), and applies only to person turns: platform runs
+ * keep today's rule. Same-conversation serialization is the one-active-turn
+ * index, which this sits on top of. The claim query is where it lives.
+ */
+export const MAX_PERSON_TURNS_PER_AGENT = 3;
+
+/**
+ * The agent's person turns holding a slot AHEAD of candidate `t` (its
+ * conversation `c`): the ones in flight (running, or dispatched and not
+ * yet stale: a stale dispatch is a candidate again, not a run) plus the
+ * EARLIER waiters, which a poll claims first. `t` and `c` must be the
+ * enclosing query's aliases. A function, not a const, for the same
+ * mocked-db reason as `keepAwakeExists`.
+ */
+const personSlotsAhead = (staleDispatch: Date) => {
+  const platformSources = Prisma.join([...PLATFORM_AUTHORED_SOURCES]);
+  return Prisma.sql`(
+    (SELECT count(*) FROM turns a
+       JOIN conversations ac ON ac.id = a.conversation_id
+      WHERE ac.agent_id = c.agent_id
+        AND a.source NOT IN (${platformSources})
+        AND (
+          a.status = 'running'
+          OR (a.status = 'dispatched' AND a.updated_at >= ${staleDispatch})
+        ))
+    + (SELECT count(*) FROM turns b
+         JOIN conversations bc ON bc.id = b.conversation_id
+        WHERE bc.agent_id = c.agent_id
+          AND b.source NOT IN (${platformSources})
+          AND (
+            b.status = 'queued'
+            OR (b.status = 'dispatched' AND b.updated_at < ${staleDispatch})
+          )
+          AND (b.created_at, b.id) < (t.created_at, t.id))
+  )`;
+};
+
+/**
+ * How many of the agent's person turns stand AHEAD of this one for a slot:
+ * exactly what the claim counts (`personSlotsAhead`), read once, right
+ * after a turn is created, so the surface that accepted the message can
+ * say "queued behind N" when the cap will hold it. Zero when the turn
+ * claims next. A read, never a reservation: the claim decides, this only
+ * predicts it, and a turn of another conversation can finish in between
+ * (then the person is told a number one too high, and answered sooner
+ * than promised, which is the right way to be wrong).
+ *
+ * Counts only what the cap counts: a platform-authored turn is neither
+ * ahead nor held, so this answers 0 for one.
+ */
+export const personTurnsAhead = async (turnId: string): Promise<number> => {
+  const staleDispatch = new Date(Date.now() - STALE_DISPATCH_SECONDS * 1000);
+  const [row] = await db.$queryRaw<{ ahead: number }[]>`
+    SELECT ${personSlotsAhead(staleDispatch)}::int AS ahead
+    FROM turns t
+    JOIN conversations c ON c.id = t.conversation_id
+    WHERE t.id = ${turnId}
+      AND t.source NOT IN (${Prisma.join([...PLATFORM_AUTHORED_SOURCES])})
+  `;
+  return row?.ahead ?? 0;
+};
 
 /**
  * The claim-wait log line is a metric carrier: a deployment's log-based
@@ -951,6 +1035,17 @@ export const claimDueWork = async (
             t.status = 'queued'
             OR (t.status = 'dispatched' AND t.updated_at < ${staleDispatch})
           )
+          -- THE PER-AGENT CAP (MAX_PERSON_TURNS_PER_AGENT): a person's turn
+          -- claims only while the agent has a free slot. A slot is held by
+          -- a person turn in flight OR by an EARLIER waiting person turn of
+          -- the same agent, which this poll claims first (personSlotsAhead).
+          -- Counting the waiters ahead is what makes the bound exact inside
+          -- one poll's batch: every candidate is judged before any claim
+          -- lands, so "in flight" alone would let a burst of five claim five.
+          AND (
+            t.source IN (${Prisma.join([...PLATFORM_AUTHORED_SOURCES])})
+            OR ${personSlotsAhead(staleDispatch)} < ${MAX_PERSON_TURNS_PER_AGENT}
+          )
         -- WAKE PRIORITY, same rank as the start arm: within one poll's turn
         -- budget a person's message dispatches before a scheduled run's.
         ORDER BY
@@ -974,6 +1069,19 @@ export const claimDueWork = async (
         t.source,
         (SELECT c.harness_session_ref FROM conversations c
           WHERE c.id = t.conversation_id) AS harness_session_ref,
+        -- A DM THREAD's parent session: a sourced conversation that has an
+        -- owner (only DM threads do: direct rows are direct, every other
+        -- sourced row has no user) and no session yet forks its first
+        -- session from the owner's direct conversation's. Read at dispatch
+        -- so the fork carries everything the DM knew up to this moment.
+        (SELECT d.harness_session_ref
+           FROM conversations c
+           JOIN conversations d
+             ON d.agent_id = c.agent_id AND d.direct AND d.user_id = c.user_id
+          WHERE c.id = t.conversation_id
+            AND NOT c.direct
+            AND c.user_id IS NOT NULL
+            AND c.harness_session_ref IS NULL) AS fork_session_ref,
         -- A scheduled run's gate (the supervisor runs it before the agent).
         -- Read at dispatch, so an edit applies to the next run.
         (SELECT ac.gate FROM conversations c
@@ -1098,7 +1206,13 @@ export const claimDueWork = async (
                 // session and never leaves one behind (platform-jobs, rule 1).
                 ...(isPlatformJobRun(row.source)
                   ? { resumeSessionRef: null, ephemeralSession: true as const }
-                  : { resumeSessionRef: row.harness_session_ref }),
+                  : {
+                      resumeSessionRef: row.harness_session_ref,
+                      ...(row.fork_session_ref &&
+                        row.harness_session_ref === null && {
+                          forkSessionRef: row.fork_session_ref,
+                        }),
+                    }),
                 ...(row.gate && { gate: row.gate }),
                 ...(row.context_tokens !== null && {
                   contextTokens: row.context_tokens,
@@ -2157,30 +2271,11 @@ export const waitForWork = (timeoutMs: number): Promise<boolean> =>
 /** Test seam: the number of polls currently parked on the signal. */
 export const pendingWaiterCount = (): number => waiters.size;
 
-// ── Held-awake signal reads (step 13) ───────────────────────────────────
+// ── Held-awake reads (step 13) ──────────────────────────────────────────
 //
-// The dashboard's view of the same keepAwakeExists predicate — living here
+// The operator's view of the same keepAwakeExists predicate — living here
 // because invariant 15 puts every reading of "what holds a box up" in this
-// module, so the signal can never drift from the enforcement.
-
-/**
- * Which of a workspace's agents currently hold a box awake with live
- * background work — the per-agent "working in the background" signal, in one
- * grouped query.
- */
-export const agentIdsWithLiveBackgroundWork = async (
-  workspaceId: string,
-): Promise<Set<string>> => {
-  const { idleBefore, capBefore } = keepAwakeClocks();
-  const rows = await db.$queryRaw<Array<{ agent_id: string }>>`
-    SELECT DISTINCT s.agent_id FROM sandboxes s
-    JOIN agents a ON a.id = s.agent_id
-    WHERE a.workspace_id = ${workspaceId}
-      AND s.status = 'running'
-      AND ${keepAwakeExists(idleBefore, capBefore)}
-  `;
-  return new Set(rows.map((row) => row.agent_id));
-};
+// module, so the numbers can never drift from the enforcement.
 
 /**
  * Held-awake counts per runner — the operator number beside each runner's

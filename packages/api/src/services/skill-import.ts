@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  IMPORTED_SKILL_CONTENT_MAX_LENGTH,
+  SKILL_CONTENT_MAX_LENGTH,
   MAX_IMPORTED_SKILL_BYTES,
   MAX_IMPORTED_SKILL_FILES,
   MAX_SKILL_ZIP_ENTRIES,
@@ -65,7 +65,7 @@ const MAX_SKILL_FOLDER_DEPTH = 3;
 /** A folder or name echoed back in a problem is clipped: it is zip text. */
 const MAX_ECHO_CHARS = 120;
 const TOO_LARGE = `The skill would be larger than ${MAX_IMPORTED_SKILL_BYTES / (1024 * 1024)} MB`;
-const BODY_TOO_LONG = `SKILL.md is longer than ${IMPORTED_SKILL_CONTENT_MAX_LENGTH.toLocaleString("en-US")} characters`;
+const BODY_TOO_LONG = `SKILL.md is longer than ${SKILL_CONTENT_MAX_LENGTH.toLocaleString("en-US")} characters`;
 
 const clip = (text: string): string => {
   // Zip text is echoed to people and models: control characters become "?"
@@ -179,7 +179,7 @@ const readSkill = async (
     const bytes = await skillMd.read(
       Math.min(
         // Frontmatter rides on top of the body: room for both, in UTF-8.
-        IMPORTED_SKILL_CONTENT_MAX_LENGTH * 4,
+        SKILL_CONTENT_MAX_LENGTH * 4,
         MAX_SKILL_ZIP_UNPACKED_BYTES - budget.used,
       ),
     );
@@ -207,7 +207,7 @@ const readSkill = async (
   }
   const content = stripSkillFrontmatter(skillMdText).trim();
   if (content.length === 0) return { problem: "SKILL.md has no instructions" };
-  if (content.length > IMPORTED_SKILL_CONTENT_MAX_LENGTH) {
+  if (content.length > SKILL_CONTENT_MAX_LENGTH) {
     return { problem: BODY_TOO_LONG };
   }
 

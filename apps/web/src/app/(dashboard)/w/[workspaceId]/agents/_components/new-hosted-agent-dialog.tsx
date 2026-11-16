@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Plus, X } from "lucide-react";
+import { Dices, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -20,11 +20,14 @@ import { cn } from "@onecli/ui/lib/utils";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { INSTRUCTIONS_MAX_LENGTH } from "@onecli/api/validations/agent";
 import { agentChatPath } from "@/lib/navigation";
-import { useCreateHostedAgent } from "@/hooks/use-agents";
 import {
-  useHomeDurabilityMessage,
-  useHostedAvailability,
-} from "@/hooks/use-hosted-availability";
+  useAgents,
+  useCreateHostedAgent,
+  useSetStarterFace,
+} from "@/hooks/use-agents";
+import { randomAgentName } from "@/lib/agents/agent-names";
+import { agentFaceUrl, randomAgentFace } from "@/lib/agents/agent-faces";
+import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import {
   OFFLINE_CREATE_MESSAGE,
   hostedCreateRefusalCopy,
@@ -41,11 +44,10 @@ interface NewHostedAgentDialogProps {
 /** The agent creation just made, carried through the steps that follow. */
 type CreatedAgentRef = { id: string; name: string };
 
-/** The name the field opens with, so nobody faces an empty required box. */
-const DEFAULT_AGENT_NAME = "Donna";
-
 /**
  * Creating a hosted agent: ONE question, a name, and then you're in the chat.
+ * It opens on a random name from a list of famous assistants and a random
+ * robot picture; Shuffle rolls another pair, and the name stays editable.
  *
  * Everything else an agent has — its brief, its connections, its model — is a
  * section of the agent page that can be changed at any time, so asking up
@@ -63,9 +65,6 @@ export const NewHostedAgentDialog = ({
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const router = useRouter();
   const availability = useHostedAvailability();
-  // Same shared cache entry as the availability hook — no extra request. The
-  // one place agent-file durability is stated (§3.9), in agent words only.
-  const durabilityNote = useHomeDurabilityMessage();
   const createAgent = useCreateHostedAgent();
   // The submit door, closed from the first submit until the request settles.
   // `createAgent.isPending` is a render-time value: a second submit inside
@@ -73,8 +72,10 @@ export const NewHostedAgentDialog = ({
   // runs before React re-renders and would send a second POST, which the
   // server answers 409 on the derived identifier.
   const submittingRef = useRef(false);
+  const setStarterFace = useSetStarterFace();
 
   const [name, setName] = useState("");
+  const [face, setFace] = useState<number | null>(null);
   const [nameTouched, setNameTouched] = useState(false);
   const [instructions, setInstructions] = useState("");
   const [briefOpen, setBriefOpen] = useState(false);
@@ -95,20 +96,38 @@ export const NewHostedAgentDialog = ({
     else toChat(agent);
   };
   const nameInput = useRef<HTMLInputElement>(null);
+  // Names already used here: a random pick skips them, so the suggestion
+  // never opens on a clash.
+  const { data: existingAgents } = useAgents(open);
+  const takenNames = (existingAgents ?? []).map((a) => a.name);
 
-  // A default in the field rather than a blank to fill, with the caret parked
-  // at its end — Enter accepts it, backspace edits it. Caret, never a
-  // selection: selected text is one keystroke from being gone.
+  /** Put `next` in the field with the caret at its end (never a selection:
+   * selected text is one keystroke from being gone). */
+  const fillName = (next: string) => {
+    setName(next);
+    setNameTouched(false);
+    return requestAnimationFrame(() => {
+      nameInput.current?.setSelectionRange(next.length, next.length);
+    });
+  };
+
+  const shuffle = () => {
+    fillName(randomAgentName(takenNames, name));
+    setFace((current) => randomAgentFace(current));
+    nameInput.current?.focus();
+  };
+
+  // A random suggestion in the field rather than a blank to fill. Enter
+  // accepts it, backspace edits it, the dice roll another. Picked once per
+  // opening: the list arriving later must not swap a name being read.
   useEffect(() => {
     if (!open) return;
-    setName(DEFAULT_AGENT_NAME);
+    setFace(randomAgentFace());
     // After paint: the dialog's autofocus selects the field's contents, so
     // collapsing the caret has to happen once that has already run.
-    const id = requestAnimationFrame(() => {
-      const end = DEFAULT_AGENT_NAME.length;
-      nameInput.current?.setSelectionRange(end, end);
-    });
+    const id = fillName(randomAgentName(takenNames));
     return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per open
   }, [open]);
 
   const nameError = validateDisplayName(name);
@@ -137,6 +156,9 @@ export const NewHostedAgentDialog = ({
           submittingRef.current = false;
         },
         onSuccess: (agent) => {
+          // The picked picture becomes the agent's avatar, after the fact:
+          // the agent exists either way.
+          if (face !== null) setStarterFace(agent.id, face);
           handleClose(false);
           const created = { id: agent.id, name: agent.name };
           // Creating a key server-side attaches it to every keyless agent —
@@ -152,6 +174,7 @@ export const NewHostedAgentDialog = ({
   const handleClose = (value: boolean) => {
     if (!value) {
       setName("");
+      setFace(null);
       setNameTouched(false);
       setInstructions("");
       setBriefOpen(false);
@@ -185,16 +208,49 @@ export const NewHostedAgentDialog = ({
               <Label htmlFor="hosted-agent-name" className="sr-only">
                 Name
               </Label>
-              <Input
-                ref={nameInput}
-                id="hosted-agent-name"
-                placeholder="e.g. Support Triage"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                onBlur={() => setNameTouched(true)}
-                autoFocus
-                className={cn(showNameError && "border-destructive")}
-              />
+              <div className="flex items-center gap-2">
+                {face !== null && (
+                  // eslint-disable-next-line @next/next/no-img-element -- a static public asset, already sized
+                  <img
+                    src={agentFaceUrl(face)}
+                    alt=""
+                    width={40}
+                    height={40}
+                    className="size-10 shrink-0 rounded-lg border object-cover"
+                  />
+                )}
+                <Input
+                  ref={nameInput}
+                  id="hosted-agent-name"
+                  placeholder="e.g. Support Triage"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onBlur={() => setNameTouched(true)}
+                  autoFocus
+                  className={cn("h-10", showNameError && "border-destructive")}
+                />
+                {/* A labelled button in the brand tint, the same 40px as the
+                    field: a bare outlined dice read as decoration. */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={shuffle}
+                  // The accessible name starts with the visible word, so a
+                  // voice-control "click Shuffle" finds it (WCAG 2.5.3).
+                  aria-label={
+                    face !== null ? "Shuffle name and picture" : "Shuffle name"
+                  }
+                  title={
+                    face !== null
+                      ? "Try another name and picture"
+                      : "Try another name"
+                  }
+                  className="border-brand/30 bg-brand-wash text-brand-ink hover:bg-brand-wash/70 hover:text-brand-ink h-10 shrink-0 gap-1.5 px-3"
+                >
+                  <Dices className="size-4" />
+                  Shuffle
+                </Button>
+              </div>
               {showNameError && (
                 <p className="text-destructive text-xs">{nameError}</p>
               )}
@@ -271,9 +327,6 @@ export const NewHostedAgentDialog = ({
               <p className="text-muted-foreground bg-muted rounded-md px-3 py-2 text-xs">
                 {OFFLINE_CREATE_MESSAGE}
               </p>
-            )}
-            {!offline && durabilityNote && (
-              <p className="text-muted-foreground text-xs">{durabilityNote}</p>
             )}
             {createAgent.error && (
               <p className="bg-destructive/10 text-destructive rounded-md px-3 py-2 text-xs">

@@ -111,6 +111,7 @@ beforeEach(() => {
   wsServer = {
     resumable: true,
     onDisconnect: () => {},
+    onUnresponsive: () => {},
     connection: ():
       | { sandboxId: string; send(item: WorkItem): void }
       | undefined => undefined,

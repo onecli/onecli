@@ -7,6 +7,7 @@ import {
   type ExecBackend,
   type RelayRequest,
 } from "../types";
+import { createExitLatch } from "../exit-latch";
 
 const log = logger.child({ component: "exec-backend" });
 
@@ -118,21 +119,7 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
     );
     const exec = new Exec(kubeConfig);
 
-    let settled = false;
-    let resolveExit: (code: number) => void = () => undefined;
-    let rejectExit: (error: Error) => void = () => undefined;
-    const exited = new Promise<number>((resolve, reject) => {
-      resolveExit = (code) => {
-        if (settled) return;
-        settled = true;
-        resolve(code);
-      };
-      rejectExit = (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-    });
+    const exit = createExitLatch();
 
     // Intermediates own the library's end() calls (it ends the streams it is
     // handed when the status arrives) so the ssh2 channel's lifecycle stays
@@ -155,7 +142,7 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
       stderr,
       io.stdin,
       tty,
-      (status) => resolveExit(exitCodeOf(status)),
+      (status) => exit.resolve(exitCodeOf(status)),
     );
 
     const pinger = setInterval(() => {
@@ -168,7 +155,7 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
     pinger.unref();
 
     ws.on("error", (error: Error) => {
-      rejectExit(
+      exit.reject(
         new ExecDisconnectedError(`exec transport error: ${error.message}`),
       );
     });
@@ -176,12 +163,12 @@ export const createKubeExecBackend = (): ExecBackend<KubeExecTarget> => ({
       clearInterval(pinger);
       // A close before any exit status is sandbox churn or a severed dial — an
       // honest relay_error, never a fabricated exit code.
-      rejectExit(new ExecDisconnectedError("exec transport closed"));
+      exit.reject(new ExecDisconnectedError("exec transport closed"));
     });
-    void exited.catch(() => undefined).then(() => clearInterval(pinger));
+    void exit.exited.catch(() => undefined).then(() => clearInterval(pinger));
 
     return {
-      exited,
+      exited: exit.exited,
       ...(tty && {
         resize: (cols: number, rows: number) => {
           stdout.columns = cols;

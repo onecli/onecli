@@ -1,6 +1,7 @@
 import dynamic from "next/dynamic";
 import { requireAccessibleWorkspace } from "@/lib/workspaces/workspace-access";
 import { WorkspaceNameBroadcast } from "@/lib/workspaces/workspace-name-broadcast";
+import { WorkspaceScopeGate } from "@/lib/workspaces/workspace-scope-gate";
 
 // Lazy: the quota banner is Cloud billing UI (renders nothing elsewhere) — a
 // dynamic import keeps this free layout from statically depending on it.
@@ -33,11 +34,15 @@ export default async function WorkspaceLayout({ children, params }: Props) {
       />
       {/* A column, because the banner is a SIBLING of the page: the agent
           page is handed the dashboard's raw flex ROW cell, where two loose
-          siblings would render side by side instead of stacked. */}
+          siblings would render side by side instead of stacked. The gate:
+          the pages read their workspace off the URL, so they wait for the
+          URL to name this one (see WorkspaceScopeGate). */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <PaymentIssueBanner />
-        <OverQuotaBanner />
-        {children}
+        <WorkspaceScopeGate workspaceId={workspaceId}>
+          <PaymentIssueBanner />
+          <OverQuotaBanner />
+          {children}
+        </WorkspaceScopeGate>
       </div>
     </>
   );

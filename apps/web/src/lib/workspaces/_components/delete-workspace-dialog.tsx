@@ -15,6 +15,7 @@ import {
 import { Input } from "@onecli/ui/components/input";
 import { useDeleteWorkspace } from "@/hooks/use-workspaces";
 import { setDefaultOrgCookie } from "@/lib/auth/set-active-scope";
+import { orgLanding } from "@/lib/dashboard/landing";
 
 interface DeleteWorkspaceTarget {
   workspaceId: string;
@@ -56,9 +57,10 @@ export const useDeleteWorkspaceDialog = ({
       // cookie write + redirect below can't fire a duplicate delete.
       setIsOpen(false);
       // Pin this org as the default and leave the deleted workspace's pages
-      // for the org's workspace list.
+      // for the org's home (its first remaining workspace's first agent),
+      // in one hop.
       await setDefaultOrgCookie(organizationId);
-      router.push(`/org/${organizationId}/workspaces`);
+      router.push(await orgLanding(organizationId));
       router.refresh();
     } catch {
       // the hook already toasts the server reason

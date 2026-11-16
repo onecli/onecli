@@ -6,6 +6,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Switch } from "@onecli/ui/components/switch";
 import { formatRelative } from "@onecli/api/lib/format";
 import type { SkillSummary } from "@/lib/api";
+import { orgPath } from "@/lib/navigation";
 import { SkillSourceChip, type SkillSourceKind } from "./skill-source-chip";
 
 export interface SkillRowProps {
@@ -62,17 +63,17 @@ export const SkillRow = ({ skill, kind, onEdit, onToggle }: SkillRowProps) => (
           />
         )}
       </div>
-    ) : (
+    ) : skill.organizationId ? (
       <Button
         asChild
         variant="ghost"
         size="icon-xs"
         aria-label={`Manage ${skill.name} at the organization level`}
       >
-        <Link href={`/org/${skill.organizationId}/skills`}>
+        <Link href={orgPath(skill.organizationId, "skills")}>
           <ExternalLink className="size-4" />
         </Link>
       </Button>
-    )}
+    ) : null}
   </div>
 );

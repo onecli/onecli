@@ -1,21 +1,12 @@
-import type { Metadata } from "next";
-import { ModelsSection } from "../_components/models-section";
-
-export const metadata: Metadata = {
-  title: "Models",
-};
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
 interface Props {
-  params: Promise<{ agentId: string }>;
+  params: Promise<{ workspaceId: string; agentId: string }>;
 }
 
-/**
- * What the agent runs, and the keys that decide it — in that order, because
- * the key is the cause and the model is the consequence (§3.10). The section
- * carries its own "Add LLM key" door (create-then-attach), so a dead key is
- * fixable right here.
- */
+/** An old URL: Models (the agent's model and the keys that decide it) is a
+ *  block on the agent's Settings page. */
 export default async function AgentModelsPage({ params }: Props) {
-  const { agentId } = await params;
-  return <ModelsSection agentId={agentId} />;
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(workspaceId, agentId, "models");
 }

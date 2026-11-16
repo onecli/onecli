@@ -40,7 +40,7 @@ import { withLoopbackUnproxied } from "./proxy-env";
  *   never stands between the agent and a clean restart.
  */
 
-export const IDLE_MS = 10 * 60 * 1_000;
+const IDLE_MS = 10 * 60 * 1_000;
 /** One request line is a verb and its arguments: never a page. */
 const MAX_LINE_BYTES = 128 * 1_024;
 

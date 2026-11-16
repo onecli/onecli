@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { db } from "@onecli/db";
+import { db, type Prisma } from "@onecli/db";
 import { generateApiKey } from "../../services/api-key-service";
 import { workspaceNameForOwner } from "../../services/organization-service";
 import { generateWorkspaceId } from "../../lib/ids";
@@ -178,6 +178,31 @@ export const findPendingProvisionByToken = async (token: string) => {
   return { organizationName: provision.organization.name };
 };
 
+/**
+ * Atomic claim-of-the-claim (compare-and-set), the first write of both
+ * claimProvision branches: only one transaction can move the row out of
+ * "pending" — a concurrent duplicate blocks on the row lock here and then
+ * matches nothing. A plain re-read would let two simultaneous claims both
+ * pass and the loser silently overwrite the winner's identity. "claiming"
+ * never persists: each branch ends by deleting the row or setting "claimed",
+ * and a failure rolls it back.
+ */
+const claimPendingRow = async (
+  tx: Prisma.TransactionClient,
+  provisionId: string,
+) => {
+  const won = await tx.userProvision.updateMany({
+    where: { id: provisionId, status: "pending" },
+    data: { status: "claiming" },
+  });
+  if (won.count === 0) {
+    throw new ServiceError(
+      "CONFLICT",
+      "This provision has already been claimed",
+    );
+  }
+};
+
 export const claimProvision = async (
   token: string,
   realUserId: string,
@@ -258,22 +283,7 @@ export const claimProvision = async (
     });
 
     const flushPolicy = await db.$transaction(async (tx) => {
-      // Atomic claim-of-the-claim (compare-and-set): only one transaction can
-      // move the row out of "pending" — a concurrent duplicate blocks on the
-      // row lock here and then matches nothing. A plain re-read would let two
-      // simultaneous claims both pass and the loser silently overwrite the
-      // winner's identity. "claiming" never persists: the branch ends by
-      // deleting the row or setting "claimed", and a failure rolls it back.
-      const won = await tx.userProvision.updateMany({
-        where: { id: provision.id, status: "pending" },
-        data: { status: "claiming" },
-      });
-      if (won.count === 0) {
-        throw new ServiceError(
-          "CONFLICT",
-          "This provision has already been claimed",
-        );
-      }
+      await claimPendingRow(tx, provision.id);
 
       if (existingMembership) {
         await tx.organizationMember.delete({
@@ -356,22 +366,7 @@ export const claimProvision = async (
     }
 
     await db.$transaction(async (tx) => {
-      // Atomic claim-of-the-claim (compare-and-set): only one transaction can
-      // move the row out of "pending" — a concurrent duplicate blocks on the
-      // row lock here and then matches nothing. A plain re-read would let two
-      // simultaneous claims both pass and the loser silently overwrite the
-      // winner's identity. "claiming" never persists: the branch ends by
-      // deleting the row or setting "claimed", and a failure rolls it back.
-      const won = await tx.userProvision.updateMany({
-        where: { id: provision.id, status: "pending" },
-        data: { status: "claiming" },
-      });
-      if (won.count === 0) {
-        throw new ServiceError(
-          "CONFLICT",
-          "This provision has already been claimed",
-        );
-      }
+      await claimPendingRow(tx, provision.id);
 
       await tx.user.update({
         where: { id: provision.userId },

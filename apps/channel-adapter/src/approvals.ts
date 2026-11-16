@@ -19,6 +19,7 @@ import {
   type ChannelPostTarget,
   type ThreadAddressDecoder,
 } from "./targets";
+import { agentPageUrl } from "./web-links";
 
 /**
  * The approvals surface: per presence, long-poll the GATEWAY's pending list
@@ -354,15 +355,12 @@ const approvalCardLink = (
 };
 
 /** The agent's web chat, where a card can be reviewed row by row and a
- *  record change seen as its table. Built only from server config and the
- *  presence's own ids (never payload text); none without a web app URL. */
+ *  record change seen as its table. None without a web app URL. */
 const reviewUrlFor = (
   appUrl: string | undefined,
   presence: AdapterPresence,
 ): string | undefined =>
-  appUrl
-    ? `${appUrl}/w/${encodeURIComponent(presence.agent.workspaceId)}/agents/${encodeURIComponent(presence.agent.id)}/chat`
-    : undefined;
+  appUrl ? agentPageUrl(appUrl, presence.agent, "chat") : undefined;
 
 /**
  * The per-adapter approvals manager: one poll loop per presence that holds a

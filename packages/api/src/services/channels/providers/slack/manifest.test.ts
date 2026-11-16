@@ -43,6 +43,7 @@ describe("BOT_SCOPES", () => {
       "groups:history",
       "groups:read",
       "reactions:write",
+      "reactions:read",
       "files:read",
       "files:write",
       "users:read",
@@ -406,9 +407,12 @@ describe("the native Stop", () => {
 });
 
 describe("withAgentBotEvents (the existing-app event sync)", () => {
-  const exported = (botEvents: unknown) => ({
+  const exported = (
+    botEvents: unknown,
+    botScopes: string[] = ["chat:write", "reactions:read"],
+  ) => ({
     display_information: { name: "Deploy Agent" },
-    oauth_config: { scopes: { bot: ["chat:write"] } },
+    oauth_config: { scopes: { bot: botScopes } },
     settings: {
       socket_mode_enabled: true,
       event_subscriptions: {
@@ -461,10 +465,34 @@ describe("withAgentBotEvents (the existing-app event sync)", () => {
   it("builds the subscription when the export has none at all", () => {
     const after = withAgentBotEvents({
       display_information: { name: "x" },
+      oauth_config: { scopes: { bot: ["reactions:read"] } },
     }) as { settings: { event_subscriptions: { bot_events: string[] } } };
     expect(after.settings.event_subscriptions.bot_events).toEqual([
       ...BOT_EVENTS,
     ]);
+  });
+
+  it("never subscribes an app to an event whose scope it was not granted", () => {
+    // An app made before reactions: no reactions:read, so no reaction_added
+    // (it would never be delivered, and adding the scope would force a
+    // reinstall). Every other missing event still lands.
+    const after = withAgentBotEvents(
+      exported(["message.im"], ["chat:write"]),
+    ) as ReturnType<typeof exported>;
+    expect(after.settings.event_subscriptions.bot_events).toEqual([
+      "message.im",
+      ...BOT_EVENTS.filter((e) => e !== "message.im" && e !== "reaction_added"),
+    ]);
+    expect(after.oauth_config.scopes.bot).toEqual(["chat:write"]);
+    // Up to date but for that one event: nothing to write.
+    expect(
+      withAgentBotEvents(
+        exported(
+          BOT_EVENTS.filter((e) => e !== "reaction_added"),
+          ["chat:write"],
+        ),
+      ),
+    ).toBeNull();
   });
 
   it("ignores junk entries in the exported list rather than writing them back", () => {

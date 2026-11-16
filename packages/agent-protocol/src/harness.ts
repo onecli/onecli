@@ -136,6 +136,12 @@ export type KnownAgentHarness = (typeof KNOWN_AGENT_HARNESSES)[number];
 export interface HarnessCapabilities {
   /** Can reopen a prior session from state on the home volume (§3.6). */
   resume: boolean;
+  /**
+   * Can open a new session as a copy of an existing one's transcript
+   * (`startSession({ forkSessionRef })`). Optional and additive: an adapter
+   * that omits it cannot fork, and a fork request mints a fresh session.
+   */
+  fork?: boolean;
   /** Emits `thinking.delta` events. */
   thinking: boolean;
   /** Emits `tool.started` / `tool.finished` events. */
@@ -205,6 +211,16 @@ export interface StartSessionOptions {
    * `capabilities.resume`; passing one to a non-resuming adapter is a bug.
    */
   resumeSessionRef?: string;
+  /**
+   * Opaque ref of a session to FORK this one from: the new session starts
+   * as a copy of the parent's transcript (a DM thread inheriting what its
+   * DM knew) and diverges from there; the parent is untouched and may be
+   * mid-turn. Only meaningful when `capabilities.fork`, and only without
+   * `resumeSessionRef` (a session that exists is resumed, never re-forked).
+   * An adapter that cannot fork, or cannot find the parent, mints a fresh
+   * session: the context is lost, never the turn.
+   */
+  forkSessionRef?: string;
   /**
    * The conversation this session serves. Anchoring, not authority (the
    * control plane re-verifies every context claim): it lets the adapter

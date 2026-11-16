@@ -1,5 +1,18 @@
-import { ConnectedTab } from "../../_components/connected-tab";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function ConnectionsConnectedPage() {
-  return <ConnectedTab />;
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/** An old URL: Settings > Apps, Connected tab. */
+export default async function ConnectionsConnectedPage({
+  params,
+  searchParams,
+}: Props) {
+  const { workspaceId } = await params;
+  await redirectToSettingsModal({ workspaceId }, "apps", {
+    ...(await searchParams),
+    tab: "connected",
+  });
 }

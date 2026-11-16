@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { apiFetch } from "@/lib/api-fetch";
 import { refusalMessage } from "@/lib/api/client";
+import { orgLanding } from "@/lib/dashboard/landing";
+import { postAuthLanding } from "@/lib/auth/post-auth-landing";
 
 /**
  * Send a freshly authenticated visitor to their dashboard.
@@ -90,22 +92,22 @@ export const usePostAuthRedirect = (options?: {
               return;
             }
             // A full navigation: every server component below has already
-            // rendered for someone who was not a member yet. Straight into
-            // the org they joined — the org layout pins it as their default.
+            // rendered for someone who was not a member yet. Straight onto
+            // the joined org's first agent, looked up now (the org layout
+            // pins it as their default); a failed lookup takes the org's
+            // home, which forwards there.
             const joined = (await accepted.json().catch(() => null)) as {
               organizationId?: string;
             } | null;
             window.location.assign(
               joined?.organizationId
-                ? `/org/${joined.organizationId}/workspaces`
+                ? await orgLanding(joined.organizationId)
                 : "/",
             );
             return;
           }
           const data = (await res.json()) as { workspaceId?: string };
-          // No workspace context: the /org index server-redirects to the
-          // validated /org/<defaultOrgId>/workspaces (the home destination).
-          router.replace(data.workspaceId ? `/w/${data.workspaceId}` : "/org");
+          router.replace(await postAuthLanding(data.workspaceId));
           return;
         }
         if (res.status === 401) {

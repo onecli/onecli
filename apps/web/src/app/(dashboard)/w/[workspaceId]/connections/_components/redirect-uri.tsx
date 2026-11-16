@@ -59,12 +59,13 @@ export const RedirectUri = ({ provider }: { provider: string }) => {
         <button
           type="button"
           onClick={() => copy(redirectUri)}
+          aria-label="Copy redirect URI"
           className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
         >
           {copied ? (
-            <Check className="text-brand size-3.5" />
+            <Check className="text-brand size-3.5" aria-hidden />
           ) : (
-            <Copy className="size-3.5" />
+            <Copy className="size-3.5" aria-hidden />
           )}
         </button>
       </div>

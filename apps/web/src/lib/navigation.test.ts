@@ -1,18 +1,70 @@
 import { describe, expect, it } from "vitest";
 import {
-  AGENT_CREATE_PARAM,
   workspaceFilePath,
   agentChatPath,
+  agentPagePath,
   agentPath,
   agentComputerPath,
-  agentsCreatePath,
   agentSectionPath,
   connectionsPath,
   hasWorkspaceContext,
   isAgentPagePath,
+  isDashboardPath,
+  isOrgScopedPath,
   matchAgentPage,
+  MERGED_AGENT_SECTIONS,
+  mergedAgentPagePath,
+  mergedSectionPath,
+  orgHomePath,
+  orgPath,
   withWorkspacePrefix,
+  workspacePath,
 } from "./navigation";
+
+describe("isDashboardPath", () => {
+  it("is the home page and every workspace, org and account URL", () => {
+    for (const path of [
+      "/",
+      "/w/abc",
+      "/w/abc/agents/ag/chat",
+      "/org/o1/workspaces",
+      "/org",
+      "/account",
+      "/account/ssh-keys",
+    ]) {
+      expect(isDashboardPath(path)).toBe(true);
+    }
+  });
+
+  it("is never a sign-in, onboarding or join page, nor a look-alike prefix", () => {
+    for (const path of [
+      "/auth/login",
+      "/auth/signup",
+      "/onboarding",
+      "/join",
+      "/create-org",
+      "/slack/installed",
+      "/workspaces",
+      "/organic",
+      "/accounts",
+    ]) {
+      expect(isDashboardPath(path)).toBe(false);
+    }
+  });
+});
+
+describe("isOrgScopedPath", () => {
+  it("is every workspace and org URL, and never the account's", () => {
+    expect(isOrgScopedPath("/w/abc/agents/a1/chat")).toBe(true);
+    expect(isOrgScopedPath("/org/o1/skills")).toBe(true);
+    expect(isOrgScopedPath("/org/o1")).toBe(true);
+    expect(isOrgScopedPath("/account")).toBe(false);
+    expect(isOrgScopedPath("/account/preferences")).toBe(false);
+    expect(isOrgScopedPath("/")).toBe(false);
+    expect(isOrgScopedPath("/org")).toBe(false);
+    expect(isOrgScopedPath("/workspaces")).toBe(false);
+  });
+});
 
 describe("hasWorkspaceContext", () => {
   it("only /w/<id> paths carry a workspace context", () => {
@@ -71,6 +123,45 @@ describe("agentSectionPath", () => {
     expect(agentSectionPath("/w/abc/activity", "a1", "apps")).toBe(
       "/w/abc/agents/a1/apps",
     );
+  });
+});
+
+// A link to an old agent section goes straight to its block on the merged
+// page; the old URL's redirect would get there too, one round trip later.
+describe("mergedSectionPath", () => {
+  it("lands on the block's anchor on its new page", () => {
+    expect(mergedSectionPath("/w/abc/agents/a1/chat", "a1", "skills")).toBe(
+      "/w/abc/agents/a1/knowledge#skills",
+    );
+    expect(mergedSectionPath("/w/abc/agents/a1/chat", "a1", "models")).toBe(
+      "/w/abc/agents/a1/settings#models",
+    );
+    // Slack is Contacts' first block: no anchor, so the page header stays.
+    expect(mergedSectionPath("/w/abc/agents/a1/chat", "a1", "channels")).toBe(
+      "/w/abc/agents/a1/contacts",
+    );
+  });
+
+  it("puts a query before the anchor", () => {
+    expect(mergedAgentPagePath("ws", "a1", "skills", "connected=slack")).toBe(
+      "/w/ws/agents/a1/knowledge?connected=slack#skills",
+    );
+    expect(mergedAgentPagePath("ws", "a1", "channels", "connected=slack")).toBe(
+      "/w/ws/agents/a1/contacts?connected=slack",
+    );
+  });
+
+  it("encodes ids, like every builder", () => {
+    expect(mergedAgentPagePath("ws", "a/b", "ssh")).toBe(
+      "/w/ws/agents/a%2Fb/settings#ssh",
+    );
+  });
+
+  it("never points at a page that is itself a redirect", () => {
+    const old = Object.keys(MERGED_AGENT_SECTIONS);
+    for (const { page } of Object.values(MERGED_AGENT_SECTIONS)) {
+      expect(old).not.toContain(page);
+    }
   });
 });
 
@@ -201,16 +292,43 @@ describe("workspaceFilePath", () => {
   });
 });
 
-describe("agentsCreatePath", () => {
-  it("lands on the workspace roster with the create flow open", () => {
-    expect(agentsCreatePath("abc")).toBe(
-      `/w/abc/agents?${AGENT_CREATE_PARAM}=1`,
+describe("route builders", () => {
+  it("orgPath: the org root and every page under it", () => {
+    expect(orgPath("o1")).toBe("/org/o1");
+    expect(orgPath("o1", "team")).toBe("/org/o1/team");
+    expect(orgPath("o1", "settings/global-connections")).toBe(
+      "/org/o1/settings/global-connections",
     );
   });
 
-  it("encodes the workspace id so it can't splice extra segments", () => {
-    expect(agentsCreatePath("a/b")).toBe(
-      `/w/a%2Fb/agents?${AGENT_CREATE_PARAM}=1`,
+  it("orgHomePath: where 'go to this org' lands today (the workspaces list)", () => {
+    expect(orgHomePath("o1")).toBe("/org/o1/workspaces");
+    // The pathname-derived degrade of withWorkspacePrefix is the same door.
+    expect(withWorkspacePrefix("/org/o1/team", "/x")).toBe(orgHomePath("o1"));
+  });
+
+  it("workspacePath: the workspace root and every page under it", () => {
+    expect(workspacePath("w1")).toBe("/w/w1");
+    expect(workspacePath("w1", "agents")).toBe("/w/w1/agents");
+    expect(workspacePath("w1", "settings/install")).toBe(
+      "/w/w1/settings/install",
+    );
+  });
+
+  it("agentPagePath: the agent index and a section under it", () => {
+    expect(agentPagePath("w1", "a1")).toBe("/w/w1/agents/a1");
+    expect(agentPagePath("w1", "a1", "channels")).toBe(
+      "/w/w1/agents/a1/channels",
+    );
+    // The two agent-chat doors agree.
+    expect(agentPagePath("w1", "a1", "chat")).toBe(agentChatPath("w1", "a1"));
+  });
+
+  it("encodes every id so a crafted one cannot splice extra segments", () => {
+    expect(orgPath("o/1", "team")).toBe("/org/o%2F1/team");
+    expect(workspacePath("w/1", "agents")).toBe("/w/w%2F1/agents");
+    expect(agentPagePath("w/1", "a/../b", "chat")).toBe(
+      "/w/w%2F1/agents/a%2F..%2Fb/chat",
     );
   });
 });

@@ -76,11 +76,17 @@ export const update = (
 export const uploadImage = async (
   agentId: string,
   file: Blob,
+  // The onboarding avatar targets a workspace the URL does not carry.
+  options: { workspaceId?: string } = {},
 ): Promise<{ imageUrl: string }> => {
   const res = await apiUpload(
     `/v1/agents/${encodeURIComponent(agentId)}/image`,
     file,
-    { method: "PUT", contentType: file.type },
+    {
+      method: "PUT",
+      contentType: file.type,
+      workspaceId: options.workspaceId,
+    },
   );
   if (!res.ok) throw await refusal(res);
   return res.json();

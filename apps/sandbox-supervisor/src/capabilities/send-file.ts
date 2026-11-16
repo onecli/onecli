@@ -1,13 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readSync,
-  realpathSync,
-} from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { z } from "zod";
 import {
   ATTACHMENT_CHUNK_RAW_BYTES,
@@ -21,6 +14,7 @@ import {
   type WorkItem,
 } from "@onecli/agent-protocol";
 import type { CapabilityFragment } from "../home/renderer";
+import { containedPath as containedUnder } from "../home/contained-path";
 import type { PlatformToolDefinition } from "../platform-tools";
 import { log } from "../log";
 
@@ -179,39 +173,29 @@ export const createSendFileTools = (
 
   /**
    * The agent's path, resolved to its REAL location and checked against the
-   * home's real location. Lexical containment first (cheap, and `..` never
-   * gets to touch the filesystem), then realpath so a symlink anywhere in
-   * the chain cannot point the read outside the home. Errors are the
-   * caller's to word: a missing file is the common case, not an attack.
+   * home's real location (home/contained-path.ts, the rule `onecli-browser
+   * upload` shares). Errors are worded here: a missing file is the common
+   * case, not an attack.
    */
   const containedPath = (
     raw: string,
   ): { ok: true; path: string } | { ok: false; error: string } => {
-    const outside = refuse(
-      "Files can only be sent from your home directory (/workspace).",
-    );
-    const candidate = isAbsolute(raw) ? resolve(raw) : resolve(home, raw);
-    const lexical = relative(home, candidate);
-    if (lexical === "" || lexical.startsWith("..") || isAbsolute(lexical)) {
-      return outside;
-    }
-    let real: string;
-    let realHome: string;
-    try {
-      realHome = realpathSync(home);
-      real = realpathSync(candidate);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR")
+    const contained = containedUnder(home, raw);
+    if (contained.ok) return contained;
+    switch (contained.reason) {
+      case "outside":
+        return refuse(
+          "Files can only be sent from your home directory (/workspace).",
+        );
+      case "missing":
         return refuse("No file at that path.");
-      if (code === "ELOOP")
+      case "loop":
         return refuse("That path is a symlink loop; send the real file.");
-      return refuse(`That path could not be resolved (${code ?? "error"}).`);
+      case "unresolvable":
+        return refuse(
+          `That path could not be resolved (${contained.code ?? "error"}).`,
+        );
     }
-    const rel = relative(realHome, real);
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return outside;
-    if (rel.split(sep).some((seg) => seg === "..")) return outside;
-    return { ok: true, path: real };
   };
 
   /**

@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
+import { mergedAgentPagePath } from "@/lib/navigation";
+import { orgLanding } from "@/lib/dashboard/landing";
+import { SETTINGS_PARAM } from "@/lib/settings-modal/pages";
 import {
   useFinishAgentInstall,
   useFinishSharedInstall,
@@ -51,6 +54,15 @@ export const SlackInstalledFinish = ({
   const inspect = useInspectSharedInstall();
   const finish = useFinishSharedInstall();
   const [error, setError] = useState<string | null>(null);
+  // Settings > Slack over the org's first agent, in one hop: the org's
+  // landing looked up first, the modal opened over it. `connected` is the
+  // install return the Slack page reads (a page param of the modal's, so
+  // set after the page is).
+  const toSlackSettings = async (orgId: string, connected?: boolean) => {
+    const query = new URLSearchParams({ [SETTINGS_PARAM]: "slack" });
+    if (connected) query.set("connected", "slack");
+    router.replace(`${await orgLanding(orgId)}?${query.toString()}`);
+  };
 
   // One-shot: both steps EXCHANGE the single-use code, so the chain must
   // never re-fire (strict-mode remounts included). Mutations, not queries:
@@ -80,7 +92,12 @@ export const SlackInstalledFinish = ({
               ? "installed"
               : "connected";
             router.replace(
-              `/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/channels?${landing}=slack`,
+              mergedAgentPagePath(
+                agent.workspaceId,
+                agent.id,
+                "channels",
+                `${landing}=slack`,
+              ),
             );
           } else if (sharedAppConfigured) {
             inspectMutate({ provider: "slack", code, organizationId });
@@ -157,9 +174,9 @@ export const SlackInstalledFinish = ({
           </p>
           <Button
             className="mt-6"
-            onClick={() => router.replace(`/org/${organization.id}/channels`)}
+            onClick={() => toSlackSettings(organization.id)}
           >
-            Go to Channels
+            Go to Slack settings
           </Button>
         </Card>
       </div>
@@ -190,9 +207,8 @@ export const SlackInstalledFinish = ({
         organizationId: organization.id,
       },
       {
-        onSuccess: ({ organizationId: boundTo }) => {
-          router.replace(`/org/${boundTo}/channels?connected=slack`);
-        },
+        onSuccess: ({ organizationId: boundTo }) =>
+          toSlackSettings(boundTo, true),
         onError: (err: Error) => setError(err.message),
       },
     );
@@ -224,7 +240,7 @@ export const SlackInstalledFinish = ({
           <Button
             variant="outline"
             disabled={finish.isPending}
-            onClick={() => router.replace(`/org/${organization.id}/channels`)}
+            onClick={() => toSlackSettings(organization.id)}
           >
             Cancel
           </Button>

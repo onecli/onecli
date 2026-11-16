@@ -12,6 +12,7 @@ import { LiveToggle } from "./live-toggle";
 import { RunsTable } from "./runs-table";
 import { WebhookFilterChip } from "./webhook-filter-chip";
 import { ScheduleFilterChip } from "./schedule-filter-chip";
+import { ListRowsSkeleton } from "@/lib/dashboard/shell/list-rows-skeleton";
 
 /**
  * Activity's Runs tab: every question an agent in this workspace answered,
@@ -126,10 +127,7 @@ export const RunsTab = ({
       </div>
 
       {list.isPending ? (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="text-muted-foreground size-5 animate-spin" />
-          <span className="sr-only">Loading runs</span>
-        </div>
+        <ListRowsSkeleton label="Loading runs" />
       ) : list.isError ? (
         <div
           role="alert"

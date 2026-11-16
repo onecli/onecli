@@ -85,7 +85,7 @@ describe("ApprovalsPopover (4d, the one inbox)", () => {
       // case below, which must render none).
       expect(screen.getByRole("img", { name: "Slack" })).toBeDefined();
       const fix = screen.getByRole("link", { name: "Fix in Slack" });
-      expect(fix.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/channels");
+      expect(fix.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/contacts");
       expect(screen.queryByText("You're all caught up.")).toBeNull();
 
       fireEvent.click(fix);

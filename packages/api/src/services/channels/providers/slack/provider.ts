@@ -646,9 +646,11 @@ export const slackProvider: ChannelProvider = {
   },
 
   presenceSettingsUrl({ externalId }) {
-    // Scrolled to the "Display Information" card (Slack's own
-    // `<a name="display">`), where the app's profile icon is set.
-    return `${appSettingsUrl(externalId)}#display`;
+    // Scrolled to the "Display Information" card, where the app's profile
+    // icon is set. Slack's page has no anchor for it (`#display` opened at
+    // the top), so a text fragment targets the card's "App icon & Preview"
+    // label: the browser centres the match, which brings the card into view.
+    return `${appSettingsUrl(externalId)}#:~:text=App%20icon%20%26%20Preview`;
   },
 
   presenceIcon: {

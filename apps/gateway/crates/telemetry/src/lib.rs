@@ -462,7 +462,7 @@ async fn flush_redis(ctx: &FlushContext, events: &[RequestEvent]) {
         .await;
 }
 
-// ── Budget spend (cloud budget feature) ──────────────────────────────────
+// ── Budget spend (licensed budget feature) ───────────────────────────────
 
 /// The budget-spend persistence seam. The licensed budget module implements
 /// this (Redis hot counter + durable Postgres floor); the composition root

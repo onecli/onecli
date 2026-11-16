@@ -53,7 +53,7 @@ const run: RunListItem = {
   conversationId: "c1",
   agent: { id: "ag-1", name: "Donna" },
   source: "cron",
-  direct: false,
+  privateThread: false,
   status: "done",
   askedBy: null,
   appAttribution: "withheld",
@@ -89,39 +89,47 @@ afterEach(() => {
 });
 
 describe("Activity tabs", () => {
-  it("opens on Network by default, across all agents", () => {
+  it("opens on Runs by default, across all agents", () => {
     render(<ActivityContent />);
-    expect(screen.getByText("network tab")).toBeInTheDocument();
-    expect(tabs.network?.scope).toEqual({});
+    expect(screen.getByText("runs tab")).toBeInTheDocument();
+    expect(tabs.runs?.agentId).toBeUndefined();
+    expect(tabs.network).toBeNull();
   });
 
-  it("Runs is the second tab, opened with ?tab=runs and narrowed by agent", () => {
+  it("Runs is the first tab; Network is second, opened with ?tab=network and narrowed by agent", () => {
+    nav.search = "tab=network&agent=ag-1";
+    render(<ActivityContent />);
+    expect(screen.getByText("network tab")).toBeInTheDocument();
+    expect(tabs.network?.scope).toEqual({ agentId: "ag-1" });
+    const network = screen.getByRole("button", { name: "Network" });
+    const runs = screen.getByRole("button", { name: "Runs" });
+    expect(
+      runs.compareDocumentPosition(network) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("an explicit ?tab=runs (the old deep links) still opens Runs", () => {
     nav.search = "tab=runs&agent=ag-1";
     render(<ActivityContent />);
     expect(screen.getByText("runs tab")).toBeInTheDocument();
     expect(tabs.runs?.agentId).toBe("ag-1");
-    const network = screen.getByRole("button", { name: "Network" });
-    const runs = screen.getByRole("button", { name: "Runs" });
-    expect(
-      network.compareDocumentPosition(runs) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
   });
 
   it("switching tab keeps the agent, drops a run's window, and replaces history", () => {
     nav.search =
-      "agent=ag-1&from=2026-09-01T10:00:00.000Z&to=2026-09-01T10:01:00.000Z";
+      "tab=network&agent=ag-1&from=2026-09-01T10:00:00.000Z&to=2026-09-01T10:01:00.000Z";
     render(<ActivityContent />);
     fireEvent.click(screen.getByRole("button", { name: "Runs" }));
     expect(push).not.toHaveBeenCalled();
     expect(lastUrl(replace)).toEqual({
       path: "/w/ws/activity",
-      query: { tab: "runs", agent: "ag-1" },
+      query: { agent: "ag-1" },
     });
   });
 
   it("passes a valid agent and window to Network as its scope", () => {
     nav.search =
-      "agent=ag-1&from=2026-09-01T10:00:00.000Z&to=2026-09-01T10:01:00.000Z";
+      "tab=network&agent=ag-1&from=2026-09-01T10:00:00.000Z&to=2026-09-01T10:01:00.000Z";
     render(<ActivityContent />);
     expect(tabs.network?.scope).toEqual({
       agentId: "ag-1",
@@ -131,26 +139,26 @@ describe("Activity tabs", () => {
   });
 
   it("drops a malformed scope from a hand-edited URL instead of querying it", () => {
-    nav.search = "agent=ag-1&from=yesterday";
+    nav.search = "tab=network&agent=ag-1&from=yesterday";
     render(<ActivityContent />);
     expect(tabs.network?.scope).toEqual({});
   });
 
-  it("clearing the window keeps the agent", () => {
-    nav.search = "agent=ag-1&from=2026-09-01T10:00:00.000Z";
+  it("clearing the window keeps the agent and the Network tab", () => {
+    nav.search = "tab=network&agent=ag-1&from=2026-09-01T10:00:00.000Z";
     render(<ActivityContent />);
     tabs.network?.onClearWindow();
-    expect(lastUrl(replace).query).toEqual({ agent: "ag-1" });
+    expect(lastUrl(replace).query).toEqual({ tab: "network", agent: "ag-1" });
   });
 
   it("a run's View requests in Network pushes Network, narrowed to its agent and padded window", () => {
-    nav.search = "tab=runs";
     render(<ActivityContent />);
     tabs.runs?.onViewNetwork(run);
     expect(replace).not.toHaveBeenCalled();
     expect(lastUrl(push)).toEqual({
       path: "/w/ws/activity",
       query: {
+        tab: "network",
         agent: "ag-1",
         from: "2026-09-01T09:59:58.000Z",
         to: "2026-09-01T10:00:32.000Z",
@@ -159,29 +167,29 @@ describe("Activity tabs", () => {
   });
 
   it("an unfinished run opens an open-ended window", () => {
-    nav.search = "tab=runs";
     render(<ActivityContent />);
     tabs.runs?.onViewNetwork({ ...run, finishedAt: null });
     expect(lastUrl(push).query).toEqual({
+      tab: "network",
       agent: "ag-1",
       from: "2026-09-01T09:59:58.000Z",
     });
   });
 
   it("opens Runs on the URL's filter, so a schedule's View runs lands on it", () => {
-    nav.search = "tab=runs&agent=ag-1&view=cron";
+    nav.search = "agent=ag-1&view=cron";
     render(<ActivityContent />);
     expect(tabs.runs).toMatchObject({ agentId: "ag-1", view: "cron" });
   });
 
   it("an unknown filter falls back to All", () => {
-    nav.search = "tab=runs&view=nonsense";
+    nav.search = "view=nonsense";
     render(<ActivityContent />);
     expect(tabs.runs?.view).toBe("all");
   });
 
   it("a webhook's View runs lands on that one webhook; clearing keeps the Webhooks filter", () => {
-    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=wh-1";
+    nav.search = "agent=ag-1&view=webhook&webhook=wh-1";
     render(<ActivityContent />);
     expect(tabs.runs).toMatchObject({
       agentId: "ag-1",
@@ -190,39 +198,57 @@ describe("Activity tabs", () => {
     });
     tabs.runs?.onClearWebhook?.();
     expect(lastUrl(replace).query).toEqual({
-      tab: "runs",
       agent: "ag-1",
       view: "webhook",
     });
   });
 
   it("changing the filter drops the one-webhook narrowing", () => {
-    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=wh-1";
+    nav.search = "agent=ag-1&view=webhook&webhook=wh-1";
     render(<ActivityContent />);
     tabs.runs?.onViewChange("failed");
     expect(lastUrl(replace).query).toEqual({
-      tab: "runs",
       agent: "ag-1",
       view: "failed",
     });
   });
 
   it("a malformed webhook id never reaches the runs query", () => {
-    nav.search = "tab=runs&agent=ag-1&view=webhook&webhook=a%20b/c";
+    nav.search = "agent=ag-1&view=webhook&webhook=a%20b/c";
     render(<ActivityContent />);
     expect(tabs.runs?.webhookId).toBeUndefined();
   });
 
   it("changing the filter keeps it in the URL with the agent; All drops it", () => {
-    nav.search = "tab=runs&agent=ag-1";
+    nav.search = "agent=ag-1";
     render(<ActivityContent />);
     tabs.runs?.onViewChange("eval");
     expect(lastUrl(replace).query).toEqual({
-      tab: "runs",
       agent: "ag-1",
       view: "eval",
     });
     tabs.runs?.onViewChange("all");
-    expect(lastUrl(replace).query).toEqual({ tab: "runs", agent: "ag-1" });
+    expect(lastUrl(replace).query).toEqual({ agent: "ag-1" });
+  });
+});
+
+describe("pinned to one agent (the agent page's Activity)", () => {
+  const pinned = { id: "ag-1", name: "Donna" };
+
+  it("opens on Runs for that agent, with no agent picker and no agent in the URL", () => {
+    render(<ActivityContent pinnedAgent={pinned} />);
+    expect(screen.getByText("runs tab")).toBeInTheDocument();
+    expect(tabs.runs?.agentId).toBe("ag-1");
+    expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+    tabs.runs?.onViewChange("failed");
+    expect(lastUrl(replace).query).toEqual({ view: "failed" });
+  });
+
+  it("calls the second tab Traffic and scopes it to the agent", () => {
+    nav.search = "tab=network";
+    render(<ActivityContent pinnedAgent={pinned} />);
+    expect(screen.getByRole("button", { name: "Traffic" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Network" })).toBeNull();
+    expect(tabs.network?.scope).toEqual({ agentId: "ag-1" });
   });
 });

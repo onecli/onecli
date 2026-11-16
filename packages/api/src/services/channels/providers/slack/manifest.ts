@@ -171,7 +171,26 @@ export const BOT_EVENTS = [
   // without it the loader is a dead indicator. Needs `chat:write`, which
   // every app already holds, so no reinstall.
   "agent_session_stopped",
+  // A person reacting to the agent's own message (👍 on a question it
+  // asked). Needs reactions:read, which apps created before it lack: the
+  // maintenance sync adds it only where the scope is declared (see
+  // `EVENT_SCOPES`).
+  "reaction_added",
 ] as const;
+
+/**
+ * Events whose scope an app created before the event joined `BOT_EVENTS`
+ * may not hold. An event subscribed without its scope is never delivered
+ * (docs.slack.dev/apis/events-api, "Adding event subscriptions you aren't
+ * yet scoped for", checked 2026-11-09), and developer reports say the
+ * manifest editor refuses the pair outright. Adding the scope means a
+ * reinstall (an admin's consent), which the sync must never force on an
+ * org. So the sync adds these only to a manifest that already declares the
+ * scope; the rollout note has an admin add the scope and the event together.
+ */
+const EVENT_SCOPES: Partial<Record<(typeof BOT_EVENTS)[number], string>> = {
+  reaction_added: "reactions:read",
+};
 
 /** A JSON object read out of an exported manifest, or an empty one when the
  * field is missing or the wrong shape (the export is Slack's, not ours). */
@@ -180,25 +199,36 @@ const objectAt = (value: unknown): Record<string, unknown> =>
     ? Object.fromEntries(Object.entries(value))
     : {};
 
+/** The strings of an exported list, junk entries dropped (never written
+ * back), or an empty list when the field is missing or not a list. */
+const stringsAt = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+
 /**
- * The same manifest, subscribed to every event in `BOT_EVENTS`: what an app
- * created before an event was added needs to receive it. Edits an EXPORTED
- * manifest (the rename's law: rebuilding could rewrite scopes or URLs on an
- * app that predates the current template), and only ever ADDS: an event
- * someone subscribed by hand stays subscribed. Null when nothing is missing,
- * so the caller can skip the write.
+ * The same manifest, subscribed to every event in `BOT_EVENTS` it can hold:
+ * what an app created before an event was added needs to receive it. Edits
+ * an EXPORTED manifest (the rename's law: rebuilding could rewrite scopes
+ * or URLs on an app that predates the current template), and only ever
+ * ADDS: an event someone subscribed by hand stays subscribed, and an event
+ * whose scope the app lacks (`EVENT_SCOPES`) waits for an admin to add
+ * both. Null when nothing is missing, so the caller can skip the write.
  */
 export const withAgentBotEvents = (
   manifest: Record<string, unknown>,
 ): Record<string, unknown> | null => {
   const settings = objectAt(manifest.settings);
   const subscriptions = objectAt(settings.event_subscriptions);
-  const current = Array.isArray(subscriptions.bot_events)
-    ? subscriptions.bot_events.filter(
-        (event): event is string => typeof event === "string",
-      )
-    : [];
-  const missing = BOT_EVENTS.filter((event) => !current.includes(event));
+  const current = stringsAt(subscriptions.bot_events);
+  const scopes = stringsAt(
+    objectAt(objectAt(manifest.oauth_config).scopes).bot,
+  );
+  const missing = BOT_EVENTS.filter((event) => {
+    if (current.includes(event)) return false;
+    const scope = EVENT_SCOPES[event];
+    return scope === undefined || scopes.includes(scope);
+  });
   if (missing.length === 0) return null;
   return {
     ...manifest,
@@ -236,6 +266,10 @@ export const BOT_SCOPES = [
   // The receipt reaction (the "seen" mark on an accepted message).
   // Pre-existing installs must REINSTALL to gain it — permissions changed.
   "reactions:write",
+  // Seeing reactions people add to the agent's messages (reaction_added).
+  // Pre-existing installs gain it only by an admin adding it and
+  // reinstalling; until then their reactions are simply not delivered.
+  "reactions:read",
   // Downloading user-attached files (`url_private` needs a Bearer with this
   // scope; without it Slack serves a login page, not a 401). Same reinstall
   // rule as reactions:write for pre-existing installs.

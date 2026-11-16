@@ -467,6 +467,10 @@ export const runnerWorkItemSchema = z
       /** Bounded: this is user-authored text that crosses two hops. */
       message: z.string().max(100_000),
       resumeSessionRef: sessionRefSchema.optional(),
+      /** The parent session a thread's first session forks from; see the
+       * transport schema's field of the same name. The runner forwards it
+       * verbatim. */
+      forkSessionRef: sessionRefSchema.optional(),
       /** Fresh harness session for this turn only; see the transport
        * schema's field of the same name. The runner forwards it verbatim. */
       ephemeralSession: z.literal(true).optional(),

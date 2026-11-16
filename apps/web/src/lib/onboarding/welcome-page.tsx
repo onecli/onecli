@@ -70,7 +70,7 @@ export default function WelcomePage() {
         leaving && "pointer-events-none -translate-y-1 opacity-0",
       )}
     >
-      <h1 className="text-center font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+      <h1 className="text-center text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
         Which messaging tool does your team use?
       </h1>
 

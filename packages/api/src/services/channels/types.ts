@@ -498,8 +498,10 @@ export interface ChannelProvider {
   presenceEvents?: {
     /** Every event an agent app needs; the sync's comparison key. */
     current: readonly string[];
-    /** Subscribe the remote app to whatever of `current` it lacks. Only
-     * ever ADDS (an event subscribed by hand stays). Throws on refusal. */
+    /** Subscribe the remote app to whatever of `current` it lacks and can
+     * hold without new permissions (an event needing a scope the app was
+     * never granted waits for an admin: the sync never forces a reinstall).
+     * Only ever ADDS (an event subscribed by hand stays). Throws on refusal. */
     sync(input: { accessToken: string; externalId: string }): Promise<void>;
   };
 

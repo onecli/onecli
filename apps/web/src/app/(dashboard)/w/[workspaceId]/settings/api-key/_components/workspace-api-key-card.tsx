@@ -1,7 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { RefreshCw, Eye, EyeOff, Copy, Check, Loader2 } from "lucide-react";
+import {
+  RefreshCw,
+  Eye,
+  EyeOff,
+  Copy,
+  Check,
+  Info,
+  Loader2,
+} from "lucide-react";
 import {
   Card,
   CardContent,
@@ -23,6 +31,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { DOCS_URL } from "@/lib/components/docs-link";
 import {
   useRegenerateWorkspaceApiKey,
   useWorkspaceApiKey,
@@ -48,7 +57,7 @@ export const WorkspaceApiKeyCard = () => {
           are attributed to you. Install uses it in its sign-in command.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           {isPending ? (
             <Skeleton className="h-9 flex-1 rounded-md" />
@@ -131,6 +140,24 @@ export const WorkspaceApiKeyCard = () => {
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+        </div>
+        <div className="text-muted-foreground flex items-start gap-2 text-xs">
+          <Info className="mt-0.5 size-3 shrink-0" />
+          <span>
+            Send it as{" "}
+            <code className="bg-muted rounded px-1 py-0.5">
+              Authorization: Bearer oc_...
+            </code>
+            .{" "}
+            <a
+              href={`${DOCS_URL}/api-reference#workspace-keys`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground underline underline-offset-2"
+            >
+              Workspace keys in the docs
+            </a>
+          </span>
         </div>
       </CardContent>
     </Card>

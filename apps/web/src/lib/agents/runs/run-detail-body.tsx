@@ -1,4 +1,4 @@
-import { ToolGroup } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/chat/_components/tool-group";
+import { WorkTimeline } from "@/app/(dashboard)/w/[workspaceId]/agents/[agentId]/chat/_components/work-timeline";
 import type { RunDetail } from "@/lib/api";
 import type { ToolCall } from "@/lib/chat/transcript";
 import { isActiveTurnStatus } from "@/lib/chat/turns";
@@ -17,7 +17,7 @@ const toToolCall = (tool: RunDetail["tools"][number]): ToolCall => ({
 
 /**
  * One run in full: the question, the steps the agent took (the chat's own
- * tool group), the apps it reached, and how it ended.
+ * work timeline), the apps it reached, and how it ended.
  *
  * SECURITY: every string is untrusted model or tool text and renders as
  * text; the answer is shown as plain text, never markdown.
@@ -34,10 +34,12 @@ export const RunDetailBody = ({ run }: { run: RunDetail }) => {
 
       {run.tools.length > 0 && (
         <RunSection title="Steps">
-          <ToolGroup
+          <WorkTimeline
             tools={run.tools.map(toToolCall)}
             turnEnded={!active}
             startedAt={run.startedAt ?? run.createdAt}
+            finishedAt={run.finishedAt}
+            stopped={run.status === "failed" || run.status === "aborted"}
             defaultOpen
           />
         </RunSection>

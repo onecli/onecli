@@ -1,10 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { ArrowRight, Infinity as InfinityIcon } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { cn } from "@onecli/ui/lib/utils";
-import { useOrgPrefix } from "@/lib/org-navigation";
 import { getPlanConfig, normalizePlan } from "@onecli/api/ee/billing/plans";
 import type { UsageOverview } from "@/ee/billing/api-request-actions";
 import { pct } from "@/ee/billing/format";
@@ -72,7 +70,6 @@ const UsageRing = ({
 };
 
 export const PlanUsageContent = ({ data }: { data: UsageOverview }) => {
-  const orgPrefix = useOrgPrefix();
   const hasLimitedResource = data.resources.some((r) => r.limit !== Infinity);
   const anyAtLimit = data.resources.some(
     (r) => r.limit !== Infinity && r.current >= r.limit,
@@ -89,11 +86,20 @@ export const PlanUsageContent = ({ data }: { data: UsageOverview }) => {
           plan {anyAtLimit ? "- quota limit reached" : "usage"}
         </p>
         {hasLimitedResource && (
-          <Button variant="outline" size="sm" className="shrink-0" asChild>
-            <Link href={`${orgPrefix}/billing`}>
-              Upgrade
-              <ArrowRight className="size-3.5" />
-            </Link>
+          // The plans sit above this card on the same page (Billing &
+          // usage): Upgrade takes the reader to them.
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() =>
+              document
+                .getElementById("plans")
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
+            }
+          >
+            Upgrade
+            <ArrowRight className="size-3.5" />
           </Button>
         )}
       </div>

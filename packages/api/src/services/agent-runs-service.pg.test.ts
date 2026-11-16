@@ -16,7 +16,7 @@ import type { AgentEvent } from "@onecli/agent-protocol";
  *    never a colleague's direct thread;
  *  - where roles are enforced, an org admin sees every run. A list names a
  *    colleague's direct run but carries none of its content; `getRun` flags
- *    it as `viewedOthersDirect` (the route audits that read). Without role
+ *    it as `viewedOthersPrivateThread` (the route audits that read). Without role
  *    enforcement there is no override;
  *  - "apps used" comes from the gateway log inside the turn window, LLM
  *    traffic excluded, and rows outside the window do not count;
@@ -430,12 +430,12 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
       agentId,
       turnIds.bDirect!,
     );
-    expect(opened.viewedOthersDirect).toBe(true);
+    expect(opened.viewedOthersPrivateThread).toBe(true);
     expect(opened.run.question).toBe("B: private question");
     const own = await runs.getRun(WS, ORG, USER_A, agentId, turnIds.aDirect!);
-    expect(own.viewedOthersDirect).toBe(false);
+    expect(own.viewedOthersPrivateThread).toBe(false);
     const evalRun = await runs.getRun(WS, ORG, USER_A, agentId, turnIds.eval!);
-    expect(evalRun.viewedOthersDirect).toBe(false);
+    expect(evalRun.viewedOthersPrivateThread).toBe(false);
   });
 
   it("apps used come from the gateway window; LLM and out-of-window rows excluded", async () => {
@@ -634,7 +634,8 @@ describe.skipIf(!PROOF_URL)("agent runs (pg)", () => {
     await db.turn.update({ where: { id }, data: { userId: USER_A } });
     try {
       expect(
-        (await runs.getRun(WS, ORG, USER_A, agentId, id)).viewedOthersDirect,
+        (await runs.getRun(WS, ORG, USER_A, agentId, id))
+          .viewedOthersPrivateThread,
       ).toBe(true);
       expect(
         (await runs.listRuns(WS, ORG, USER_A, agentId)).runs.find(

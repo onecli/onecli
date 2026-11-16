@@ -17,12 +17,13 @@ const hoisted = vi.hoisted(() => ({
   granted: [] as string[],
   orgGranted: [] as string[],
   entitled: false,
+  pending: false,
 }));
 
 vi.mock("@/hooks/use-connections", () => ({
   useConnections: () => ({
-    data: hoisted.connections,
-    isPending: false,
+    data: hoisted.pending ? undefined : hoisted.connections,
+    isPending: hoisted.pending,
     isError: false,
   }),
 }));
@@ -100,6 +101,28 @@ const conn = (id: string): Connection => ({
 });
 
 describe("AppsTab active / inactive split", () => {
+  it("holds the rows' places while the reads land, in either shape, never a spinner", () => {
+    hoisted.connections = [conn("a")];
+    hoisted.granted = ["a"];
+    hoisted.pending = true;
+    try {
+      const page = render(<AppsTab agentId="agent-1" />);
+      const busy = page.container.querySelector("[aria-busy='true']");
+      expect(busy?.className).toContain("divide-y");
+      expect(screen.getByText("Loading app connections…")).toBeInTheDocument();
+      // No toggle row over reads that have not landed.
+      expect(screen.queryByTestId("row")).toBeNull();
+      expect(page.container.querySelector(".animate-spin")).toBeNull();
+      page.unmount();
+
+      const chooser = render(<AppsTab agentId="agent-1" chooser />);
+      expect(
+        chooser.container.querySelector("[aria-busy='true']")?.className,
+      ).toContain("grid");
+    } finally {
+      hoisted.pending = false;
+    }
+  });
   it("shows active connections and folds the inactive ones away", async () => {
     hoisted.connections = [conn("on"), conn("org"), conn("off1"), conn("off2")];
     hoisted.granted = ["on"];

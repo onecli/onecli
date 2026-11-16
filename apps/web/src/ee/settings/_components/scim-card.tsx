@@ -1,7 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Check, CircleCheck, Copy, KeyRound, Lock, Trash2 } from "lucide-react";
+import {
+  Check,
+  CircleCheck,
+  Copy,
+  KeyRound,
+  Trash2,
+  UsersRound,
+} from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card, CardContent } from "@onecli/ui/components/card";
 import { Input } from "@onecli/ui/components/input";
@@ -35,6 +42,7 @@ import {
   useRevokeScimToken,
 } from "@/hooks/use-scim-tokens";
 import { usePlanGate } from "@/lib/plan-gate";
+import { SsoPanelHeader } from "./sso-panel";
 
 /**
  * SCIM provisioning: the base URL + bearer tokens an IdP admin pastes into
@@ -92,27 +100,17 @@ export const ScimCard = () => {
     <>
       <Card>
         <CardContent className="space-y-5">
-          <div className="flex items-start justify-between gap-6">
-            <div className="grid gap-1">
-              <Label className="flex items-center gap-1.5">
-                {locked && <Lock className="size-3.5" />}
-                SCIM provisioning
-              </Label>
-              <p className="text-muted-foreground text-sm">
-                Let your identity provider create, update, and deactivate
-                members automatically. Paste the base URL and a token into your
-                IdP&apos;s provisioning settings.
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="shrink-0"
-              onClick={handleGenerateClick}
-            >
-              Generate token
-            </Button>
-          </div>
+          <SsoPanelHeader
+            icon={UsersRound}
+            title="SCIM provisioning"
+            locked={locked}
+            description="Let your identity provider create, update, and deactivate members automatically. Paste the base URL and a token into your IdP's provisioning settings."
+            action={
+              <Button size="sm" variant="outline" onClick={handleGenerateClick}>
+                Generate token
+              </Button>
+            }
+          />
 
           <div className="grid gap-2">
             <Label htmlFor="scim-base-url">SCIM base URL</Label>

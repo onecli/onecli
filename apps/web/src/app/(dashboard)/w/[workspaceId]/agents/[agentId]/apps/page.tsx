@@ -1,7 +1,5 @@
 import { redirect } from "next/navigation";
-
-const agentBase = (workspaceId: string, agentId: string) =>
-  `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}`;
+import { agentPagePath } from "@/lib/navigation";
 
 interface Props {
   params: Promise<{ workspaceId: string; agentId: string }>;
@@ -28,6 +26,6 @@ export default async function AgentAppsPage({ params, searchParams }: Props) {
   // id would re-target the redirect at a different /p route (the house rule
   // for every id read off the URL).
   redirect(
-    `${agentBase(workspaceId, agentId)}/connections${search ? `?${search}` : ""}`,
+    `${agentPagePath(workspaceId, agentId, "connections")}${search ? `?${search}` : ""}`,
   );
 }

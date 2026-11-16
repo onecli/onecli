@@ -21,6 +21,7 @@ import {
 import type { ChannelTransport } from "@/lib/api";
 import { useAttachChannel, useDetachChannel } from "@/hooks/use-channels";
 import { openInstallPopup } from "@/lib/agents/install-popup";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 import { SlackDetachDialog } from "./slack-detach-dialog";
 import { SlackGuidedSocketSteps } from "./slack-guided-socket-steps";
 import { SlackManifestFloor } from "./slack-manifest-floor";
@@ -34,10 +35,8 @@ interface SlackAttachCardProps {
   /** A pending presence resumes on ITS stamped transport. */
   pendingTransport?: ChannelTransport;
   hasOrgCredentials: boolean;
-  /** Where "connect Slack for your organization" points. */
-  organizationId: string;
-  /** Whether the caller may OPEN that page (it's admin-gated): members get
-   * "ask an admin" copy instead of a link that silently bounces them. */
+  /** Whether the caller may open Settings > Slack (it's admin-only):
+   * members get "ask an admin" copy instead of a link that opens nothing. */
   viewerIsOrgAdmin: boolean;
   /** A `pending_setup` presence exists: re-running create returns fresh URLs. */
   resuming: boolean;
@@ -75,7 +74,6 @@ export const SlackAttachCard = ({
   posture,
   pendingTransport,
   hasOrgCredentials,
-  organizationId,
   viewerIsOrgAdmin,
   resuming,
   removed = false,
@@ -83,6 +81,7 @@ export const SlackAttachCard = ({
   resumeAppId = null,
   awaitingTransportCredential = false,
 }: SlackAttachCardProps) => {
+  const settingsHref = useSettingsHref();
   const attach = useAttachChannel(agentId, "slack");
   const detach = useDetachChannel(agentId, "slack");
   const [picked, setPicked] = useState<ChannelTransport>(
@@ -285,7 +284,7 @@ export const SlackAttachCard = ({
             </p>
             {viewerIsOrgAdmin ? (
               <Button size="sm" className="mt-3" asChild>
-                <Link href={`/org/${organizationId}/channels`}>
+                <Link href={settingsHref("slack")}>
                   Set up Slack for the organization
                 </Link>
               </Button>

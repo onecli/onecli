@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTIVITY_TEXT_MAX,
+  REASONING_TAIL_MAX,
   activityForReasoning,
+  activityForReasoningStream,
   activityForToolCall,
   activityForTool,
   bareToolName,
@@ -79,6 +81,114 @@ describe("activityForReasoning", () => {
     expect(activityForReasoning("")).toBeNull();
     expect(activityForReasoning("   \n\t\n  ")).toBeNull();
     expect(activityForReasoning("***")).toBeNull();
+  });
+});
+
+describe("activityForReasoningStream", () => {
+  /** A reasoning stream as the transcript holds it: the deltas glued back
+   *  together, read after each delta lands. */
+  const captionsWhileStreaming = (deltas: string[]): (string | null)[] => {
+    let acc = "";
+    return deltas.map((delta) => {
+      acc += delta;
+      return activityForReasoningStream(acc);
+    });
+  };
+
+  it("never shows a fragment however the stream is cut (the bug this fixes)", () => {
+    // The exact shape from the field: a summary heading then prose, cut by
+    // network batches at arbitrary characters. Per-delta derivation showed
+    // "d memory first, then review…" and "ngs must be picked up before any wo".
+    const reasoning =
+      "**Laying out the plan for the recurring check**\n\n" +
+      "I need to read memory first, then review my open PRs for new CI failures or review comments. " +
+      "If the lock is held by another run I should stop, plus open findings must be picked up before any work is chosen. " +
+      "**Choosing the top finding**\n\nThen I can pick the top finding and validate it.";
+    const cuts = [62, 48, 97, 35, 110, 71, 44];
+    const deltas: string[] = [];
+    for (let i = 0, k = 0; i < reasoning.length; k++) {
+      const n = cuts[k % cuts.length]!;
+      deltas.push(reasoning.slice(i, i + n));
+      i += n;
+    }
+    const captions = captionsWhileStreaming(deltas).filter(
+      (c): c is string => c !== null,
+    );
+    expect(new Set(captions)).toEqual(
+      new Set([
+        "Laying out the plan for the recurring check",
+        "Choosing the top finding",
+      ]),
+    );
+  });
+
+  it("prefers the latest heading over the prose under it", () => {
+    expect(
+      activityForReasoningStream(
+        "**Reading the logs**\nThe build failed twice.\n**Checking the config**\nIt sets ",
+      ),
+    ).toBe("Checking the config");
+  });
+
+  it("falls back to the latest COMPLETE sentence when there is no heading", () => {
+    expect(
+      activityForReasoningStream(
+        "First I will check the CI logs. Then I compare the two runs. Next I",
+      ),
+    ).toBe("Then I compare the two runs.");
+  });
+
+  it("does not read a heading that is still being written", () => {
+    // `**Checking the con` has no closing marks yet: the earlier, finished
+    // heading stands.
+    expect(
+      activityForReasoningStream("**Reading the logs**\n**Checking the con"),
+    ).toBe("Reading the logs");
+  });
+
+  it("returns null until a whole thought exists, so the previous caption stands", () => {
+    expect(activityForReasoningStream("")).toBeNull();
+    expect(activityForReasoningStream("I need to check")).toBeNull();
+    expect(activityForReasoningStream("**Plann")).toBeNull();
+  });
+
+  it("only reads the tail of a very long stream", () => {
+    const long = `${"Filler sentence here. ".repeat(500)}**Final step**\n`;
+    expect(long.length).toBeGreaterThan(REASONING_TAIL_MAX);
+    expect(activityForReasoningStream(long)).toBe("Final step");
+  });
+
+  it("never reads the cut-off back half of a sentence at the tail's start", () => {
+    // The tail slice lands mid-word: "…ntence here." must not be a caption.
+    const long = `${"word ".repeat(1_000)}tail end. Last whole one.`;
+    expect(activityForReasoningStream(long)).toBe("Last whole one.");
+    expect(activityForReasoningStream(`${"x".repeat(5_000)}`)).toBeNull();
+  });
+
+  it("does not mistake inline emphasis for a heading", () => {
+    expect(
+      activityForReasoningStream("This is **important** to check. Then"),
+    ).toBe("This is important to check.");
+  });
+
+  it("keeps a dotted token (a version, a file name) inside its sentence", () => {
+    // A dot only ends a sentence when whitespace follows it: "2.7.1" and
+    // "config.prod.yaml" are words, never the start of a caption.
+    expect(activityForReasoningStream("Version 2.7.1 is pinned. Next I")).toBe(
+      "Version 2.7.1 is pinned.",
+    );
+    expect(
+      activityForReasoningStream("Reading config.prod.yaml now. Next I"),
+    ).toBe("Reading config.prod.yaml now.");
+  });
+
+  it("reads a closed status line that has no period", () => {
+    // Short reasoning lines often skip the period; once the newline closes
+    // the line, it is a whole thought. The open line after it is not.
+    expect(activityForReasoningStream("Reviewing the diff\nNext I")).toBe(
+      "Reviewing the diff",
+    );
+    expect(activityForReasoningStream("Reviewing the di")).toBeNull();
   });
 });
 

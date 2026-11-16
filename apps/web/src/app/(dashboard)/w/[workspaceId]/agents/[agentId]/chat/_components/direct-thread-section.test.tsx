@@ -586,3 +586,39 @@ describe("the send pin", () => {
     await waitFor(() => expect(pinnedSend()).toBe("true"));
   });
 });
+
+describe("while the thread's door is opening", () => {
+  afterEach(() => {
+    vi.mocked(conversations.ensureDirect).mockReset();
+  });
+
+  it("holds the composer's place with its skeleton, and offers no live composer", async () => {
+    // The door never answers: nothing to send to yet. The strip the
+    // composer will fill is already drawn, so it replaces it in place
+    // (no jump), and there is no box to type a doomed message into.
+    vi.mocked(conversations.ensureDirect).mockReturnValue(
+      new Promise(() => undefined) as never,
+    );
+    renderSection();
+    await waitFor(() => expect(conversations.ensureDirect).toHaveBeenCalled());
+    expect(screen.getByTestId("composer-skeleton")).toBeInTheDocument();
+    expect(screen.getByText("Loading the conversation")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer")).toBeNull();
+  });
+
+  it("swaps the skeleton for the real composer once the thread exists", async () => {
+    vi.mocked(conversations.ensureDirect).mockResolvedValue({
+      id: "conv-1",
+    } as never);
+    vi.mocked(conversations.turns).mockResolvedValue({
+      turns: [],
+      hasMore: false,
+      oldestSeq: null,
+    });
+    renderSection();
+    await waitFor(() =>
+      expect(screen.getByTestId("composer")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("composer-skeleton")).toBeNull();
+  });
+});

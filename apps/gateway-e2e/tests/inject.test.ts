@@ -366,9 +366,8 @@ describe("injection shapes", () => {
 /**
  * Org-scoped secrets are a tenancy boundary, not a convenience.
  *
- * The `scope = 'organization'` predicate exists in exactly one SQL string
- * (`db.rs:333`); deleting it is a one-character change that compiles and breaks
- * no other test.
+ * Deleting the `scope = 'organization'` predicate from `db::find_secrets_by_org`
+ * is a small change that compiles and breaks no other test.
  */
 describe("secret scope", () => {
   scenario("injects an organization-scoped secret", async (cx) => {

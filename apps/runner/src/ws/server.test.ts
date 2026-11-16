@@ -94,9 +94,14 @@ let received: Array<{ sandboxId: string; message: SupervisorMessage }>;
 /** Items the server sends, captured from connect (the session hand-off is
  * sent right after the upgrade, before `open` resolves for the test). */
 const inbox = new WeakMap<WebSocket, unknown[]>();
-const open = (query: string): Promise<{ ok: boolean; ws?: WebSocket }> =>
+/** `autoPong: false` stands in for a frozen peer: its socket stays open
+ * and nothing on it answers a ping. */
+const open = (
+  query: string,
+  options: { autoPong?: boolean } = {},
+): Promise<{ ok: boolean; ws?: WebSocket }> =>
   new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/${query}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/${query}`, options);
     const items: unknown[] = [];
     inbox.set(ws, items);
     ws.on("message", (data) => items.push(JSON.parse(data.toString())));
@@ -112,12 +117,16 @@ const nextItem = async (ws: WebSocket): Promise<unknown> => {
 };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 
-const start = async (sessions = true) => {
+const start = async (
+  sessions = true,
+  liveness?: { intervalMs: number; timeoutMs: number },
+) => {
   server = createRunnerWsServer({
     port: 0,
     onMessage: (sandboxId, message) => received.push({ sandboxId, message }),
     channels: plane,
     ...(sessions && { keyring }),
+    ...(liveness && { liveness }),
     reclaimMinMs: 10,
   });
   await server.listen();
@@ -125,10 +134,14 @@ const start = async (sessions = true) => {
 };
 
 /** Spawn a sandbox on the fake plane and connect it through the token door. */
-const firstConnect = async (sandboxId = "sb-1", containerRef = "ctr-1") => {
+const firstConnect = async (
+  sandboxId = "sb-1",
+  containerRef = "ctr-1",
+  options: { autoPong?: boolean } = {},
+) => {
   const token = `${sandboxId}-${containerRef}-token`.padEnd(64, "0");
   plane.spawn(sandboxId, containerRef, token);
-  const opened = await open(`?token=${token}`);
+  const opened = await open(`?token=${token}`, options);
   return { ...opened, token };
 };
 
@@ -462,18 +475,35 @@ describe("shutdown", () => {
   });
 });
 
-describe("keepalive", () => {
-  it("pings every live connection on the configured cadence", async () => {
+/**
+ * Channel liveness, the runner's side: every socket is pinged, a pong or any
+ * frame is hearing from it, and one silent past the limit is closed. A
+ * stalled sandbox keeps its socket OPEN, so without this its channel read
+ * as held and every turn handed to it waited forever.
+ */
+describe("liveness", () => {
+  const LIVENESS = { intervalMs: 20, timeoutMs: 120 };
+  const waitFor = async (check: () => boolean, ms = 2_000) => {
+    for (let waited = 0; waited < ms && !check(); waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return check();
+  };
+  /** Restart on the test cadence, recording both close callbacks. */
+  const restart = async () => {
     await server.close();
-    server = createRunnerWsServer({
-      port: 0,
-      onMessage: () => undefined,
-      channels: plane,
-      keyring,
-      pingIntervalMs: 20,
-    });
-    await server.listen();
-    port = server.boundPort();
+    await start(true, LIVENESS);
+    const closed: string[] = [];
+    const silenced: Array<{ sandboxId: string; containerRef: string }> = [];
+    server.onDisconnect((sandboxId) => closed.push(sandboxId));
+    server.onUnresponsive((sandboxId, containerRef) =>
+      silenced.push({ sandboxId, containerRef }),
+    );
+    return { closed, silenced };
+  };
+
+  it("pings every live socket on the cadence", async () => {
+    await restart();
     const { ws } = await firstConnect();
     const pinged = await new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => resolve(false), 1_000);
@@ -483,5 +513,75 @@ describe("keepalive", () => {
       });
     });
     expect(pinged).toBe(true);
+  });
+
+  it("closes a socket that stopped answering, releases it, and reports it unresponsive while others answer", async () => {
+    // MUTATION-PROOF: never judge silence (the frozen socket stays open
+    // forever), or ignore pongs (the healthy one is closed too).
+    const { closed, silenced } = await restart();
+    const { ws: healthy } = await firstConnect("sb-ok", "ctr-ok");
+    const { ws: frozen } = await firstConnect("sb-1", "ctr-1", {
+      autoPong: false,
+    });
+    const frozenClosed = new Promise<void>((resolve) =>
+      frozen!.once("close", () => resolve()),
+    );
+
+    expect(await waitFor(() => closed.includes("sb-1"))).toBe(true);
+    await frozenClosed;
+    expect(server.connection("sb-1")).toBeUndefined();
+    expect(silenced).toEqual([{ sandboxId: "sb-1", containerRef: "ctr-1" }]);
+    // Its channel is handed back like any closed socket's.
+    expect(plane.releases).toContain(plane.holders.get("sb-1"));
+    // The one that answers its pings is untouched.
+    expect(server.connection("sb-ok")).toBeDefined();
+    expect(healthy!.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("counts any frame as hearing from the supervisor, not only a pong", async () => {
+    // A supervisor busy streaming answers every ping late but talks all
+    // the time: it must never read as silent.
+    const { closed } = await restart();
+    await firstConnect("sb-ok", "ctr-ok");
+    const { ws } = await firstConnect("sb-1", "ctr-1", { autoPong: false });
+    const talking = setInterval(() => {
+      ws!.send(JSON.stringify({ kind: "ready", harness: "x" }));
+    }, 30);
+    await new Promise((resolve) => setTimeout(resolve, LIVENESS.timeoutMs * 4));
+    clearInterval(talking);
+    expect(closed).toEqual([]);
+    expect(server.connection("sb-1")).toBeDefined();
+  });
+
+  it("closes every socket when all of them went quiet together, but reports none unresponsive", async () => {
+    // A fault of this copy or its network looks exactly like this: each
+    // supervisor redials, and the ordinary reconnect grace decides.
+    const { closed, silenced } = await restart();
+    await firstConnect("sb-1", "ctr-1", { autoPong: false });
+    await firstConnect("sb-2", "ctr-2", { autoPong: false });
+    expect(
+      await waitFor(() => closed.includes("sb-1") && closed.includes("sb-2")),
+    ).toBe(true);
+    expect(silenced).toEqual([]);
+  });
+
+  it("restarts every clock when the check itself ran late, instead of closing anyone", async () => {
+    // A paused process (a long GC, a frozen host) sees every socket as
+    // silent the moment it wakes: none of that silence is the supervisors'.
+    vi.useFakeTimers({ toFake: ["setInterval", "Date"] });
+    try {
+      const { closed, silenced } = await restart();
+      await firstConnect("sb-ok", "ctr-ok");
+      await firstConnect("sb-1", "ctr-1");
+      vi.advanceTimersByTime(LIVENESS.intervalMs);
+      // The event loop stalls far past the limit, then the check fires.
+      vi.setSystemTime(Date.now() + LIVENESS.timeoutMs * 10);
+      vi.advanceTimersByTime(LIVENESS.intervalMs);
+      expect(closed).toEqual([]);
+      expect(silenced).toEqual([]);
+      expect(server.connection("sb-1")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -25,6 +25,7 @@ import {
   WORKSPACE_PATH_RE,
   agentSectionPath,
   connectionsPath,
+  mergedSectionPath,
 } from "@/lib/navigation";
 import { withConnectLinkAgent } from "@/lib/connect-link-agent";
 import { useChatSend } from "@/lib/chat/chat-send";
@@ -192,7 +193,7 @@ export const ConnectAppPickerDialog = ({
     router.push(
       hasSlackApp
         ? agentSectionPath(pathname, agentId, "contacts")
-        : agentSectionPath(pathname, agentId, "channels"),
+        : mergedSectionPath(pathname, agentId, "channels"),
     );
   };
 

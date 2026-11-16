@@ -139,6 +139,7 @@ export const ConnectSuggestionRow = ({
       return row(
         <span className="text-muted-foreground">{app.description}</span>,
         <Button
+          variant="outline"
           size="xs"
           aria-label={`Connect ${app.name}`}
           onClick={onConnect}
@@ -171,6 +172,7 @@ export const ConnectSuggestionRow = ({
           Connected, not attached to this agent
         </span>,
         <Button
+          variant="outline"
           size="xs"
           aria-label={`Attach ${app.name} for this agent`}
           onClick={onAttach}

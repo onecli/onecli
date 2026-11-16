@@ -677,7 +677,7 @@ describe("the create dialog", () => {
     await user.type(screen.getByLabelText(/^Name/), "deploy-notes");
     await user.type(screen.getByLabelText(/^Description/), "How to ship");
     await user.click(screen.getByLabelText(/Instructions/));
-    await user.paste("x".repeat(32_001));
+    await user.paste("x".repeat(120_001));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     expect(state.create).not.toHaveBeenCalled();
@@ -687,8 +687,42 @@ describe("the create dialog", () => {
       "true",
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Too long to save. Shorten the instructions or files.",
+      "Too long to save. Shorten the instructions.",
     );
+  });
+
+  it("a long imported skill with a file grows by two lines (warns, never blocks)", async () => {
+    // A 46,000-char body plus an imported 8,000-char file. The old cap (the
+    // body's own imported length) counted the file too, so it couldn't grow.
+    const long = "x".repeat(46_000);
+    state.skills = [skill()];
+    state.detail = {
+      ...skill(),
+      content: long,
+      files: [
+        {
+          path: "run",
+          content: "",
+          editable: false,
+          executable: true,
+          bytes: 8_000,
+        },
+      ],
+    };
+    renderSection();
+    await user.click(
+      screen.getByRole("button", { name: "Edit release-checklist" }),
+    );
+    await user.click(screen.getByLabelText(/Instructions/));
+    await user.keyboard("{Control>}{End}{/Control}");
+    await user.paste("\n- two more lines");
+
+    // The nudge is visible and announced with the field, not colour alone.
+    expect(screen.getByLabelText(/Instructions/)).toHaveAccessibleDescription(
+      /Long skill: the agent reads all of it each time it loads/,
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(state.update).toHaveBeenCalled();
   });
 
   it("a file row with a path but no content blocks Save instead of vanishing", async () => {

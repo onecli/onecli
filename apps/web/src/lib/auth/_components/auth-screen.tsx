@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { BrandLogo } from "@/lib/components/brand-logo";
+import { Character } from "@/lib/components/character";
 
 export interface AuthScreenProps {
   title: string;
@@ -14,19 +15,26 @@ export interface AuthScreenProps {
  * Extracted because the same markup was already repeated verbatim across the
  * self-hosted login, the cloud login and the reviewer login, and sign-up would
  * have made a fourth copy.
+ *
+ * The root is the page's `main` landmark: these screens render outside the
+ * dashboard chrome, so nothing else gives screen-reader users one.
  */
 export const AuthScreen = ({ title, subtitle, children }: AuthScreenProps) => (
-  <div className="bg-background flex min-h-svh flex-col items-center justify-center px-6 pb-24">
+  <main className="bg-background flex min-h-svh flex-col items-center justify-center px-6 pb-24">
     <BrandLogo />
 
-    <div className="mb-8 text-center">
-      <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight sm:text-5xl">
-        {title}
-      </h1>
+    <div className="mb-12 text-center">
+      <h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
       <div className="text-muted-foreground mt-3 text-lg">{subtitle}</div>
     </div>
 
-    <div className="border-border/50 bg-card w-full max-w-sm rounded-2xl border p-8">
+    <div className="bg-card relative w-full max-w-sm rounded-xl border p-8">
+      {/* The green cloud from onecli.sh, perched on the card's top edge. */}
+      <Character
+        name="cloud"
+        size={64}
+        className="absolute -top-[55px] right-7"
+      />
       {children}
 
       {/* Inside the card, on the card's own surface — where the cloud login
@@ -43,5 +51,5 @@ export const AuthScreen = ({ title, subtitle, children }: AuthScreenProps) => (
         .
       </p>
     </div>
-  </div>
+  </main>
 );

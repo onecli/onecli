@@ -96,6 +96,15 @@ const directOrigin = {
   userId: "user-1",
 };
 
+/** A DM thread of the creator's: sourced (not `direct`) yet owned, so it
+ * is private and the wake runs in it like in their direct thread. */
+const dmThreadOrigin = {
+  id: "conv-origin",
+  agentId: "ag-1",
+  direct: false,
+  userId: "user-1",
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.sweepLostProcesses.mockResolvedValue(0);
@@ -224,6 +233,36 @@ describe("fireDueWatches — the hidden path (non-direct origins)", () => {
 describe("fireDueWatches — the in-origin wake (direct origins)", () => {
   beforeEach(() => {
     mocks.conversationFindMany.mockResolvedValue([directOrigin]);
+  });
+
+  it("a DM THREAD origin (owned, not direct) is woken in place like the direct thread", async () => {
+    mocks.conversationFindMany.mockResolvedValue([dmThreadOrigin]);
+
+    await fireDueWatches();
+
+    expect(mocks.ensureSourcedConversation).not.toHaveBeenCalled();
+    expect(mocks.createTurn).toHaveBeenCalledWith(
+      "pr-1",
+      "conv-origin",
+      expect.any(String),
+      { source: "watch", userId: null, directWake: { agentId: "ag-1" } },
+    );
+  });
+
+  it("a DM thread origin owned by someone else than the creator takes the hidden path", async () => {
+    mocks.conversationFindMany.mockResolvedValue([
+      { ...dmThreadOrigin, userId: "user-2" },
+    ]);
+
+    await fireDueWatches();
+
+    expect(mocks.ensureSourcedConversation).toHaveBeenCalled();
+    expect(mocks.createTurn).toHaveBeenCalledWith(
+      "pr-1",
+      "conv-run",
+      expect.any(String),
+      { source: "watch", userId: null },
+    );
   });
 
   it("marks fired only AFTER the turn exists — a failed create leaves the claim for the lease", async () => {

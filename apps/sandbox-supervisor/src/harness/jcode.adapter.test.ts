@@ -51,6 +51,8 @@ interface PushableClient {
   push(frame: unknown): void;
   end(): void;
   emitNamed(event: string, frame: unknown): void;
+  /** The runtime died under this connection (stream ends, `close`). */
+  die(): void;
 }
 
 const state: {
@@ -58,6 +60,10 @@ const state: {
   launches: { options: Record<string, unknown> }[];
   clients: PushableClient[];
   connects: { options: Record<string, unknown> }[];
+  /** The runtime keep-alive connections, one per launch, kept apart from
+   * `clients` / `connects` (the conversations') so a test reads a
+   * conversation's connection by its index alone. */
+  keepAlives: (PushableClient & { closed: boolean })[];
   sessionCounter: number;
   /** Frames a successfully-accepted send delivers (the turn's script). */
   events: { ev: string; [key: string]: unknown }[];
@@ -104,13 +110,21 @@ const state: {
     toolCallId?: string;
     toolName?: string;
   };
+  /** When set, the next `attachSession` rejects with it (once): the
+   * daemon refusing a ref it has no record of. */
+  attachError: Error | null;
   /** Every launched bridge process (a real emitter + stderr stream). */
   bridges: (EventEmitter & { stderr: PassThrough })[];
+  /** How the "daemon" answers `fork_session`: a refusal, or a copy. */
+  forkError: Error | null;
+  /** When set, the next `launchInstance` rejects with it (once). */
+  launchError: Error | null;
 } = {
   calls: [],
   launches: [],
   clients: [],
   connects: [],
+  keepAlives: [],
   sessionCounter: 0,
   events: [{ ev: "turn_done" }],
   busyRefusals: 0,
@@ -130,6 +144,9 @@ const state: {
   capabilities: [SOFT_INTERRUPT_IDS_CAPABILITY],
   backgroundToolResult: { moved: false },
   bridges: [],
+  forkError: null,
+  launchError: null,
+  attachError: null,
 };
 
 vi.mock("@1jehuang/jcode-sdk", () => {
@@ -138,6 +155,8 @@ vi.mock("@1jehuang/jcode-sdk", () => {
   };
   class MockClient {
     readonly sessionId: string;
+    /** Set by `close()`, ours or the "daemon's" (`die`). */
+    closed = false;
     private readonly frames: unknown[] = [];
     private streamWaiter?: (result: IteratorResult<unknown>) => void;
     private streamDone = false;
@@ -168,7 +187,19 @@ vi.mock("@1jehuang/jcode-sdk", () => {
         handler(frame);
       }
     }
+    /** The runtime died under this connection: its stream ends, and the
+     * SDK raises `close` with no error (the live shape, measured). */
+    die() {
+      this.closed = true;
+      this.end();
+      this.emitNamed("close", undefined);
+    }
     static connect(options: Record<string, unknown>) {
+      if (String(options.clientName).endsWith("/keep-alive")) {
+        const keepAlive = new MockClient("keep-alive");
+        state.keepAlives.push(keepAlive);
+        return Promise.resolve(keepAlive);
+      }
       state.connects.push({ options });
       state.sessionCounter += 1;
       const client = new MockClient(`s-${state.sessionCounter}`);
@@ -182,6 +213,7 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     }
     close() {
       record("close", this.sessionId);
+      this.closed = true;
       return Promise.resolve();
     }
     createSession(workingDir: string) {
@@ -192,7 +224,22 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     }
     attachSession(id: string) {
       record("attachSession", id);
+      const attachError = state.attachError;
+      if (attachError) {
+        state.attachError = null;
+        return Promise.reject(attachError);
+      }
       return Promise.resolve({ session_id: id });
+    }
+    forkSession(id: string) {
+      record("forkSession", id);
+      if (state.forkError) return Promise.reject(state.forkError);
+      state.sessionCounter += 1;
+      return Promise.resolve({ session_id: `fork-of-${id}` });
+    }
+    detachSession(id: string) {
+      record("detachSession", id);
+      return Promise.resolve();
     }
     setModel(sessionId: string, model: string) {
       record("setModel", sessionId, model);
@@ -312,7 +359,10 @@ vi.mock("@1jehuang/jcode-sdk", () => {
       // Hand-rolled like the SDK's real iterator (never an async generator):
       // `return()` must unblock a PENDING `next()` immediately — an async
       // generator parked mid-await queues the return call forever, which is
-      // not how the real stream behaves.
+      // not how the real stream behaves. Each call is a fresh subscription
+      // (the SDK's is): one turn's closed stream never ends the next one's.
+      // A dead connection (`die`) stays ended.
+      if (!this.closed) this.streamDone = false;
       const finish = (): Promise<IteratorResult<unknown>> => {
         this.streamDone = true;
         const waiter = this.streamWaiter;
@@ -344,17 +394,30 @@ vi.mock("@1jehuang/jcode-sdk", () => {
     JcodeClient: MockClient,
     launchInstance: (options: Record<string, unknown>) => {
       state.launches.push({ options });
+      const launchError = state.launchError;
+      if (launchError) {
+        state.launchError = null;
+        return Promise.reject(launchError);
+      }
       // A real emitter with a stderr stream: the adapter subscribes to the
-      // bridge's `exit` (a death signal) and forwards its stderr.
+      // bridge's `exit` (a death signal) and forwards its stderr. `kill` is
+      // how teardown stops it (bridge first, see stopInstance).
       const bridge = Object.assign(new EventEmitter(), {
         stderr: new PassThrough(),
+        kill(signal: string) {
+          record("bridge.kill", signal);
+          return true;
+        },
       });
       state.bridges.push(bridge);
       return Promise.resolve({
         socketPath: "/tmp/fake-jcode-api.sock",
         jcodeHome: String(options.jcodeHome ?? ""),
         process: bridge,
-        shutdown: () => Promise.resolve(),
+        shutdown: () => {
+          record("shutdown");
+          return Promise.resolve();
+        },
       });
     },
     // Something that exists on disk — resolveJcodeBinary demands a real path.
@@ -372,6 +435,7 @@ import {
   MODEL_LIST_WAIT_MS,
   ORPHAN_DRAIN_MIN_MS,
   POST_ACCEPT_IDLE_MS,
+  RELAUNCH_WINDOW_MS,
   SOFT_INTERRUPT_IDS_CAPABILITY,
   TOOL_INPUT_MAX_CHARS,
   createJcodeHarness,
@@ -424,6 +488,7 @@ beforeEach(() => {
   state.launches = [];
   state.clients = [];
   state.connects = [];
+  state.keepAlives = [];
   state.sessionCounter = 0;
   state.events = [{ ev: "turn_done" }];
   state.busyRefusals = 0;
@@ -444,6 +509,9 @@ beforeEach(() => {
   state.capabilities = [SOFT_INTERRUPT_IDS_CAPABILITY];
   state.backgroundToolResult = { moved: false };
   state.bridges = [];
+  state.forkError = null;
+  state.launchError = null;
+  state.attachError = null;
   // A fast model-list wait; afterEach restores the real bounds.
   MODEL_LIST_WAIT_MS.value = 100;
   MODEL_LIST_POLL_MS.value = 5;
@@ -489,20 +557,27 @@ describe("the connection model", () => {
     expect(first.sessionRef).not.toBe(second.sessionRef);
   });
 
-  it("prewarm launches the ONE instance ahead of any session, and the first session reuses it (no second launch, no connection opened early)", async () => {
+  it("prewarm launches the ONE instance ahead of any session, holds ONE keep-alive from launch, and the first session reuses both", async () => {
     const harness = createJcodeHarness();
     const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
     harness.prewarm?.(homeDir);
     harness.prewarm?.(homeDir);
-    await vi.waitFor(() => expect(state.launches).toHaveLength(1));
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(1));
+    expect(state.launches).toHaveLength(1);
     // The launch's managed files are already on the home.
     expect(existsSync(join(homeDir, ".jcode", "system-prompt.md"))).toBe(true);
+    // THE IDLE-EXIT FIX: the daemon has a client from launch, so its
+    // 300 s no-client exit never arms. No conversation connection yet, and
+    // the keep-alive never opens a session or sends anything.
     expect(state.connects).toHaveLength(0);
+    expect(state.calls).toEqual([]);
 
     const session = await harness.startSession({ homeDir });
     expect(session.sessionRef).toBe("s-1");
     expect(state.launches).toHaveLength(1);
     expect(state.connects).toHaveLength(1);
+    expect(state.keepAlives).toHaveLength(1);
+    expect(state.keepAlives[0]?.closed).toBe(false);
   });
 
   it("pins the launch env at the launchInstance boundary", async () => {
@@ -711,6 +786,80 @@ describe("the connection model", () => {
     expect(events.at(-1)?.type).toBe("turn.done");
   });
 
+  it("a fork ref opens the session as a COPY of the parent: attach parent, fork, detach, attach the child", async () => {
+    // A DM thread's first session inherits the DM's transcript. jcode's
+    // fork acts on the attached session and leaves the connection on the
+    // parent, so the adapter walks it over to the child itself.
+    const harness = createJcodeHarness();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+
+    const forked = await harness.startSession({
+      homeDir,
+      forkSessionRef: "s-parent",
+    });
+
+    expect(
+      state.calls
+        .filter((c) =>
+          [
+            "attachSession",
+            "forkSession",
+            "detachSession",
+            "createSession",
+          ].includes(c.method),
+        )
+        .map((c) => [c.method, ...c.args]),
+    ).toEqual([
+      ["attachSession", "s-parent"],
+      ["forkSession", "s-parent"],
+      ["detachSession", "s-parent"],
+      ["attachSession", "fork-of-s-parent"],
+    ]);
+    expect(forked.sessionRef).toBe("fork-of-s-parent");
+    // The child is a session of its own: a turn runs on it like any other.
+    const events = await collect(forked.runTurn({ message: "in the thread" }));
+    expect(events.at(-1)?.type).toBe("turn.done");
+  });
+
+  it("a fork that the daemon refuses degrades to a FRESH session: the context is lost, never the turn", async () => {
+    state.forkError = new Error("Failed to save split session: not found");
+    const harness = createJcodeHarness();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+
+    const session = await harness.startSession({
+      homeDir,
+      forkSessionRef: "s-gone",
+    });
+
+    expect(callsOf("forkSession")).toEqual([
+      { method: "forkSession", args: ["s-gone"] },
+    ]);
+    // Let go of the parent before minting, so the fresh session is the one
+    // this connection serves.
+    expect(callsOf("detachSession")).toEqual([
+      { method: "detachSession", args: ["s-gone"] },
+    ]);
+    expect(callsOf("createSession")).toHaveLength(1);
+    expect(session.sessionRef).toBe("s-1");
+  });
+
+  it("a resume ref wins over a fork ref: a session that exists is resumed, never re-forked", async () => {
+    const harness = createJcodeHarness();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+
+    const resumed = await harness.startSession({
+      homeDir,
+      resumeSessionRef: "s-child",
+      forkSessionRef: "s-parent",
+    });
+
+    expect(callsOf("forkSession")).toHaveLength(0);
+    expect(callsOf("attachSession")).toEqual([
+      { method: "attachSession", args: ["s-child"] },
+    ]);
+    expect(resumed.sessionRef).toBe("s-child");
+  });
+
   it("a resume ref with NO live holder attaches normally — the restart shape", async () => {
     const harness = createJcodeHarness();
     const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
@@ -773,6 +922,454 @@ describe("the connection model", () => {
   });
 });
 
+/**
+ * The runtime's life: the keep-alive that stops jcode's idle exit, and the
+ * in-place relaunch when the daemon dies between turns anyway. The fatal
+ * path (`onFailure`, the sandbox recycled) stays for what a relaunch cannot
+ * honestly recover: a death under a turn or a session setup, a launch that
+ * fails, a second death inside RELAUNCH_WINDOW_MS.
+ */
+describe("the runtime lifecycle (keep-alive + in-place relaunch)", () => {
+  const ORIGINAL_RELAUNCH_WINDOW_MS = RELAUNCH_WINDOW_MS.value;
+  afterEach(() => {
+    RELAUNCH_WINDOW_MS.value = ORIGINAL_RELAUNCH_WINDOW_MS;
+  });
+
+  const watched = () => {
+    const failures: string[] = [];
+    const harness = createJcodeHarness();
+    harness.onFailure((reason) => failures.push(reason));
+    return { harness, failures };
+  };
+
+  /** The daemon dies: every connection it served closes, then the bridge
+   * exits (both signals, the order measured live). */
+  const killRuntime = (launch: number) => {
+    state.keepAlives[launch]?.die();
+    for (const client of state.clients) client.die();
+    state.bridges[launch]?.emit("exit", null, "SIGKILL");
+  };
+
+  it("a startSession launch opens exactly one keep-alive beside its conversation connection", async () => {
+    await startSession();
+    expect(state.launches).toHaveLength(1);
+    expect(state.keepAlives).toHaveLength(1);
+    expect(state.connects).toHaveLength(1);
+  });
+
+  it("a death between turns relaunches in place, and the held session reattaches on its OWN ref with its preferences replayed", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({
+      homeDir,
+      model: "claude-opus-4-1",
+      effort: "high",
+      env: { DISPLAY: ":1" },
+      context: { conversationId: "conv-a" },
+    });
+    await collect(session.runTurn({ message: "first", contextTokens: 9_000 }));
+    const ref = session.sessionRef;
+
+    killRuntime(0);
+    // Torn down bridge first (the zombie-free order), then relaunched.
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    expect(failures).toEqual([]);
+    expect(state.launches).toHaveLength(2);
+    expect(callsOf("bridge.kill")).toEqual([
+      { method: "bridge.kill", args: ["SIGTERM"] },
+    ]);
+    expect(callsOf("shutdown")).toHaveLength(1);
+
+    state.calls = [];
+    const events = await collect(
+      session.runTurn({ message: "second", contextTokens: 9_000 }),
+    );
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(failures).toEqual([]);
+    // Reattached on a fresh connection to the SAME transcript...
+    expect(state.connects).toHaveLength(2);
+    expect(session.sessionRef).toBe(ref);
+    expect(callsOf("attachSession")).toEqual([
+      { method: "attachSession", args: [ref] },
+    ]);
+    // ...with everything the dead daemon held set again, BEFORE the send.
+    const order = state.calls.map((call) => call.method);
+    for (const method of [
+      "setModel",
+      "setReasoningEffort",
+      "setSessionEnv",
+      "setContextCap",
+    ]) {
+      expect(order.indexOf(method)).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf(method)).toBeLessThan(order.indexOf("sendMessage"));
+    }
+    expect(callsOf("setSessionEnv")[0]?.args).toEqual([ref, { DISPLAY: ":1" }]);
+  });
+
+  it("a wake request on the reattached session still finds its conversation", async () => {
+    const { harness } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({
+      homeDir,
+      context: { conversationId: "conv-a" },
+    });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    await collect(session.runTurn({ message: "again" }));
+
+    const reattached = state.clients[1];
+    reattached?.emitNamed("wake_requested", {
+      ev: "wake_requested",
+      session_id: session.sessionRef,
+      reason: "swarm_await_completed",
+      notification: "members done",
+    });
+    const tasks = (await harness.backgroundTasks?.poll()) ?? [];
+    expect(tasks.filter((task) => task.ref.startsWith("wake:"))).toContainEqual(
+      expect.objectContaining({ context: { conversationId: "conv-a" } }),
+    );
+  });
+
+  it("setEnv between turns is what a reattach replays, not the env the session opened with", async () => {
+    const { harness } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    // The desktop came up after the death: nothing to send it to yet.
+    state.calls = [];
+    await session.setEnv?.({ DISPLAY: ":7" });
+    expect(callsOf("setSessionEnv")).toEqual([]);
+    await collect(session.runTurn({ message: "after" }));
+    expect(callsOf("setSessionEnv")[0]?.args).toEqual([
+      session.sessionRef,
+      { DISPLAY: ":7" },
+    ]);
+  });
+
+  it("a session the dead daemon never persisted starts fresh on reattach, its new ref reported", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir });
+    const firstRef = session.sessionRef;
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+
+    // Measured live: a session opened but never sent a message is not on
+    // disk, and the relaunched daemon answers `unknown_session`.
+    state.attachError = Object.assign(
+      new Error(`unknown_session: Unknown session '${firstRef}'`),
+      { code: "unknown_session" },
+    );
+    const events = await collect(session.runTurn({ message: "hello" }));
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(failures).toEqual([]);
+    expect(session.sessionRef).toBe("s-2");
+    expect(session.sessionRef).not.toBe(firstRef);
+    expect(callsOf("createSession")).toHaveLength(2);
+  });
+
+  it("a stop that lands while the turn reattaches ends it before anything is sent", async () => {
+    // The reattach is the turn's longest pre-send window (a relaunched
+    // daemon answering attach + preferences). A stop in it must not be
+    // erased by the turn's own setup and then run the message anyway.
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir, model: "m" });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+
+    // Park the reattach in the model-list wait, then stop the turn there.
+    let listed!: () => void;
+    state.listModels = () =>
+      new Promise((resolve) => {
+        listed = () => resolve({ models: ["m"] });
+      });
+    state.setModelRefusals = 1;
+    MODEL_LIST_WAIT_MS.value = 10_000;
+    state.calls = [];
+    const turn = collect(session.runTurn({ message: "never send me" }));
+    await vi.waitFor(() => expect(callsOf("listModels")).toHaveLength(1));
+    await session.abort();
+    listed();
+    const events = await turn;
+
+    expect(events).toEqual([{ type: "turn.done" }]);
+    expect(callsOf("sendMessage")).toEqual([]);
+    // The dead connection had nothing to cancel; the live one ran nothing.
+    expect(callsOf("cancel")).toEqual([]);
+    expect(failures).toEqual([]);
+
+    // The stop belonged to that turn only: the next one runs.
+    const next = await collect(session.runTurn({ message: "now" }));
+    expect(next.at(-1)).toEqual({ type: "turn.done" });
+    expect(callsOf("sendMessage")).toHaveLength(1);
+  });
+
+  it("a forked thread the dead daemon never persisted forks its parent again on reattach", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({
+      homeDir,
+      forkSessionRef: "s-parent",
+    });
+    const forkedRef = session.sessionRef;
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+
+    state.calls = [];
+    state.attachError = Object.assign(
+      new Error(`unknown_session: Unknown session '${forkedRef}'`),
+      { code: "unknown_session" },
+    );
+    const events = await collect(session.runTurn({ message: "in the thread" }));
+
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(callsOf("forkSession")).toEqual([
+      { method: "forkSession", args: ["s-parent"] },
+    ]);
+    expect(callsOf("createSession")).toHaveLength(0);
+    expect(failures).toEqual([]);
+  });
+
+  it("a reattach that fails for another reason fails THAT turn only, and the next turn retries it", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir, model: "m" });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+
+    state.setModelError = new Error("socket ripped");
+    await expect(collect(session.runTurn({ message: "one" }))).rejects.toThrow(
+      "socket ripped",
+    );
+    expect(failures).toEqual([]);
+
+    state.setModelError = null;
+    const events = await collect(session.runTurn({ message: "two" }));
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(failures).toEqual([]);
+  });
+
+  it("a NEW conversation after a relaunch opens on the new runtime", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    await harness.startSession({ homeDir });
+    killRuntime(0);
+    const fresh = await harness.startSession({ homeDir });
+    const events = await collect(fresh.runTurn({ message: "hi" }));
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(failures).toEqual([]);
+    expect(state.launches).toHaveLength(2);
+  });
+
+  it("two held sessions reattach CONCURRENTLY onto the one relaunched runtime, each on its own ref", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const a = await harness.startSession({ homeDir });
+    const b = await harness.startSession({ homeDir });
+    const [refA, refB] = [a.sessionRef, b.sessionRef];
+    killRuntime(0);
+    state.calls = [];
+    const [ea, eb] = await Promise.all([
+      collect(a.runTurn({ message: "a" })),
+      collect(b.runTurn({ message: "b" })),
+    ]);
+    expect(ea.at(-1)?.type).toBe("turn.done");
+    expect(eb.at(-1)?.type).toBe("turn.done");
+    // One relaunch, never a second launch onto the same home.
+    expect(state.launches).toHaveLength(2);
+    expect(
+      callsOf("attachSession")
+        .map((call) => call.args[0])
+        .sort(),
+    ).toEqual([refA, refB].sort());
+    expect([a.sessionRef, b.sessionRef]).toEqual([refA, refB]);
+    expect(failures).toEqual([]);
+  });
+
+  it("a death while a relaunch is still coming up is not a second relaunch: the in-flight one stands", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir });
+    killRuntime(0);
+    // The dead runtime's later signals (its other connections closing,
+    // the bridge exit) land on a retired record.
+    state.bridges[0]?.emit("exit", 1, null);
+    state.keepAlives[0]?.die();
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    const events = await collect(session.runTurn({ message: "ok" }));
+    expect(events.at(-1)?.type).toBe("turn.done");
+    expect(state.launches).toHaveLength(2);
+    expect(failures).toEqual([]);
+  });
+
+  it("a release between the death and the next turn closes cleanly and opens nothing", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir });
+    const ref = session.sessionRef;
+    if (!ref) throw new Error("expected a session ref");
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    await session.release?.();
+    // The ref is free again: a resume attaches it, never mints fresh.
+    state.calls = [];
+    const resumed = await harness.startSession({
+      homeDir,
+      resumeSessionRef: ref,
+    });
+    expect(resumed.sessionRef).toBe(ref);
+    expect(callsOf("attachSession")).toEqual([
+      { method: "attachSession", args: [ref] },
+    ]);
+    expect(failures).toEqual([]);
+  });
+
+  it("an idle keep-alive close alone (no conversation yet) is a death too: relaunched", async () => {
+    const { harness, failures } = watched();
+    harness.prewarm?.(mkdtempSync(join(tmpdir(), "jcode-adapter-")));
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(1));
+    state.keepAlives[0]?.die();
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    expect(failures).toEqual([]);
+    // The bridge's own exit, landing after: the dead runtime's teardown.
+    state.bridges[0]?.emit("exit", null, "SIGTERM");
+    expect(state.launches).toHaveLength(2);
+    expect(failures).toEqual([]);
+  });
+
+  it("a death under a turn fails the sandbox and is never relaunched under it", async () => {
+    const { harness, failures } = watched();
+    const { session } = await startSession({ harness });
+    state.manualAccept = true;
+    const turn = collect(session.runTurn({ message: "long" }));
+    await vi.waitFor(() => expect(callsOf("sendMessage")).toHaveLength(1));
+
+    killRuntime(0);
+    expect(failures).toEqual(["jcode runtime closed its keep-alive"]);
+    const events = await turn;
+    expect(events.at(-1)?.type).toBe("error");
+    expect(state.launches).toHaveLength(1);
+  });
+
+  it("a death under a session setup fails the sandbox", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    // The setup parks in the model-list wait (the launch-window race):
+    // the runtime dies while this session is still being opened.
+    let listed!: () => void;
+    state.listModels = () =>
+      new Promise((resolve) => {
+        listed = () => resolve({ models: ["m"] });
+      });
+    state.setModelRefusals = 1;
+    MODEL_LIST_WAIT_MS.value = 10_000;
+    const opening = harness.startSession({ homeDir, model: "m" });
+    await vi.waitFor(() => expect(callsOf("listModels")).toHaveLength(1));
+
+    killRuntime(0);
+    expect(failures).toEqual(["jcode runtime closed its keep-alive"]);
+    listed();
+    await opening;
+    expect(state.launches).toHaveLength(1);
+  });
+
+  it("a second death inside RELAUNCH_WINDOW_MS fails the sandbox: a crash loop is not relaunched", async () => {
+    const { harness, failures } = watched();
+    await startSession({ harness });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    expect(failures).toEqual([]);
+
+    killRuntime(1);
+    expect(failures).toEqual([
+      "jcode runtime closed its keep-alive (again, within 60000 ms)",
+    ]);
+    expect(state.launches).toHaveLength(2);
+  });
+
+  it("a death AFTER the window is relaunched again", async () => {
+    RELAUNCH_WINDOW_MS.value = 0;
+    const { harness, failures } = watched();
+    await startSession({ harness });
+    killRuntime(0);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(2));
+    killRuntime(1);
+    await vi.waitFor(() => expect(state.keepAlives).toHaveLength(3));
+    expect(failures).toEqual([]);
+    expect(state.launches).toHaveLength(3);
+  });
+
+  it("a relaunch that cannot launch fails the sandbox, and stays failed", async () => {
+    const { harness, failures } = watched();
+    const homeDir = mkdtempSync(join(tmpdir(), "jcode-adapter-"));
+    const session = await harness.startSession({ homeDir });
+    state.launchError = new Error("spawn ENOENT");
+    killRuntime(0);
+    await vi.waitFor(() =>
+      expect(failures).toEqual([
+        "harness relaunch failed: Error: spawn ENOENT",
+      ]),
+    );
+    // The rejected memo is kept: no retry of the destructive launch.
+    await expect(collect(session.runTurn({ message: "x" }))).rejects.toThrow(
+      "spawn ENOENT",
+    );
+    expect(state.launches).toHaveLength(2);
+    expect(failures).toHaveLength(1);
+  });
+
+  it("a first launch that fails reports the launch, once", async () => {
+    const { harness, failures } = watched();
+    state.launchError = new Error("spawn ENOENT");
+    await expect(
+      harness.startSession({
+        homeDir: mkdtempSync(join(tmpdir(), "jcode-adapter-")),
+      }),
+    ).rejects.toThrow("spawn ENOENT");
+    expect(failures).toEqual(["harness launch failed: Error: spawn ENOENT"]);
+  });
+
+  it("releasing a session closes only its connection: the keep-alive stays, nothing is relaunched", async () => {
+    const { harness, failures } = watched();
+    const { session } = await startSession({ harness });
+    await session.release?.();
+    expect(state.keepAlives[0]?.closed).toBe(false);
+    expect(state.launches).toHaveLength(1);
+    expect(failures).toEqual([]);
+  });
+
+  it("dispose closes the keep-alive and stops the runtime bridge first, with no failure and no relaunch", async () => {
+    const { harness, failures } = watched();
+    await startSession({ harness });
+    await harness.dispose();
+    // The teardown's own signals, as the real SDK raises them.
+    state.keepAlives[0]?.die();
+    state.bridges[0]?.emit("exit", null, "SIGTERM");
+
+    expect(state.keepAlives[0]?.closed).toBe(true);
+    expect(callsOf("bridge.kill")).toEqual([
+      { method: "bridge.kill", args: ["SIGTERM"] },
+    ]);
+    expect(callsOf("shutdown")).toHaveLength(1);
+    expect(state.launches).toHaveLength(1);
+    expect(failures).toEqual([]);
+  });
+
+  it("dispose during a relaunch waits for it and takes down what it launched", async () => {
+    const { harness, failures } = watched();
+    await startSession({ harness });
+    killRuntime(0);
+    await harness.dispose();
+    expect(state.launches).toHaveLength(2);
+    expect(state.keepAlives.every((keepAlive) => keepAlive.closed)).toBe(true);
+    expect(callsOf("shutdown")).toHaveLength(2);
+    expect(failures).toEqual([]);
+  });
+});
+
 describe("the daemon's own diagnostics (jcode-log.ts wiring)", () => {
   let stderr: string[] = [];
   beforeEach(() => {
@@ -795,15 +1392,20 @@ describe("the daemon's own diagnostics (jcode-log.ts wiring)", () => {
         },
     );
 
-  it("a bridge exit fails the harness with the exit code AND signal in the reason", async () => {
+  it("a bridge exit under a turn fails the harness with the exit code AND signal in the reason", async () => {
     let failure: string | undefined;
     const harness = createJcodeHarness();
     harness.onFailure((reason) => {
       failure = reason;
     });
-    await startSession({ harness });
+    const { session } = await startSession({ harness });
+    state.manualAccept = true;
+    const turn = collect(session.runTurn({ message: "hi" }));
+    await vi.waitFor(() => expect(callsOf("sendMessage")).toHaveLength(1));
     state.bridges[0]?.emit("exit", null, "SIGKILL");
     expect(failure).toBe("jcode instance exited (code null, signal SIGKILL)");
+    state.clients[0]?.end();
+    await turn;
   });
 
   it("forwards the bridge's stderr as jcode-stderr warnings, redacted", async () => {

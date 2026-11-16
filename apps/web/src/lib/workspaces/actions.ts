@@ -1,6 +1,5 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { getServerSession } from "@/lib/auth/server";
 import { getUserDefaultOrgId } from "@/lib/auth/default-org";
@@ -20,15 +19,17 @@ import {
   createWorkspace,
   type WorkspaceListItem,
 } from "@onecli/api/ee/services/workspace-service";
-import {
-  getUserRole,
-  canAccessWorkspace,
-} from "@onecli/api/ee/services/authorization-service";
+import { getUserRole } from "@onecli/api/ee/services/authorization-service";
 import {
   getWorkspaceQuota,
   assertCanCreateWorkspace,
 } from "@onecli/api/ee/services/quota-service";
 import { safeAction, type ActionResult } from "@/lib/safe-action";
+import {
+  resolveDefaultHome,
+  resolveOrgHome,
+} from "@/lib/dashboard/home-landing";
+import { resolveWorkspaceLanding } from "./workspace-landing";
 
 const requireUser = async () => {
   const session = await getServerSession();
@@ -46,11 +47,12 @@ const requireUser = async () => {
 };
 
 /**
- * Returns the URL of the user's active workspace for client-side redirects
- * after sign-in / onboarding: the bare `/w/<id>`, whose index page lands on
- * the workspace's first agent (or agent creation). Falls back to `/create-org`
- * when the user has no workspace yet (shouldn't happen post-signup but safe
- * to handle).
+ * The page the user's active workspace opens on, for client-side redirects
+ * after sign-in and onboarding: its first agent (or agent creation), the
+ * page the bare `/w/<id>` forwards to, so the redirect lands in one hop.
+ * It still starts `/w/<id>`, which is how the onboarding flow reads the
+ * workspace off it. Falls back to `/create-org` when the user has no
+ * workspace yet (shouldn't happen post-signup but safe to handle).
  */
 export const getActiveWorkspacePath = async (): Promise<string> => {
   const user = await requireUser();
@@ -61,7 +63,7 @@ export const getActiveWorkspacePath = async (): Promise<string> => {
 
   if (!defaultWorkspace) return "/create-org";
 
-  return `/w/${defaultWorkspace.id}`;
+  return resolveWorkspaceLanding(defaultWorkspace.id);
 };
 
 /**
@@ -142,24 +144,6 @@ export const createWorkspaceAction = async (
   });
 };
 
-/**
- * Switch the user's active workspace and redirect into it (its first agent,
- * via the workspace index). Used by the "switch workspace" form on the
- * `/workspaces` page.
- */
-export const switchWorkspaceAction = async (
-  workspaceId: string,
-): Promise<ActionResult> => {
-  return safeAction(async () => {
-    const user = await requireUser();
-    if (!(await canAccessWorkspace(user.id, workspaceId))) {
-      throw new Error("Workspace not found");
-    }
-
-    redirect(`/w/${encodeURIComponent(workspaceId)}`);
-  });
-};
-
 export interface UserOrganization {
   id: string;
   name: string;
@@ -204,3 +188,30 @@ export const getActiveOrganizationId = async (): Promise<string | null> => {
   }
   return getUserDefaultOrgId();
 };
+
+/**
+ * Where a switch to this workspace lands (its first agent, or the
+ * create-agent page): the page a bare `/w/<id>` would forward to, handed
+ * back instead of redirected to, so a caller can go there in one hop.
+ */
+export const workspaceLandingAction = async (
+  workspaceId: string,
+): Promise<string> => resolveWorkspaceLanding(workspaceId);
+
+/**
+ * Where "go to this org" lands (its first visible workspace's first agent,
+ * else its workspaces page), handed back so the org switcher, a deleted
+ * workspace and the like go there in one hop, never through the org's
+ * workspaces URL, which renders on the way before forwarding. Fenced by
+ * `resolveOrgLanding`: a foreign org id gets its workspaces URL, whose
+ * layout turns the caller away, never one of its agents.
+ */
+export const orgLandingAction = async (orgId: string): Promise<string> =>
+  resolveOrgHome(orgId);
+
+/**
+ * Where a signed-in visitor lands with no URL of their own (the home page):
+ * their default org's home in one hop, or null when they belong to no org.
+ */
+export const defaultLandingAction = async (): Promise<string | null> =>
+  resolveDefaultHome();

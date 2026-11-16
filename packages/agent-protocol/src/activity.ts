@@ -473,3 +473,95 @@ export const activityForReasoning = (raw: string): string | null => {
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd()}…`;
 };
+
+/**
+ * How much of a reasoning stream the caption reads: its tail. A model can
+ * think for pages, and the caption only ever wants the latest heading or
+ * sentence, so a bounded tail keeps the per-delta cost flat however long
+ * the block runs.
+ */
+export const REASONING_TAIL_MAX = 4_000;
+
+/** A `**Title**` that closes its line: how reasoning summaries name a step
+ *  (a bold heading, then prose). Models do not always put a newline before
+ *  it (a summary part can follow the previous one directly), so only the
+ *  END of the line is required. Inline emphasis mid-sentence ("this is
+ *  **key** here") is never followed by the line's end, so it never reads
+ *  as a heading. An unclosed `**Checking the con` cannot match at all. */
+const REASONING_TITLE = /\*\*([^*\n]{2,120})\*\*(?=[ \t]*(?:\n|$))/g;
+
+/** A sentence terminator that ENDS a sentence: followed by whitespace or
+ *  the end of the text. Words still being written ("Next I") have none. */
+const TERMINATOR = /[.!?](?=\s|$)/g;
+
+/**
+ * The finished sentences of one line, newest LAST. Linear: it walks the
+ * terminators once and slices between them. (A `[^.!?]+[.!?]` regex
+ * re-scans from every start position on a long line with no terminator,
+ * quadratic in the 4 KB tail, about 10 ms per delta.)
+ */
+const completeSentences = (line: string): string[] => {
+  const out: string[] = [];
+  let start = 0;
+  for (const match of line.matchAll(TERMINATOR)) {
+    const end = match.index + 1;
+    const sentence = line.slice(start, end);
+    if (/[^.!?\s]/.test(sentence)) out.push(sentence);
+    start = end;
+  }
+  return out;
+};
+
+/** The first boundary in a sliced tail: everything before it is the end of
+ *  a sentence whose start was cut away. */
+const FIRST_BOUNDARY = /[.!?](?=\s)|\n/;
+
+/**
+ * The activity line for a reasoning STREAM: everything the model has thought
+ * since the last tool call, accumulated across `thinking.delta` events.
+ *
+ * Why not `activityForReasoning` on each delta: a delta is a slice of the
+ * stream cut wherever a network batch happened to close, so its "first line"
+ * routinely starts mid-word ("ying out the plan…", "ate it."). Reading the
+ * accumulated text instead, and only what the model has FINISHED writing,
+ * the caption is always a whole thought:
+ *
+ * 1. the latest `**Title**` heading (how reasoning summaries name a step), else
+ * 2. the latest finished unit: a complete sentence, or a line the model has
+ *    closed with a newline (a short status line rarely ends in a period), else
+ * 3. nothing yet (null): the previous caption stands rather than flashing a
+ *    fragment.
+ *
+ * Same output contract as `activityForReasoning`: one bounded, inert line.
+ */
+export const activityForReasoningStream = (raw: string): string | null => {
+  let tail = raw;
+  if (raw.length > REASONING_TAIL_MAX) {
+    // The slice starts mid-sentence: skip to the first boundary so the cut
+    // sentence's back half can never be read as a whole one.
+    const sliced = raw.slice(-REASONING_TAIL_MAX);
+    const boundary = sliced.search(FIRST_BOUNDARY);
+    tail = boundary === -1 ? "" : sliced.slice(boundary + 1);
+  }
+
+  const title = [...tail.matchAll(REASONING_TITLE)].at(-1)?.[1];
+  if (title) {
+    const line = activityForReasoning(title);
+    if (line) return line;
+  }
+
+  // Newest first. Every line but the last is closed; the last is still being
+  // written, so only its finished sentences count. A closed line offers its
+  // last sentence, or itself whole when it has none ("Reviewing the diff").
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sentences = completeSentences(lines[i]!);
+    const closed = i < lines.length - 1;
+    const candidates = closed ? [lines[i]!, ...sentences] : sentences;
+    for (let j = candidates.length - 1; j >= 0; j--) {
+      const line = activityForReasoning(candidates[j]!.trim());
+      if (line) return line;
+    }
+  }
+  return null;
+};

@@ -53,7 +53,6 @@ export const CreateAgentButton = ({
           current={quota.current}
           limit={quota.limit}
           plan={quota.plan}
-          organizationId={quota.organizationId}
         />
       )}
     </>

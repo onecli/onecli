@@ -37,15 +37,13 @@ vi.mock("@/lib/plan-gate", () => ({
     <div data-testid="plan-provider">{children}</div>
   ),
 }));
-vi.mock("@dashboard/dashboard-sidebar", () => ({
-  DashboardSidebar: () => <div>Dashboard sidebar</div>,
-}));
-vi.mock("@dashboard/dashboard-header", () => ({
-  DashboardHeader: () => <div>Dashboard header</div>,
-}));
-vi.mock("@dashboard/settings-nav", () => ({ SettingsNav: () => null }));
-vi.mock("@dashboard/settings-mobile-nav", () => ({
-  SettingsMobileNav: () => null,
+vi.mock("@/lib/dashboard/shell/dashboard-shell", () => ({
+  DashboardShell: ({ children }: { children: ReactNode }) => (
+    <div>
+      <div>Dashboard shell</div>
+      {children}
+    </div>
+  ),
 }));
 vi.mock("@/hooks/use-agents", () => ({
   useAgents: () => ({
@@ -55,12 +53,6 @@ vi.mock("@/hooks/use-agents", () => ({
     refetch: vi.fn(),
   }),
   useWarmAgent: () => () => {},
-}));
-vi.mock("../../_components/agent-page-header", () => ({
-  AgentPageHeader: () => <div>Agent header</div>,
-}));
-vi.mock("../../_components/agent-section-rail", () => ({
-  AgentSectionRail: () => <div>Agent rail</div>,
 }));
 const { default: DashboardLayout } = await import("../../../../../../layout");
 const { AgentPageFrame } = await import("../../_components/agent-page-frame");
@@ -82,29 +74,29 @@ const renderPage = () =>
     </DashboardLayout>,
   );
 
+/**
+ * The theater (the agent's full-page desktop) owns the whole viewport: the
+ * dashboard shell is not rendered around it. The guards the frame applies
+ * everywhere else still apply.
+ */
 describe("theater chrome and guards", () => {
-  it("retains header and rail on ordinary agent sections", () => {
+  it("renders ordinary agent sections inside the shell", async () => {
     state.pathname = "/w/ws-1/agents/ag-1/chat";
     render(
-      <AgentPageFrame agentId="ag-1">
-        <div>Chat content</div>
-      </AgentPageFrame>,
+      <DashboardLayout>
+        <AgentPageFrame agentId="ag-1">
+          <div>Chat content</div>
+        </AgentPageFrame>
+      </DashboardLayout>,
     );
-    expect(screen.getByText("Agent header")).toBeInTheDocument();
-    expect(screen.getByText("Agent rail")).toBeInTheDocument();
-    expect(screen.getByText("Chat content")).toBeInTheDocument();
+    await screen.findByText("Chat content");
+    expect(screen.getByText("Dashboard shell")).toBeInTheDocument();
   });
-  it("removes both chrome layers but keeps the plan provider", async () => {
+  it("drops the shell for the theater but keeps the plan provider", async () => {
     renderPage();
     await screen.findByText("Theater content");
     expect(screen.getByTestId("plan-provider")).toBeInTheDocument();
-    for (const label of [
-      "Dashboard sidebar",
-      "Dashboard header",
-      "Agent header",
-      "Agent rail",
-    ])
-      expect(screen.queryByText(label)).toBeNull();
+    expect(screen.queryByText("Dashboard shell")).toBeNull();
   });
   it("keeps the hosted-only guard", async () => {
     state.kind = "byo";
@@ -126,7 +118,7 @@ describe("theater chrome and guards", () => {
     state.pending = true;
     const view = renderPage();
     await screen.findByText("Loading agent");
-    expect(screen.queryByText("Agent header")).toBeNull();
+    expect(screen.queryByText("Dashboard shell")).toBeNull();
     state.pending = false;
     state.error = true;
     view.rerender(

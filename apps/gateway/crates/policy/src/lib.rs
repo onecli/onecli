@@ -50,9 +50,7 @@ pub struct PolicyRule {
 #[derive(Debug, Clone)]
 pub struct MatchedRule {
     pub logical_id: String,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub name: String,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub scope: String,
 }
 

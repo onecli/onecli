@@ -17,6 +17,8 @@ import { activeMembershipWhere } from "@onecli/api/services/organization-service
 import { enforceSsoSession } from "@onecli/api/ee/sso/sso-enforcement";
 import { logger } from "@onecli/api/lib/logger";
 import { safeAction, type ActionResult } from "@/lib/safe-action";
+import { workspaceLandingPath } from "@/lib/agents/agent-order";
+import { resolveOrgHome } from "@/lib/dashboard/home-landing";
 
 const log = logger.child({ component: "settings-actions" });
 
@@ -139,7 +141,7 @@ export const deleteOrganizationAction = async (
 
     return {
       redirectTo: remainingMembership
-        ? `/org/${remainingMembership.organizationId}/workspaces`
+        ? await resolveOrgHome(remainingMembership.organizationId)
         : "/create-org",
     };
   });
@@ -201,6 +203,8 @@ export const createOrganizationAction = async (
 
     await setDefaultOrgCookie(org.id);
 
-    return { redirectTo: `/w/${workspace.id}` };
+    // A new org's workspace has no agent yet: straight to its agents page,
+    // where the first one is made (the page its front door forwards to).
+    return { redirectTo: workspaceLandingPath(workspace.id, null) };
   });
 };

@@ -79,10 +79,12 @@ export const apiUpload = async (
     /** POST creates under a collection (attachments); PUT replaces THE
      * resource at the path (an agent's one avatar). */
     method?: "POST" | "PUT";
+    /** A workspace the URL does not carry (onboarding). */
+    workspaceId?: string;
   },
 ): Promise<Response> => {
   const token = await getAuthToken();
-  const workspaceId = getWorkspaceId();
+  const workspaceId = options?.workspaceId ?? getWorkspaceId();
   const organizationId = getOrganizationId();
 
   return fetch(`${API_ORIGIN}${path}`, {

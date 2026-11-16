@@ -11,6 +11,7 @@ export default function OrgSkillsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Skills"
+        character="cloud-mug"
         description="Organization-wide instructions: every hosted agent in every workspace carries these."
       />
       <SkillsSection tier="organization" />

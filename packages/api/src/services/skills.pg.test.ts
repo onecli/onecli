@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
-import { MAX_IMPORTED_SKILL_FILES } from "../validations/skills";
+import {
+  MAX_IMPORTED_SKILL_FILES,
+  skillUpdateArgsSchema,
+  updateSkillSchema,
+} from "../validations/skills";
 import type { ImportedSkill } from "./skill-import";
 
 /**
@@ -353,7 +357,9 @@ describe.skipIf(!PROOF_URL)("caps and reserved names", () => {
     expect(orgRow.scope).toBe("organization");
   });
 
-  it("the merged-row budget re-check blocks a PATCH that smuggles the sum over", async () => {
+  it("a hand-written skill's body and files no longer share one cap", async () => {
+    // The old 32,000 sum is gone: the body has its own limit and each file
+    // its own; the tier byte budget bounds the whole.
     const agent = await seedAgent("near-cap");
     const skill = await skillService.createSkill(
       WORKSPACE,
@@ -365,11 +371,100 @@ describe.skipIf(!PROOF_URL)("caps and reserved names", () => {
       },
       CREATOR,
     );
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      content: "x".repeat(40_000),
+    });
+    expect(
+      (await db.skill.findUniqueOrThrow({ where: { id: skill.id } })).content
+        .length,
+    ).toBe(40_000);
+  });
+
+  it("the tier byte budget holds at every door that grows a skill", async () => {
+    // Before, only a zip import checked it: hand-written skills grew a tier
+    // past it, and the sync then left whole skills out to fit.
+    const agent = await seedAgent("tier-budget");
+    const held = await skillService.createSkill(
+      WORKSPACE,
+      { ...input("held"), agentId: agent },
+      CREATOR,
+    );
+    // Fill the tier to 40,000 bytes under its 10 MB, straight in the
+    // database (the way a zip import's binary files sit).
+    await db.skillFile.create({
+      data: {
+        skillId: held.id,
+        path: "data.bin",
+        content: "",
+        data: new Uint8Array(10 * 1024 * 1024 - 40_000),
+      },
+    });
+    const refused = {
+      code: "UNPROCESSABLE",
+      message: expect.stringContaining("MB together"),
+    };
+    // Create, the dashboard's save, and the agent's skill_update: each is
+    // held to the budget with what the tier already holds.
     await expect(
-      skillService.updateSkill(WORKSPACE, ORG, skill.id, {
-        content: "x".repeat(24_000),
+      skillService.createSkill(
+        WORKSPACE,
+        { ...input("new"), content: "x".repeat(50_000), agentId: agent },
+        CREATOR,
+      ),
+    ).rejects.toMatchObject(refused);
+    const small = await skillService.createSkill(
+      WORKSPACE,
+      { ...input("small"), agentId: agent },
+      CREATOR,
+    );
+    await expect(
+      skillService.updateSkill(WORKSPACE, ORG, small.id, {
+        content: "x".repeat(50_000),
       }),
-    ).rejects.toThrow("limited to 32,000 characters");
+    ).rejects.toMatchObject(refused);
+    // One append fits the room left; the next one would pass the budget.
+    await expect(
+      skillService.updateAgentSkillByName(agent, ORG, "small", {
+        append: "x".repeat(24_000),
+      }),
+    ).resolves.toMatchObject({ noop: false });
+    await expect(
+      skillService.updateAgentSkillByName(agent, ORG, "small", {
+        append: "x".repeat(24_000),
+      }),
+    ).rejects.toMatchObject(refused);
+  });
+
+  it("a write that does not grow an over-budget tier still saves", async () => {
+    // A tier filled past its budget before every door checked can always be
+    // paused, described, and trimmed.
+    const agent = await seedAgent("over-budget");
+    const skill = await skillService.createSkill(
+      WORKSPACE,
+      { ...input("over"), content: "x".repeat(50_000), agentId: agent },
+      CREATOR,
+    );
+    await db.skillFile.create({
+      data: {
+        skillId: skill.id,
+        path: "data.bin",
+        content: "",
+        data: new Uint8Array(11 * 1024 * 1024),
+      },
+    });
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      description: "still editable",
+      enabled: false,
+    });
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
+      content: "x".repeat(10_000),
+    });
+    const row = await db.skill.findUniqueOrThrow({ where: { id: skill.id } });
+    expect(row).toMatchObject({
+      description: "still editable",
+      enabled: false,
+    });
+    expect(row.content.length).toBe(10_000);
   });
 });
 
@@ -562,7 +657,7 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
     expect(await db.skill.count({ where: { agentId: agent } })).toBe(0);
   });
 
-  it("the update path re-checks the merged budget (files kept, content patched)", async () => {
+  it("the update path keeps the files and holds an in-place edit to the one body limit", async () => {
     const agent = await seedAgent("budget");
     await skillService.createSkill(
       WORKSPACE,
@@ -573,11 +668,81 @@ describe.skipIf(!PROOF_URL)("the agent door (the skill_* tools)", () => {
       },
       CREATOR,
     );
+    // Body and files no longer share a 32k sum: this used to be refused.
+    const grown = await skillService.updateAgentSkillByName(agent, ORG, "fat", {
+      content: "y".repeat(13_000),
+    });
+    expect(grown.skill.files.map((f) => f.path)).toEqual(["ref.md"]);
+    // An edit that would pass 120,000 is refused, and nothing is saved.
     await expect(
       skillService.updateAgentSkillByName(agent, ORG, "fat", {
-        content: "y".repeat(13_000),
+        append: "z".repeat(107_001),
       }),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    expect(
+      (await db.skill.findFirstOrThrow({ where: { agentId: agent } })).content
+        .length,
+    ).toBe(13_000);
+  });
+
+  it("parallel in-place edits never lose one that reported success", async () => {
+    // An in-place edit is computed from the body as read. Two in flight read
+    // the same body; a blind write would keep only the last one while both
+    // answered "Updated". The write is conditional on the body it read, so
+    // the loser saves nothing and says so.
+    const agent = await seedAgent("race");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("race"), content: "one\ntwo", agentId: agent },
+      CREATOR,
+    );
+    for (let round = 0; round < 10; round += 1) {
+      await db.skill.updateMany({
+        where: { agentId: agent },
+        data: { content: "one\ntwo" },
+      });
+      const results = await Promise.allSettled(
+        (["one", "two"] as const).map((find) =>
+          skillService.updateAgentSkillByName(agent, ORG, "race", {
+            edits: [{ find, replace: find.toUpperCase() }],
+          }),
+        ),
+      );
+      const { content } = await db.skill.findFirstOrThrow({
+        where: { agentId: agent },
+      });
+      const landed = (find: string) => content.includes(find.toUpperCase());
+      results.forEach((result, index) => {
+        const find = index === 0 ? "one" : "two";
+        if (result.status === "fulfilled") expect(landed(find)).toBe(true);
+        else {
+          expect(result.reason).toMatchObject({ code: "CONFLICT" });
+          expect(landed(find)).toBe(false);
+        }
+      });
+    }
+  });
+
+  it("an in-place edit racing a delete answers NOT_FOUND, never a retry", async () => {
+    const agent = await seedAgent("race-delete");
+    await skillService.createSkill(
+      WORKSPACE,
+      { ...input("doomed"), content: "one", agentId: agent },
+      CREATOR,
+    );
+    const results = await Promise.allSettled([
+      skillService.updateAgentSkillByName(agent, ORG, "doomed", {
+        append: "two",
+      }),
+      skillService.deleteAgentSkillByName(agent, ORG, "doomed"),
+    ]);
+    expect(await db.skill.count({ where: { agentId: agent } })).toBe(0);
+    // Either the edit landed before the delete, or it found nothing to edit:
+    // a deleted skill is never answered with "send the edit again".
+    const [edit] = results;
+    if (edit?.status === "rejected") {
+      expect(edit.reason).toMatchObject({ code: "NOT_FOUND" });
+    }
   });
 });
 
@@ -829,28 +994,79 @@ describe.skipIf(!PROOF_URL)("folder skills from a zip (pg)", () => {
     expect(run.executable).toBe(true);
   });
 
-  it("a long imported SKILL.md body can be edited but never grow", async () => {
+  it("a long imported skill with a file edits and grows from both doors", async () => {
+    // A 46,000-char body plus an 8,000-char file. Before the one limit, the
+    // dashboard held such a body to its imported length (counting the file
+    // too, so it could not grow at all) and skill_update capped it at 24,000.
     const agentId = await seedAgent("zip-long");
-    const long = "# Long\n\n" + "x".repeat(40_000);
+    const name = `${P}long`;
+    const long = "# Long\n\n" + "x".repeat(45_992);
+    expect(long.length).toBe(46_000);
     await skillService.importAgentSkills(
       WORKSPACE,
       agentId,
-      [{ ...imported(`${P}long`), content: long, files: [] }],
+      [
+        {
+          ...imported(name),
+          content: long,
+          files: [
+            {
+              path: "references/gotchas.md",
+              content: "g".repeat(8_000),
+              data: null,
+              executable: false,
+            },
+          ],
+        },
+      ],
       CREATOR,
     );
     const skill = await db.skill.findFirstOrThrow({ where: { agentId } });
-    const shorter = long.slice(0, 30_000);
-    await skillService.updateSkill(WORKSPACE, ORG, skill.id, {
-      content: shorter,
+    const twoLines = "\n- one more rule\n- and another";
+
+    // The dashboard door: PATCH through the schema, as the route does.
+    const dashboard = updateSkillSchema.parse({
+      content: `${long}${twoLines}`,
     });
+    await skillService.updateSkill(WORKSPACE, ORG, skill.id, dashboard);
     expect(
       (await db.skill.findUniqueOrThrow({ where: { id: skill.id } })).content,
-    ).toBe(shorter);
+    ).toBe(`${long}${twoLines}`.trim());
+
+    // The agent door: skill_update's own args schema, then the service. The
+    // whole body can't ride the 32k tool pipe, so the agent edits in place.
+    const { edits, append } = skillUpdateArgsSchema.parse({
+      name,
+      edits: [{ find: "# Long", replace: "# Long checklist" }],
+      append: "- Tag the release after the smoke tests pass.",
+    });
+    await skillService.updateAgentSkillByName(agentId, ORG, name, {
+      edits,
+      append,
+    });
+    const saved = await db.skill.findUniqueOrThrow({
+      where: { id: skill.id },
+      include: { files: true },
+    });
+    expect(saved.content.startsWith("# Long checklist\n\n")).toBe(true);
+    expect(saved.content).toContain(twoLines.trim());
+    expect(
+      saved.content.endsWith(
+        "\n\n- Tag the release after the smoke tests pass.",
+      ),
+    ).toBe(true);
+    // Saving the body never touched the imported file.
+    expect(saved.files.map((f) => f.path)).toEqual(["references/gotchas.md"]);
+
+    // A find that matches more than once (or not at all) saves nothing.
     await expect(
-      skillService.updateSkill(WORKSPACE, ORG, skill.id, {
-        content: `${shorter}${"y".repeat(10_001)}`,
+      skillService.updateAgentSkillByName(agentId, ORG, name, {
+        edits: [{ find: "x", replace: "y" }],
       }),
-    ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    ).rejects.toThrow("occurs more than once");
+    expect(
+      (await db.skill.findUniqueOrThrow({ where: { id: skill.id } })).content,
+    ).toBe(saved.content);
   });
 
   it("refuses a dashboard file that clashes with a kept imported file", async () => {

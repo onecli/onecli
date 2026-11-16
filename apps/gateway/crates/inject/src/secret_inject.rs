@@ -407,7 +407,7 @@ const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// A constant rather than configuration: it identifies OpenAI's own first-party
 /// CLI, is hardcoded in the open-source Codex client, and the vaulted
 /// `auth.json` has no `client_id` field to read it from. That is unlike the
-/// OAuth providers in `apps.rs`, which take a `client_id_env` because an
+/// OAuth providers in the `apps` crate, which take a `client_id_env` because an
 /// operator supplies their own app there.
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 

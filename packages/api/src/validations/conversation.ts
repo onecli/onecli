@@ -311,6 +311,16 @@ export const AGENT_RESUMING_NOTICE =
 export const RESUMED_TURN_CONTEXT =
   "[system] The agent restarted while it was working on this message, and this run picks it back up. If your earlier work on it is in this conversation above, continue from where you left off. A step that was running when it restarted may or may not have finished, so check its result before you redo anything with side effects. If no earlier work appears above, start from the beginning.";
 
+/** The delivery-only frame on the FIRST turn of a conversation forked off
+ * another (a DM thread opened under a direct conversation): the transcript
+ * above is inherited, this thread is a separate line of work that runs
+ * beside the one it came from, and the answer belongs here. Prepended at
+ * the harness boundary like the memory context, never stored. Worded for
+ * the refused-fork case too (a fresh session has nothing above), like the
+ * resumed frame. */
+export const FORKED_THREAD_CONTEXT =
+  "[system] This message opened a new thread. If a conversation appears above, it is what you and this person discussed before the thread was opened; it is context, not open work, and anything it was still doing continues separately where it was. Answer this message here, in the thread, as its own request.";
+
 /** A start that could not happen (second cold-boot death, generic start
  * failure past its patience window, or the supervisor's launch classification
  * after the one invisible retry was spent). */

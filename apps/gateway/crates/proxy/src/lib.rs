@@ -35,6 +35,8 @@ pub mod response;
 #[cfg(test)]
 mod shared_github_source_pg_test;
 pub mod stale_token;
+#[cfg(test)]
+mod test_support;
 pub mod transforms;
 pub mod tunnel;
 pub mod websocket;

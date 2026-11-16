@@ -8,6 +8,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiGet = vi.fn();
 const apiPatch = vi.fn();
+const apiUpload = vi.fn();
+vi.mock("@/lib/api-fetch", () => ({
+  apiUpload: (...args: unknown[]) => apiUpload(...args),
+}));
 vi.mock("./client", async (importOriginal) => ({
   // The pure helpers (`workspaceScope`) stay real; only the transport is
   // replaced.
@@ -17,11 +21,12 @@ vi.mock("./client", async (importOriginal) => ({
   apiPost: vi.fn(),
 }));
 
-const { get, update } = await import("./agents");
+const { get, update, uploadImage } = await import("./agents");
 
 beforeEach(() => {
   apiGet.mockReset();
   apiPatch.mockReset();
+  apiUpload.mockReset();
 });
 
 describe("agents client paths", () => {
@@ -45,6 +50,19 @@ describe("agents client paths", () => {
     await update("ag-1", { name: "Max" }, { workspaceId: "ws-1" });
     expect(apiPatch.mock.calls[0]?.[2]).toEqual({
       headers: { "X-Workspace-Id": "ws-1" },
+    });
+  });
+
+  it("scopes the avatar upload to a named workspace (onboarding's starter picture)", async () => {
+    apiUpload.mockResolvedValueOnce(
+      new Response(JSON.stringify({ imageUrl: "u" }), { status: 200 }),
+    );
+    const file = new Blob(["x"], { type: "image/jpeg" });
+    await uploadImage("ag-1", file, { workspaceId: "ws-1" });
+    expect(apiUpload).toHaveBeenCalledWith("/v1/agents/ag-1/image", file, {
+      method: "PUT",
+      contentType: "image/jpeg",
+      workspaceId: "ws-1",
     });
   });
 });

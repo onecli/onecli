@@ -578,6 +578,17 @@ export const workItemSchema = z.discriminatedUnion("kind", [
      */
     resumeSessionRef: z.string().optional(),
     /**
+     * The PARENT session to fork this conversation's first session from: a
+     * DM thread opened off a direct conversation inherits that
+     * conversation's transcript up to now (`forkSession(parent)`), then
+     * continues on its own. Only on a conversation's first turn (it has no
+     * `resumeSessionRef` yet); the forked session's ref rides the result
+     * and later turns resume it like any other. An OLD supervisor image
+     * strips the unknown field and mints a fresh session: the thread loses
+     * its inherited context, never the turn.
+     */
+    forkSessionRef: z.string().optional(),
+    /**
      * Run this turn on a FRESH harness session and end that session with the
      * turn: no resume, and nothing reused or kept live for the
      * conversation's next turn. For a background turn whose conversation is

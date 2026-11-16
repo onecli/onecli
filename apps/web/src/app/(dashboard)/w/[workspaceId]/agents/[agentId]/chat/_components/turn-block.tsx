@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   TURN_FAILED_RAW_ERROR_MESSAGE,
   isRawErrorPayload,
@@ -18,14 +19,15 @@ import {
 } from "@/lib/chat/turns";
 import { AgentAnswer } from "./agent-answer";
 import { AutomationTurnHeader } from "./automation-turn";
-import { ActivityLine } from "./activity-line";
+import { ActivityLine, WAITING_COPY } from "./activity-line";
 import { FollowUpExchange } from "./follow-up-exchange";
+import { FoldingNote } from "./folding-note";
 import { GreetingActions } from "./greeting-actions";
-import { NarrationText } from "./narration-text";
 import { AttachmentChips } from "./attachment-chips";
 import { originLabel } from "./origin-label";
-import { ToolGroup } from "./tool-group";
+import { WorkTimeline } from "./work-timeline";
 import { connectLinkTextFromTools } from "@/lib/chat/connect-links";
+import { useWasLive } from "@/lib/chat/use-was-live";
 import { TurnNotice, type TurnNoticeAction } from "./turn-notice";
 import { UserBubble } from "./user-bubble";
 import { SkillImportCard } from "./skill-import-card";
@@ -38,15 +40,6 @@ import { isSkillImportTool, parseSkillImport } from "@/lib/chat/skill-import";
  * hit its time limit) — `turn.error` from the turns poll is the only witness,
  * which is why the error line prefers it over the folded one.
  */
-
-/**
- * The caption before the agent reports any activity of its own. ONE word for
- * every lifecycle state, deliberately: a turn still `queued` or `dispatched`
- * is a machine waking up, and telling the person so made the agent read as
- * asleep. The lifecycle still rides the line as `data-turn-status`, for
- * support, never as copy.
- */
-const WAITING_COPY = "Thinking…";
 
 /** Turn.errorCode values whose fix is a link away on the agent's Models
  *  page, with the label saying WHICH fix: no key at all, a key the provider
@@ -137,28 +130,102 @@ export const TurnBlock = ({
   // waiting state and the error renders only from the settled poll view.
   const errorText = turn.error ?? (active ? undefined : rendered?.error);
   // WORKING vs SETTLED. While the turn runs and no durable answer exists,
-  // the agent block is a live WORK LOG, Claude-style: the agent's opening
-  // sentence (its plan, written for the reader), then every tool call folded
-  // into ONE collapsible run header, then the sentence still being written.
-  // The narration and the tail are deliberately styled as transient: they
-  // will not survive the turn (history carries no deltas, so a refresh
-  // never shows them either). The moment the answer lands, the block
-  // SETTLES to the record: the run header and the markdown answer, exactly
-  // what a late joiner gets.
+  // the agent block is a live work log, Claude-style: the agent's opening
+  // sentence, every tool call folded into ONE collapsible header, then the
+  // reply still being written. When the answer lands, the SAME elements
+  // settle to the record (the header reads "Worked for 12s", the draft
+  // becomes the answer in place) instead of a second tree replacing the
+  // first, so nothing jumps.
   const working = active && !rendered?.text;
+  // The reader watched this turn run (it was live while on screen), so its
+  // answer ARRIVES: even one that lands whole, as an answer after tool
+  // calls usually does, flows in rather than popping in. History never
+  // replays.
+  const watched = useWasLive(active);
+  // The tail only counts when it has visible words: a model emitting a bare
+  // newline before its first tool call must not blank the caption row.
+  const liveTail = rendered?.liveText.trim() ? rendered.liveText : "";
   // The run header times the whole turn, from when it started to the answer.
   const startedAt = turn.startedAt ?? turn.createdAt;
+  // THE AGENT'S WORDS, in two fixed slots so a text never remounts as it
+  // changes role (a remount is the swap-and-jump this view used to do when
+  // a reply settled):
+  //
+  // - ABOVE the work: before any tool, the reply being written (it may be
+  //   the whole answer); once a tool starts, the same element becomes the
+  //   LEAD, the opening sentence kept above the work (live only, history
+  //   carries no deltas). A lead the answer repeats word for word (a turn
+  //   stopped mid-tool keeps its last words as the answer) is not shown
+  //   twice.
+  // - BELOW the work: the reply written since the last tool, keyed by that
+  //   segment, so the durable answer settles into the very element its
+  //   draft was, and a draft a new tool call closes leaves (folding into the
+  //   timeline) instead of turning into the next one.
+  //
+  // A DRAFT is text the agent is still writing with no durable answer yet:
+  // it carries the "still writing" dot, and the answer replaces it in place
+  // when it lands (usually the same words, so nothing visibly moves).
+  const tools = rendered?.tools ?? [];
+  const finalText = rendered?.text ?? "";
+  const draftText = working && liveTail ? liveTail : "";
+  // The lead is built from live-only deltas, and a stream reconnect replays
+  // only durable events: a settled turn's lead would vanish at the next
+  // reconnect and the answer below would jump up under the reader. Once
+  // shown, it stays for as long as this block is on screen (a page load
+  // starts without it, as history always has).
+  const [heldLead, setHeldLead] = useState("");
+  const liveLead = rendered?.lead ?? "";
+  if (liveLead && liveLead !== heldLead) setHeldLead(liveLead);
+  const lead = liveLead || heldLead;
+  const aboveText =
+    tools.length === 0
+      ? finalText || draftText
+      : lead.trim() && lead.trim() !== finalText.trim()
+        ? lead
+        : "";
+  const aboveRole = tools.length === 0 ? "answer" : "lead";
+  const belowText = tools.length > 0 ? finalText || draftText : "";
+  // The narration the LATEST tool call closed, while the turn still runs:
+  // it folds away where the draft was (FoldingNote) instead of vanishing.
+  // Only if the reader SAW it as a draft: narration that arrived in the same
+  // network read as the tool call that closed it was never on screen, and
+  // playing its collapse would flash words in just to fold them away.
+  const steps = rendered?.steps ?? [];
+  let lastToolStep = -1;
+  let previousToolStep = -1;
+  steps.forEach((step, index) => {
+    if (step.kind !== "tool") return;
+    previousToolStep = lastToolStep;
+    lastToolStep = index;
+  });
+  // The segment (keyed by the tool step before it) whose draft was last on
+  // screen. Recorded during render, so it is right on the very render the
+  // next tool call closes that draft.
+  const [shownDraftSegment, setShownDraftSegment] = useState<number | null>(
+    null,
+  );
+  if (draftText && shownDraftSegment !== lastToolStep) {
+    setShownDraftSegment(lastToolStep);
+  }
+  const closedNote = steps[lastToolStep - 1];
+  const foldingNote =
+    working &&
+    !liveTail &&
+    closedNote?.kind === "note" &&
+    shownDraftSegment === previousToolStep
+      ? { key: lastToolStep, text: closedNote.text }
+      : undefined;
   // The live caption: what the agent is doing right now. Shown while it is
   // NOT talking — when narration is streaming, the words themselves are the
   // better signal, and a caption above a growing sentence reads as clutter.
   // Falls back to the waiting copy before the agent reports any activity
-  // (a blank row reads as broken).
-  const activityText = working
-    ? (rendered?.activity ?? WAITING_COPY)
-    : undefined;
-  // The tail only counts when it has visible words: a model emitting a bare
-  // newline before its first tool call must not blank the caption row.
-  const liveTail = rendered?.liveText.trim() ? rendered.liveText : "";
+  // (a blank row reads as broken), but never once the stream says the turn
+  // is over: after Stop, the stream ends the turn before the turns poll
+  // says so, and "Thinking…" in between reads as the agent starting again.
+  const activityText =
+    working && !rendered?.ended
+      ? (rendered?.activity ?? WAITING_COPY)
+      : undefined;
   const showActivity = Boolean(activityText) && !liveTail;
   // Once the run header is on screen it already says which tool is running
   // ("Running a command · 12s"), so a caption naming that same tool would
@@ -214,6 +281,7 @@ export const TurnBlock = ({
           origin={originLabel(turn.source)}
           conversationId={turn.conversationId}
           attachments={inboundAttachments}
+          sentAt={turn.createdAt}
           // Only reachable standalone as the orphan fallback (a follow-up
           // whose target left the list) — grouped follow-ups render below.
           {...(isJoiningTurn(turn) && { hint: "Received, folding it in" })}
@@ -225,7 +293,11 @@ export const TurnBlock = ({
           key={followUp.id}
           followUp={followUp}
           rendered={followUpRendered?.(followUp.id)}
-          targetActive={active}
+          // A follow-up's streamed reply that became the turn's closing
+          // words dies once the TURN's answer is on screen, not a poll
+          // later: otherwise both are on screen for a moment and the block
+          // grows, then drops back.
+          targetActive={working}
         />
       ))}
 
@@ -234,64 +306,72 @@ export const TurnBlock = ({
         errorText ||
         turn.status === "aborted" ||
         outboundAttachments.length > 0) && (
-        <Message align="start">
+        <Message align="start" className="group/msg">
           <MessageContent className="min-w-0">
-            {working ? (
-              // THE WORK LOG: what is happening, as it happens. Narration is
-              // untrusted mid-turn model text — rendered as plain text by
-              // NarrationText, never markdown. `aria-live` stays off here:
-              // announcing every delta would read the whole log to a
-              // screen-reader user token by token (the ActivityLine below
-              // keeps its own polite announcer).
-              <div className="flex flex-col gap-1.5">
-                {rendered?.lead ? <NarrationText text={rendered.lead} /> : null}
-                {rendered && rendered.tools.length > 0 && (
-                  <ToolGroup
-                    tools={rendered.tools}
-                    turnEnded={false}
-                    startedAt={startedAt}
-                  />
-                )}
-                {liveTail ? <NarrationText text={liveTail} live /> : null}
-                {showActivity && activityText && (
-                  <ActivityLine
-                    text={activityText}
-                    visuallyHidden={captionRepeatsHeader}
-                    turnStatus={turn.status}
-                  />
-                )}
-              </div>
-            ) : (
-              // SETTLED: the record. The run header first, then the answer:
-              // the same shape a reader who joined late gets from
-              // history, so what you watched and what you reload agree.
-              <>
-                {rendered && rendered.tools.length > 0 && (
-                  <ToolGroup
-                    tools={rendered.tools}
-                    turnEnded={!active}
-                    startedAt={startedAt}
-                  />
-                )}
-                {rendered?.text ? (
-                  <AgentAnswer
-                    text={rendered.text}
-                    toolConnectLinks={connectLinkTextFromTools(rendered.tools)}
-                  />
-                ) : null}
-                {/* What a skill import did, under the reply: built from the
-                    import tool's own result, one card per import call. */}
-                {!active &&
-                  rendered?.tools
-                    .filter((tool) => isSkillImportTool(tool.name))
-                    .map((tool) => {
-                      const data = parseSkillImport(tool.output);
-                      return data ? (
-                        <SkillImportCard key={tool.callId} data={data} />
-                      ) : null;
-                    })}
-              </>
+            {/* ONE tree for the whole life of the turn: each slot keeps its
+                element from the first streamed word to the record, so a
+                settling reply changes in place. Every model string here
+                renders through ChatMarkdown (no raw HTML, our URL gate) or
+                as text in the timeline. `aria-live` stays off the words:
+                announcing every delta would read the whole reply token by
+                token (the ActivityLine keeps its own polite announcer). */}
+            {aboveText ? (
+              <AgentAnswer
+                key="above"
+                text={aboveText}
+                role={aboveRole}
+                draft={aboveRole === "answer" && working}
+                live={watched}
+                toolConnectLinks={connectLinkTextFromTools(tools)}
+                sentAt={turn.finishedAt}
+              />
+            ) : null}
+            {tools.length > 0 && (
+              <WorkTimeline
+                tools={tools}
+                steps={steps}
+                turnEnded={!active}
+                startedAt={startedAt}
+                finishedAt={turn.finishedAt}
+                stopped={turn.status === "failed" || turn.status === "aborted"}
+              />
             )}
+            {foldingNote ? (
+              <FoldingNote
+                key={`fold-${foldingNote.key}`}
+                text={foldingNote.text}
+              />
+            ) : null}
+            {belowText ? (
+              <AgentAnswer
+                // A new segment (a tool started since) is a new reply: the
+                // last one folds into the timeline, this one starts fresh.
+                key={`below-${lastToolStep}`}
+                text={belowText}
+                draft={working}
+                live={watched}
+                toolConnectLinks={connectLinkTextFromTools(tools)}
+                sentAt={turn.finishedAt}
+              />
+            ) : null}
+            {showActivity && activityText && (
+              <ActivityLine
+                text={activityText}
+                visuallyHidden={captionRepeatsHeader}
+                turnStatus={turn.status}
+              />
+            )}
+            {/* What a skill import did, under the reply: built from the
+                import tool's own result, one card per import call. */}
+            {!active &&
+              tools
+                .filter((tool) => isSkillImportTool(tool.name))
+                .map((tool) => {
+                  const data = parseSkillImport(tool.output);
+                  return data ? (
+                    <SkillImportCard key={tool.callId} data={data} />
+                  ) : null;
+                })}
             {/* THE AGENT'S FILES (send_file), under its answer: the same
                 chips the person's files get, mirrored to the agent's side.
                 They come from the turns poll (refetched at turn.done), not

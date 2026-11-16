@@ -7,7 +7,8 @@ import { SlackAppIcon } from "./slack-app-icon";
  * The attached card's face: the Slack app's OWN icon (never the agent's
  * image), with a pencil that deep-links to where Slack lets it be changed.
  */
-const EDIT = "https://api.slack.com/apps/A1/general#display";
+const EDIT =
+  "https://api.slack.com/apps/A1/general#:~:text=App%20icon%20%26%20Preview";
 const ICON = "https://avatars.slack-edge.com/x_72.png";
 
 const faceSrc = () =>

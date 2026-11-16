@@ -1034,68 +1034,6 @@ describe.skipIf(!PROOF_URL)("the held-awake ceiling (the eviction arm)", () => {
   });
 });
 
-describe.skipIf(!PROOF_URL)("the held-awake dashboard signal", () => {
-  const seedHeld = async (suffix: string) => {
-    const agentId = await seedAgent(suffix);
-    const sb = await seedSandbox(suffix, agentId, "running", {
-      containerRef: `c-${suffix}`,
-    });
-    await seedBusyProcess(sb, `c-${suffix}`, { cpuBusy: true });
-    return agentId;
-  };
-
-  it("agentIdsWithLiveBackgroundWork is fenced — a foreign workspace's held agent is invisible", async () => {
-    const mine = await seedHeld("sig-mine");
-
-    // A held-awake agent in a DIFFERENT workspace (its own org) — the
-    // workspace fence must exclude it. This is the planted cross-tenant
-    // negative control for the new fenced query.
-    const otherOrg = `${P}sig-org2`;
-    const otherWorkspace = `${P}sig-ws2`;
-    await db.organization.create({
-      data: { id: otherOrg, name: otherOrg, slug: otherOrg },
-    });
-    await db.workspace.create({
-      data: { id: otherWorkspace, name: "other", organizationId: otherOrg },
-    });
-    const foreignAgent = await db.agent.create({
-      data: {
-        workspaceId: otherWorkspace,
-        name: "foreign",
-        identifier: `${P}sig-foreign`,
-        accessToken: `aoc_${P}sig-foreign`,
-        kind: "hosted",
-        harness: "fake",
-      },
-      select: { id: true },
-    });
-    const foreignSb = await db.sandbox.create({
-      data: {
-        id: `${P}sb-sig-foreign`,
-        agentId: foreignAgent.id,
-        runnerId: RUNNER_A,
-        status: "running",
-        containerRef: "c-foreign",
-        lastActiveAt: new Date(),
-        lastEngagedAt: new Date(),
-        homeAppliedGeneration: 1,
-      },
-      select: { id: true },
-    });
-    await seedBusyProcess(foreignSb.id, "c-foreign", { cpuBusy: true });
-
-    const busy = await dueWork.agentIdsWithLiveBackgroundWork(WORKSPACE);
-    expect(busy.has(mine)).toBe(true);
-    expect(busy.has(foreignAgent.id)).toBe(false);
-
-    // And the foreign workspace sees only its own.
-    const theirs = await dueWork.agentIdsWithLiveBackgroundWork(otherWorkspace);
-    expect(theirs.has(foreignAgent.id)).toBe(true);
-    expect(theirs.has(mine)).toBe(false);
-    // resetAll (beforeEach) reaps every `P`-prefixed row, foreign org included.
-  });
-});
-
 describe.skipIf(!PROOF_URL)("the sweeps", () => {
   it("a stopped sandbox loses its running processes, and armed watches trigger 'lost'", async () => {
     const agentId = await seedAgent("sweep-lost");

@@ -7,22 +7,12 @@
 //!
 //!   GATEWAY_TEST_DATABASE_URL=postgres://… cargo test -p proxy byoc_groups_pg
 
-use db::{create_pool, find_app_config, find_app_config_by_connection, find_app_config_by_org};
+use db::{find_app_config, find_app_config_by_connection, find_app_config_by_org};
 use sqlx::PgPool;
 
-const P: &str = "gwgrp-";
+use crate::test_support::test_pool;
 
-async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = std::env::var("GATEWAY_TEST_DATABASE_URL") else {
-        assert!(
-            std::env::var("CI").is_err(),
-            "GATEWAY_TEST_DATABASE_URL must be set in CI: the gateway BYOC group tests must not silently skip"
-        );
-        eprintln!("skipping: GATEWAY_TEST_DATABASE_URL unset");
-        return None;
-    };
-    Some(create_pool(&url).await.expect("connect to test database"))
-}
+const P: &str = "gwgrp-";
 
 fn client_id(row: Option<db::AppConfigRow>) -> Option<String> {
     row?.settings?.get("clientId")?.as_str().map(str::to_string)

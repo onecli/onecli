@@ -72,7 +72,18 @@ interface RunFacts {
   /** The agent that ran it: the workspace list spans agents. */
   agent: { id: string; name: string };
   source: string;
-  direct: boolean;
+  /**
+   * The run happened in someone's PRIVATE thread — a conversation with an
+   * owner: their web/DM direct thread, or a thread they opened inside that
+   * DM. Keyed on ownership, never on `direct` (which says only which row
+   * the web chat is, one per user): a DM thread is private without being
+   * it. The same rule as `conversation-visibility`'s `visibleTo`.
+   *
+   * Distinct from the `private` discriminator below, which says whether
+   * THIS VIEWER's row had its content withheld: the owner reading their own
+   * private run sees `privateThread: true, private: false`.
+   */
+  privateThread: boolean;
   status: string;
   askedBy: { id: string; email: string; name: string | null } | null;
   appAttribution: RunAppAttribution;

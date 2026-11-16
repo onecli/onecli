@@ -1,10 +1,11 @@
-import type { Metadata } from "next";
-import { SshSection } from "./_components/ssh-section";
+import { redirectMergedSection } from "@/lib/dashboard/merged-section-redirect";
 
-export const metadata: Metadata = {
-  title: "SSH",
-};
+interface Props {
+  params: Promise<{ workspaceId: string; agentId: string }>;
+}
 
-export default function AgentSshPage() {
-  return <SshSection />;
+/** An old URL: SSH is a block on the agent's Settings page. */
+export default async function AgentSshPage({ params }: Props) {
+  const { workspaceId, agentId } = await params;
+  await redirectMergedSection(workspaceId, agentId, "ssh");
 }

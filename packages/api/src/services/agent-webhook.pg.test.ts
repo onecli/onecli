@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../testing/pg-proof";
+import { grantModelKey } from "../testing/model-key-grant";
 import { MAX_WEBHOOKS_PER_AGENT } from "../validations/webhooks";
 import { TURN_FAILED_RAW_ERROR_MESSAGE } from "../validations/conversation";
 
@@ -39,36 +40,11 @@ const seedAgent = async () => {
     },
     select: { id: true },
   });
-  // Door 1: an injectable LLM key (the cron proof's seed), so turns queue.
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WS,
-      name: `${P}key-${seq}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WS,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}key-${seq}`,
-      name: `${P}key-${seq}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId: agent.id }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
+  // Door 1: an injectable LLM key, so turns queue.
+  await grantModelKey(db, {
+    workspaceId: WS,
+    agentId: agent.id,
+    name: `${P}key-${seq}`,
   });
   const origin = await db.conversation.create({
     data: { agentId: agent.id, source: "web", direct: true, userId: OWNER },

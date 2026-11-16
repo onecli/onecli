@@ -22,6 +22,7 @@ import { runnerAuth, type RunnerEnv } from "../middleware/runner-auth";
 import {
   NO_MODEL_KEY_MESSAGE,
   RESUMED_TURN_CONTEXT,
+  FORKED_THREAD_CONTEXT,
 } from "../validations/conversation";
 import {
   claimDueWork,
@@ -484,9 +485,11 @@ export const runnerRoutes = () => {
             // The note leads (the files belong to THIS message); the memory
             // context follows; one slice holds the combined budget. A resumed
             // run's frame goes first of all: it says what this whole delivery
-            // is, before anything it carries.
+            // is, before anything it carries. A forked thread's first turn
+            // frames the inherited transcript the same way.
             const combinedContext = joinContext(
               due.resumed ? RESUMED_TURN_CONTEXT : null,
+              due.forkSessionRef ? FORKED_THREAD_CONTEXT : null,
               plan?.note,
               context,
             );
@@ -519,6 +522,9 @@ export const runnerRoutes = () => {
               message: due.message,
               ...(due.resumeSessionRef && {
                 resumeSessionRef: due.resumeSessionRef,
+              }),
+              ...(due.forkSessionRef && {
+                forkSessionRef: due.forkSessionRef,
               }),
               ...(due.ephemeralSession && { ephemeralSession: true }),
               ...(combinedContext && { context: combinedContext }),
