@@ -104,6 +104,13 @@ const BARE_URL_RE = /https?:\/\/[^\s\u0000]+/g;
  * it) — lifted before the fence walk can misread its backticks. */
 const INLINE_FENCE_RE = /```[^`\n]+```/g;
 
+/** Emphasis pairs. GFM flanking rule: a span cannot start or end with
+ * whitespace, so `x ** 2 + y ** 2` and a `*.ts and *.tsx` cell stay literal. */
+const BOLD_STAR_RE = /\*\*([^*\s][^*\n]*[^*\s]|[^*\s])\*\*/g;
+const BOLD_UNDERSCORE_RE = /__([^_\s][^_\n]*[^_\s]|[^_\s])__/g;
+const STRIKE_RE = /~~([^~\s][^~\n]*[^~\s]|[^~\s])~~/g;
+const LABEL_ITALIC_RE = /\*([^*\s][^*\n]*[^*\s]|[^*\s])\*/g;
+
 /**
  * Emphasis markers inside a link label are STRIPPED, not converted: Slack
  * applies no formatting inside `<url|label>`, so any surviving marker would
@@ -111,10 +118,10 @@ const INLINE_FENCE_RE = /```[^`\n]+```/g;
  */
 const stripLabelEmphasis = (label: string): string =>
   label
-    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
-    .replace(/__([^_\n]+)__/g, "$1")
-    .replace(/\*([^*\n]+)\*/g, "$1")
-    .replace(/~~([^~\n]+)~~/g, "$1");
+    .replace(BOLD_STAR_RE, "$1")
+    .replace(BOLD_UNDERSCORE_RE, "$1")
+    .replace(LABEL_ITALIC_RE, "$1")
+    .replace(STRIKE_RE, "$1");
 
 /**
  * A Slack user id the renderer will vouch for: the resolved map's values
@@ -325,8 +332,8 @@ export const markdownToMrkdwn = (
   // Emitted through a sentinel (U+0001) so the italics pass below cannot
   // re-read the produced single asterisks as its own marker; restored at
   // the end.
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, "\u0001$1\u0001");
-  text = text.replace(/__([^_\n]+)__/g, "\u0001$1\u0001");
+  text = text.replace(BOLD_STAR_RE, "\u0001$1\u0001");
+  text = text.replace(BOLD_UNDERSCORE_RE, "\u0001$1\u0001");
 
   // Italics: *x* → _x_ (Slack's underscore form), single-line. The bold
   // output is hidden behind sentinels, so any surviving single-asterisk
@@ -338,7 +345,7 @@ export const markdownToMrkdwn = (
   );
 
   // Strikethrough: ~~x~~ → ~x~, single-line (fences are in the stash).
-  text = text.replace(/~~([^~\n]+)~~/g, "~$1~");
+  text = text.replace(STRIKE_RE, "~$1~");
 
   // Headings: Slack has none — a bold line is the convention. AFTER the
   // emphasis passes, so a bold heading collapses cleanly: interior bold
