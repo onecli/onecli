@@ -103,7 +103,7 @@ describe("response passthrough", () => {
  * is the gateway's most agent-visible behavior after policy.
  */
 describe("credential guidance", () => {
-  scenario("rewrites an uncredentialed 401 into guidance", async (cx) => {
+  scenario("forwards an uncredentialed 401 with a hint header", async (cx) => {
     const upstream = await cx.upstream();
     upstream.respond({ status: 401, body: '{"error":"missing api key"}' });
     // No secret for this host, so nothing is injected and the gateway knows the
@@ -116,13 +116,16 @@ describe("credential guidance", () => {
       token: cx.ids.agentToken,
     });
 
+    // The upstream's own answer reaches the agent untouched: a missing key is
+    // only one cause of a 401/403 (bot walls, paywalls, geo blocks).
     expect(res.status).toBe(401);
-    expect(res.header("x-should-retry")).toBe("false");
-    const body = res.json() as { error: string; secret_url: string };
-    expect(body.error).toBe("credential_not_found");
-    // The link is the whole point of the response, and it is assembled from
-    // APP_URL plus the workspace id — both of which a restructure can drop.
-    expect(body.secret_url).toContain(GATEWAY_APP_URL);
+    expect(res.body).toBe('{"error":"missing api key"}');
+    expect(res.header("x-should-retry")).toBeUndefined();
+    // The nudge rides in a header. The link is assembled from APP_URL plus the
+    // workspace id — both of which a restructure can drop.
+    const hint = res.header("x-onecli-hint");
+    expect(hint).toContain("No credentials are configured");
+    expect(hint).toContain(GATEWAY_APP_URL);
   });
 
   scenario("passes a credentialed 401 through untouched", async (cx) => {
@@ -172,19 +175,24 @@ describe("credential guidance", () => {
     expect(res.header("x-should-retry")).toBeUndefined();
   });
 
-  scenario("rewrites a 400 that reads as an auth failure", async (cx) => {
-    const upstream = await cx.upstream();
-    upstream.respond({ status: 400, body: '{"error":"invalid API key"}' });
-    await cx.seed();
-    const gw = await cx.startGateway();
+  scenario(
+    "forwards a 400 that reads as an auth failure, with a hint",
+    async (cx) => {
+      const upstream = await cx.upstream();
+      const body = '{"error":"invalid API key"}';
+      upstream.respond({ status: 400, body });
+      await cx.seed();
+      const gw = await cx.startGateway();
 
-    const res = await throughProxy(gw.origin, {
-      url: upstream.url("/v1/models"),
-      token: cx.ids.agentToken,
-    });
+      const res = await throughProxy(gw.origin, {
+        url: upstream.url("/v1/models"),
+        token: cx.ids.agentToken,
+      });
 
-    expect(res.status).toBe(400);
-    expect(res.json()).toMatchObject({ error: "credential_not_found" });
-    expect(res.header("x-should-retry")).toBe("false");
-  });
+      expect(res.status).toBe(400);
+      expect(res.body).toBe(body);
+      expect(res.header("x-should-retry")).toBeUndefined();
+      expect(res.header("x-onecli-hint")).toContain(GATEWAY_APP_URL);
+    },
+  );
 });

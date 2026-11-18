@@ -1383,30 +1383,34 @@ pub async fn forward_request(
             per_record: summary::outcome::answers_per_record(app, method.as_str(), &path),
             action: summary::clamp(action, 120),
         });
+    // Set when an uncredentialed auth failure from an UNKNOWN host is forwarded
+    // as-is: the `X-OneCLI-Hint` header added to that response.
+    let mut unknown_host_hint: Option<hyper::header::HeaderValue> = None;
     if injection_count == 0
         && !is_real_oauth_exchange
         && (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN || wrong_host_404)
     {
-        // A Bearer challenge with a URL realm is a container registry /
-        // OAuth2 token exchange the client resolves ITSELF (the anonymous
-        // Docker Registry v2 token dance). Hijacking it with the
-        // credential_not_found nudge strips the `WWW-Authenticate` challenge
-        // and breaks every `podman pull` / `docker run` of a public image from
-        // inside a sandbox, so on an unknown host the real 401 is forwarded
-        // instead. (Basic, label-realm Bearer, and header-less 401s do not
-        // match: they keep the nudge, which is correct for them.)
-        let nudge_unknown_host = !upstream_offers_anonymous_token_challenge(&resp_headers);
-        if let Some((error, resp)) =
-            auth_failure_guidance(status, host, &path, rules, proxy_ctx, nudge_unknown_host)
-        {
+        if let Some((error, resp)) = auth_failure_guidance(status, host, &path, rules, proxy_ctx) {
             info!(method = %method, url = %url, status = %status.as_u16(), error, "uncredentialed auth failure answered with guidance");
             return guidance(error, resp);
+        }
+        // An unknown host: its 401/403 is forwarded with the upstream's own
+        // status, headers and body. Replacing it hid Cloudflare bot walls,
+        // paywalls and geo blocks behind a "missing API key" error, and broke
+        // the anonymous Docker Registry v2 token dance (a Bearer challenge with
+        // a URL realm that the client resolves ITSELF). A registry challenge
+        // gets no hint: there is nothing to add.
+        if !upstream_offers_anonymous_token_challenge(&resp_headers) {
+            unknown_host_hint = response::credential_not_found_hint(
+                common::util::strip_port(host),
+                proxy_ctx.workspace_id.as_deref(),
+            );
         }
         info!(
             method = %method,
             url = %url,
             status = %status.as_u16(),
-            "forwarding registry/token-exchange auth challenge (no nudge)"
+            "forwarding unknown-host auth failure unchanged"
         );
     }
 
@@ -1424,11 +1428,16 @@ pub async fn forward_request(
 
         if body_indicates_auth_error(check_slice) {
             if let Some((error, resp)) =
-                auth_failure_guidance(status, host, &path, rules, proxy_ctx, true)
+                auth_failure_guidance(status, host, &path, rules, proxy_ctx)
             {
                 info!(method = %method, url = %url, status = 400, error, "auth-related 400 answered with guidance");
                 return guidance(error, resp);
             }
+            // Unknown host: forward the 400 as-is, with the hint.
+            unknown_host_hint = response::credential_not_found_hint(
+                common::util::strip_port(host),
+                proxy_ctx.workspace_id.as_deref(),
+            );
         }
 
         // Not auth-related: forward the buffered 400 as-is. An approved
@@ -1442,6 +1451,9 @@ pub async fn forward_request(
             if is_forwarded_response_header(name) {
                 response.headers_mut().append(name.clone(), value.clone());
             }
+        }
+        if let Some(hint) = unknown_host_hint {
+            response.headers_mut().insert(response::HINT_HEADER, hint);
         }
         return Ok(response);
     }
@@ -1577,6 +1589,9 @@ pub async fn forward_request(
         if is_forwarded_response_header(name) {
             response.headers_mut().append(name.clone(), value.clone());
         }
+    }
+    if let Some(hint) = unknown_host_hint {
+        response.headers_mut().insert(response::HINT_HEADER, hint);
     }
 
     Ok(response)
@@ -1750,17 +1765,17 @@ fn spawn_github_org_access_write(
 }
 
 /// The guidance that replaces an uncredentialed upstream auth failure, most
-/// specific first, as (stable error code, response). `None` only for an
-/// unknown host when `nudge_unknown_host` is off (the upstream's own
-/// challenge must reach the client). Shared by the 401/403 path and the
-/// auth-shaped 400 path, so the two can never answer differently.
+/// specific first, as (stable error code, response). `None` for an unknown
+/// host: the upstream's own response reaches the client, with an
+/// `X-OneCLI-Hint` header (see `response::credential_not_found_hint`).
+/// Shared by the 401/403 path and the auth-shaped 400 path, so the two can
+/// never answer differently.
 fn auth_failure_guidance(
     status: StatusCode,
     host: &str,
     path: &str,
     rules: &ResolvedRules,
     proxy_ctx: &ProxyContext,
-    nudge_unknown_host: bool,
 ) -> Option<(&'static str, Response<hooks::ForwardResponseBody>)> {
     let hostname = common::util::strip_port(host);
     let workspace_id = proxy_ctx.workspace_id.as_deref();
@@ -1859,13 +1874,8 @@ fn auth_failure_guidance(
         ));
     }
 
-    // 7. An unknown host: add a custom credential.
-    nudge_unknown_host.then(|| {
-        (
-            response::ERROR_CREDENTIAL_NOT_FOUND,
-            response::credential_not_found(status, hostname, path, workspace_id),
-        )
-    })
+    // 7. An unknown host: nothing to replace the upstream's answer with.
+    None
 }
 
 /// Whether an uncredentialed upstream 404 means "wrong host" rather than "no
@@ -2745,7 +2755,7 @@ mod tests {
             agent_token: "test-token".to_string(),
         };
         let (error, resp) =
-            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, rules, &ctx, true)
+            auth_failure_guidance(StatusCode::UNAUTHORIZED, host, path, rules, &ctx)
                 .expect("an uncredentialed auth failure always gets guidance here");
         let body = resp.into_body().collect().await.expect("body").to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2863,10 +2873,8 @@ mod tests {
                 Some("/w/ws/agents/ag/connections?tab=custom".into())
             )
         );
-        assert_eq!(
-            guidance_for(None, "api.unknown-service.test", "/v1").await,
-            ("credential_not_found".into(), None)
-        );
+        // An unknown host gets no replacement (see
+        // `auth_failure_guidance_leaves_an_unknown_host_alone`).
     }
 
     /// The "connect it" link names the session's agent, id included, so the
@@ -2889,7 +2897,6 @@ mod tests {
                 "/emails",
                 &permissive_rules(),
                 &ctx,
-                true,
             )
             .expect("a known app host always gets guidance");
             async move {
@@ -2910,10 +2917,11 @@ mod tests {
         assert_eq!(connect_url(None).await, "/w/ws/connections?connect=resend");
     }
 
-    /// An unknown host whose upstream offers its own token challenge keeps
-    /// it: no guidance replaces the 401 (the anonymous registry token flow).
+    /// An unknown host keeps its upstream response: no guidance replaces the
+    /// 401 (bot walls, paywalls, the anonymous registry token flow), while a
+    /// known app host still gets guidance.
     #[test]
-    fn auth_failure_guidance_leaves_an_unknown_host_alone_when_told_to() {
+    fn auth_failure_guidance_leaves_an_unknown_host_alone() {
         let ctx = ProxyContext {
             workspace_id: None,
             organization_id: None,
@@ -2928,8 +2936,7 @@ mod tests {
             "registry.example.test",
             "/v2/",
             &rules,
-            &ctx,
-            false
+            &ctx
         )
         .is_none());
         assert!(auth_failure_guidance(
@@ -2937,8 +2944,7 @@ mod tests {
             "api.resend.com",
             "/emails",
             &rules,
-            &ctx,
-            false
+            &ctx
         )
         .is_some());
     }

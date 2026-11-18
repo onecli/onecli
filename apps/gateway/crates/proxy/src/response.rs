@@ -396,6 +396,36 @@ pub fn credential_not_found<S>(
     ))
 }
 
+/// Response header carrying gateway guidance alongside an upstream response
+/// that is forwarded unchanged.
+pub const HINT_HEADER: &str = "x-onecli-hint";
+
+/// The `X-OneCLI-Hint` value attached to an uncredentialed upstream
+/// 401/403 (or auth-shaped 400) from an unknown host.
+///
+/// The upstream's own status, headers and body are forwarded untouched, because
+/// a missing API key is only one of the things that produce such a response
+/// (a Cloudflare bot challenge, a paywall and a geo block look the same by
+/// status). This one-line hint tells the agent a credential MAY help and where to
+/// add one, without hiding the evidence it needs to tell the causes apart.
+///
+/// `None` only if the value is not a valid header value.
+pub fn credential_not_found_hint(
+    hostname: &str,
+    workspace_id: Option<&str>,
+) -> Option<HeaderValue> {
+    let base = scoped_url(dashboard_url(), "", workspace_id);
+    let encoded_host = utf8_percent_encode(hostname, NON_ALPHANUMERIC);
+    let secret_url =
+        format!("{base}/connections/custom?create=generic&host={encoded_host}&path=%2F%2A");
+    HeaderValue::from_str(&format!(
+        "No credentials are configured for {hostname} in OneCLI. If this response is an \
+         authentication failure (not a bot challenge, paywall or geo block), ask the user to \
+         add an API key: {secret_url}"
+    ))
+    .ok()
+}
+
 /// 409 Conflict — multiple connections exist for the same provider, agent must specify which one.
 pub fn multiple_connections<S>(
     connections: &[crate::connect::ConnectionChoice],
@@ -1423,6 +1453,17 @@ mod tests {
         let message = json["message"].as_str().unwrap();
         assert!(message.contains("re-enter the key"), "{message}");
         assert!(!message.contains("does not have access"), "{message}");
+    }
+
+    #[test]
+    fn credential_not_found_hint_is_one_line_with_host_and_secret_url() {
+        let hint = credential_not_found_hint("api.custom-service.com", Some("ws1"))
+            .expect("valid header value");
+        let hint = hint.to_str().expect("ascii");
+        assert!(!hint.contains('\n'), "{hint}");
+        assert!(hint.contains("api.custom-service.com"), "{hint}");
+        assert!(hint.contains("create=generic"), "{hint}");
+        assert!(hint.contains("/w/ws1/"), "{hint}");
     }
 
     #[tokio::test]
