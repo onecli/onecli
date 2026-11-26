@@ -147,6 +147,22 @@ pub async fn handle_websocket(
         ));
     }
 
+    // Load policy rules per-request with short TTL cache (5s) so policy changes
+    // propagate to long-lived connections without waiting for the 60s CONNECT cache TTL.
+    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
+    let workspace_id = proxy_ctx.workspace_id.as_deref().unwrap_or("");
+    let policy_rules_v2 = policy_engine::load_policy_rules_v2_per_request(
+        &engine.pool,
+        org_id,
+        workspace_id,
+        cache,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "policy v2: per-request load failed, using empty rules");
+        db::PolicyV2Rules::default()
+    });
+
     // The first-match engine over `policy_rules_v2` is authoritative. WebSocket
     // blocks emit no telemetry today, so the matched rule is not attributed here
     // (allow-attribution for ws is out of scope) — only the decision is consumed.
@@ -160,7 +176,7 @@ pub async fn handle_websocket(
         policy::is_llm_host(host),
         rules.winning_connection_id.as_deref(),
         cache,
-        &rules.policy_rules_v2,
+        &policy_rules_v2,
     )
     .await;
 
