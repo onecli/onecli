@@ -1225,13 +1225,34 @@ static APP_PROVIDERS: &[AppProvider] = &[
     AppProvider {
         provider: "google-photos",
         display_name: "Google Photos",
-        host_rules: &[HostRule {
-            pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
-            path_prefix: None,
-            strategy: AuthStrategy::Bearer,
-            intercept: false,
-            credential_host_field: None,
-        }],
+        host_rules: &[
+            HostRule {
+                pattern: HostPattern::Exact("photoslibrary.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            // Google Photos Picker API (sessions + picked mediaItems).
+            HostRule {
+                pattern: HostPattern::Exact("photospicker.googleapis.com"),
+                path_prefix: None,
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+            // Picked-item bytes: a PickedMediaItem baseUrl lives under
+            // lh3.googleusercontent.com/ppa/ and needs the bearer token.
+            // Scoped to /ppa/ so other googleusercontent content (avatars,
+            // public images) never receives it.
+            HostRule {
+                pattern: HostPattern::Exact("lh3.googleusercontent.com"),
+                path_prefix: Some("/ppa/"),
+                strategy: AuthStrategy::Bearer,
+                intercept: false,
+                credential_host_field: None,
+            },
+        ],
         refresh: Some(&GOOGLE_REFRESH),
         metadata_headers: &[],
         credential_headers: &[],
@@ -4460,6 +4481,36 @@ mod tests {
             providers_for_host("photoslibrary.googleapis.com"),
             vec!["google-photos"]
         );
+        assert_eq!(
+            providers_for_host("photospicker.googleapis.com"),
+            vec!["google-photos"]
+        );
+    }
+
+    #[test]
+    fn google_photos_picker_hosts_inject_bearer() {
+        assert!(provider_matches_host_and_path(
+            "google-photos",
+            "photospicker.googleapis.com",
+            "/v1/sessions"
+        ));
+        assert!(provider_matches_host_and_path(
+            "google-photos",
+            "lh3.googleusercontent.com",
+            "/ppa/AFv4abc=d"
+        ));
+        assert!(!provider_matches_host_and_path(
+            "google-photos",
+            "lh3.googleusercontent.com",
+            "/a/avatar"
+        ));
+        let rules =
+            build_app_injection_rules("google-photos", "lh3.googleusercontent.com", "ya29.test");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].0, "/ppa/*");
+        let picker =
+            build_app_injection_rules("google-photos", "photospicker.googleapis.com", "ya29.test");
+        assert_eq!(picker.len(), 1);
     }
 
     // ── Google Search Console ────────────────────────────────────────
