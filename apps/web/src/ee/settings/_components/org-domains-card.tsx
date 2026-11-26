@@ -26,6 +26,7 @@ import {
 } from "@/hooks/use-domains";
 import { usePlanGate } from "@/lib/plan-gate";
 import { DomainTxtRecord } from "./domain-txt-record";
+import { SsoPanelHeader } from "./sso-panel";
 import { PlanGatedSubmitButton } from "./plan-gated-submit-button";
 
 export const OrgDomainsCard = () => {
@@ -52,6 +53,11 @@ export const OrgDomainsCard = () => {
     <>
       <Card>
         <CardContent className="space-y-5">
+          <SsoPanelHeader
+            icon={Globe}
+            title="Email domains"
+            description="Claim your company's email domains and verify them via DNS. SSO is only trusted or enforced for a verified domain."
+          />
           <form onSubmit={handleAdd} className="grid gap-2">
             <Label htmlFor="domain-input">Add a domain</Label>
             <div className="flex gap-2">

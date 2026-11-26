@@ -238,6 +238,15 @@ fn content_length_at_most(headers: &hyper::HeaderMap, max: usize) -> bool {
 /// approval.
 const BULK_BODY_PEEK: usize = 512 * 1024;
 
+/// How much of a possible multi-file upload (a Salesforce sObject
+/// Collections create, see [`summary::may_upload_files`]) the card reads:
+/// each record carries a whole file as base64, so a real batch is
+/// megabytes. A longer batch is still forwarded whole; its card lists the
+/// files this much holds and says the rest was not read. The bytes read
+/// wait with the request (they are forwarded once approved); the card's
+/// own copy of them is freed before the wait.
+const FILE_UPLOAD_BODY_PEEK: usize = 10 * 1024 * 1024;
+
 /// Maximum response body to buffer when checking if a 400 is auth-related.
 /// Auth error messages are small JSON; no need to scan large bodies.
 const AUTH_CHECK_BODY_LIMIT: usize = 8192;
@@ -734,8 +743,44 @@ pub async fn forward_request(
     // `ApprovedResultTarget`): the app the request matched and its card
     // title, both already resolved for the card.
     let mut approval_result_shape: Option<(&'static str, String)> = None;
+    // "Approve similar" (`approval::similar`): the scope a held request would
+    // offer, decided once from the request itself. A reviewer's open window
+    // for it forwards the request without a card, recorded as approved
+    // through that reviewer's approval. The matched app is resolved once,
+    // for the scope and the card alike.
+    let (matched_app, similar_scope, similar_allowance) = match &decision {
+        PolicyDecision::ManualApproval { rule_id } => {
+            let bare_host = common::util::strip_port(host);
+            let matched_app = apps::provider_for_host_and_path(bare_host, &path);
+            let scope = approval::similar::scope_for(&approval::similar::HeldRequest {
+                workspace_id: proxy_ctx.workspace_id.as_deref(),
+                agent_id: proxy_ctx.agent_id.as_deref(),
+                connection_id: rules.winning_connection_id.as_deref(),
+                rule_id,
+                app: matched_app,
+                host: bare_host,
+                method: method.as_str(),
+                path: &path,
+            });
+            let allowance = match &scope {
+                Some(scope) => approval::similar::claim(cache, scope).await,
+                None => None,
+            };
+            (matched_app, scope, allowance)
+        }
+        _ => (None, None, None),
+    };
+    if let Some(allowance) = similar_allowance.as_ref() {
+        info!(
+            url = %url,
+            approval_id = %allowance.approval_id,
+            "APPROVED by an open similar-updates window — forwarding request"
+        );
+    }
     let (forward_body, approval_log_id, approval_id_for_telemetry, approval_triggered_at) =
-        if let PolicyDecision::ManualApproval { rule_id } = &decision {
+        if let (PolicyDecision::ManualApproval { rule_id }, None) =
+            (&decision, similar_allowance.as_ref())
+        {
             info!(method = %method, url = %url, rule_id = %rule_id, "MANUAL APPROVAL required");
 
             let workspace_id = match proxy_ctx.workspace_id.as_deref() {
@@ -755,9 +800,10 @@ pub async fn forward_request(
             // A bulk change of the matched app (one request for a list of
             // records) is read whole, up to its own cap, so the card can show
             // every record it changes: a cut body is never summarized as one.
-            let matched_app =
-                apps::provider_for_host_and_path(common::util::strip_port(host), &path);
             let peek_limit = match matched_app {
+                Some((app, _)) if summary::may_upload_files(app, method.as_str(), &path) => {
+                    FILE_UPLOAD_BODY_PEEK
+                }
                 Some((app, _)) if summary::reads_whole_body(app, method.as_str(), &path) => {
                     BULK_BODY_PEEK
                 }
@@ -823,6 +869,11 @@ pub async fn forward_request(
                 content_type,
                 summary_body,
             );
+            // An answer that carries a secret says so, whichever rule (or the
+            // gateway's own floor) held it.
+            if let Some(why) = policy_engine::secret_read(policy_host, &path, has_injections) {
+                approval_summary.push("Why it asks", why);
+            }
             // Records the card names by id are linked and, where the agent
             // could read them itself, shown by name; the title then says
             // which record ("Update Contact Dana Reyes"). See `approval_enrich`
@@ -899,9 +950,13 @@ pub async fn forward_request(
                         .get(name)
                         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 }),
+                similar: similar_scope,
                 created_at: now,
                 expires_at: now + APPROVAL_TIMEOUT_SECS,
             };
+            // The card's copy of the body (up to `FILE_UPLOAD_BODY_PEEK`) is
+            // done with: free it before the wait, which can last minutes.
+            drop(summary_bytes);
 
             let triggered_at = hooks::iso_now();
             let log_id = uuid::Uuid::new_v4().to_string();
@@ -1063,7 +1118,9 @@ pub async fn forward_request(
 
     // ── Forward to upstream ──────────────────────────────────────────
     // The request's manual-approval outcome, as the telemetry row records it
-    // (`None` when no approval was involved). Built once per emission: both
+    // (`None` when no approval was involved): the card it waited on (its
+    // pending row is updated in place), or the open "Approve similar" window
+    // that let it through (a row of its own). Built once per emission: both
     // the guidance answers below and the normal path at the end carry it.
     let approval_decision = || match (
         &approval_log_id,
@@ -1071,7 +1128,7 @@ pub async fn forward_request(
         &approval_triggered_at,
     ) {
         (Some(log_id), Some(approval_id), Some(triggered_at)) => Some((
-            log_id.clone(),
+            Some(log_id.clone()),
             telemetry::core::RequestDecision::ApprovalApproved {
                 approval_id: approval_id.clone(),
                 triggered_at: triggered_at.clone(),
@@ -1079,7 +1136,15 @@ pub async fn forward_request(
                 approved_by: approval_approved_by.clone(),
             },
         )),
-        _ => None,
+        _ => similar_allowance.as_ref().map(|a| {
+            (
+                None,
+                telemetry::core::RequestDecision::ApprovedBySimilar {
+                    approval_id: a.approval_id.clone(),
+                    approved_by: a.approved_by.clone(),
+                },
+            )
+        }),
     };
     // Every guidance answer below replaces the upstream response and returns
     // before the normal telemetry at the end of this function, so it records
@@ -1099,7 +1164,7 @@ pub async fn forward_request(
             meta.matched_rule = matched_rule.clone();
             match approval_decision() {
                 Some((log_id, approved)) => {
-                    meta.existing_log_id = Some(log_id);
+                    meta.existing_log_id = log_id;
                     meta.decision = Some(approved);
                     telemetry::on_request(meta.into_event(None));
                 }
@@ -1403,7 +1468,10 @@ pub async fn forward_request(
         meta.injected = injection_count > 0;
         hooks::attribute_to_connection(&mut meta, rules, injection_count);
         meta.connection_label = rules.connection_label.clone();
-        (meta.existing_log_id, meta.decision) = approval_decision().unzip();
+        if let Some((log_id, approved)) = approval_decision() {
+            meta.existing_log_id = log_id;
+            meta.decision = Some(approved);
+        }
         meta.matched_rule = matched_rule;
         Some(meta)
     };

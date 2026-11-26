@@ -9,9 +9,15 @@ import {
 } from "@onecli/ui/components/tooltip";
 import { cn } from "@onecli/ui/lib/utils";
 import { useDecideApproval } from "@/hooks/use-approvals";
+import type { ApprovalSimilar } from "@/lib/api/approvals";
+import { ApproveSplitButton } from "./approve-split-button";
 
 interface ApprovalActionsProps {
   approvalId: string;
+  /** The gateway's "Approve similar" offer, when this request has one. */
+  similar?: ApprovalSimilar | null;
+  /** The agent's name, for the "Approve similar" explanation. */
+  agentName?: string;
   size?: "xs" | "sm" | "default";
   /** Render compact icon-only buttons (for the Activity table's narrow cell). */
   iconOnly?: boolean;
@@ -19,9 +25,13 @@ interface ApprovalActionsProps {
   className?: string;
 }
 
-/** Shared Approve / Deny control, wired to the decision mutation. */
+/** Shared Approve / Deny control, wired to the decision mutation. When the
+ *  gateway offers "Approve similar", Approve becomes a split button whose
+ *  arrow opens it. */
 export const ApprovalActions = ({
   approvalId,
+  similar,
+  agentName,
   size = "sm",
   iconOnly = false,
   onResolved,
@@ -33,9 +43,9 @@ export const ApprovalActions = ({
   const approveLoading =
     pending && decideMutation.variables?.decision === "approve";
 
-  const submit = (decision: "approve" | "deny") =>
+  const submit = (decision: "approve" | "deny", offer?: ApprovalSimilar) =>
     decideMutation.mutate(
-      { id: approvalId, decision },
+      { id: approvalId, decision, ...(offer && { similar: offer }) },
       { onSuccess: () => onResolved?.() },
     );
 
@@ -91,15 +101,27 @@ export const ApprovalActions = ({
         {!denyLoading && <X className="size-3.5" />}
         Deny
       </Button>
-      <Button
-        size={size}
-        disabled={pending}
-        loading={approveLoading}
-        onClick={() => submit("approve")}
-      >
-        {!approveLoading && <Check className="size-3.5" />}
-        Approve
-      </Button>
+      {similar ? (
+        <ApproveSplitButton
+          similar={similar}
+          agentName={agentName}
+          size={size}
+          disabled={pending}
+          loading={approveLoading}
+          onApprove={() => submit("approve")}
+          onApproveSimilar={() => submit("approve", similar)}
+        />
+      ) : (
+        <Button
+          size={size}
+          disabled={pending}
+          loading={approveLoading}
+          onClick={() => submit("approve")}
+        >
+          {!approveLoading && <Check className="size-3.5" />}
+          Approve
+        </Button>
+      )}
     </div>
   );
 };

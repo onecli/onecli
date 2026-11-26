@@ -170,6 +170,7 @@ mod tests {
             raw_body: None,
             app: None,
             batch: None,
+            similar: None,
             created_at: 0,
             expires_at: u64::MAX,
         }

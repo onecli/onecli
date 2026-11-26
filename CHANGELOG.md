@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.20.0](https://github.com/onecli/onecli/compare/v2.19.0...v2.20.0) (2026-11-09)
+
+
+### Features
+
+* Settings modal, DM threads, Slack reactions, smooth chat streaming, browser dialogs ([#644](https://github.com/onecli/onecli/issues/644)) ([9d5c600](https://github.com/onecli/onecli/commit/9d5c6008f8c89de22d8dce7c0802c5952b9306e3))
+
+## [2.19.0](https://github.com/onecli/onecli/compare/v2.18.0...v2.19.0) (2026-11-05)
+
+
+### Features
+
+* context sizing, Approve similar, honest refusals, read-only home restarts, faster wakes ([#640](https://github.com/onecli/onecli/issues/640)) ([1d63469](https://github.com/onecli/onecli/commit/1d6346933ba0615fc5a313afcbb1c2a30f54dd0a))
+
+## [2.18.0](https://github.com/onecli/onecli/compare/v2.17.0...v2.18.0) (2026-11-03)
+
+
+### Features
+
+* Bitbucket Cloud, schedule checks, agents send files and post into threads, Codex logins ([#635](https://github.com/onecli/onecli/issues/635)) ([e98119c](https://github.com/onecli/onecli/commit/e98119cdd54b01d6a391e1664bd8a4d1b316d755))
+
 ## [2.17.0](https://github.com/onecli/onecli/compare/v2.16.0...v2.17.0) (2026-10-31)
 
 

@@ -31,7 +31,12 @@ export const ApprovalDetailList = ({
         </div>
       ) : (
         <div key={`${d.label}-${i}`} className="flex gap-1.5">
-          <dt className="text-muted-foreground shrink-0">{d.label}:</dt>
+          {/* A label is usually a short field name; when it names an item
+              (a file being uploaded) it may be long, so it wraps beside its
+              value rather than crushing it. */}
+          <dt className="text-muted-foreground max-w-[60%] shrink-0 break-words">
+            {d.label}:
+          </dt>
           <dd className="min-w-0 break-words">
             <ApprovalLink href={d.url}>{d.value}</ApprovalLink>
           </dd>

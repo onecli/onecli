@@ -1,13 +1,17 @@
 import type Stripe from "stripe";
-import { SAFE_ORG_ID } from "./plan-switch";
+import {
+  isLiveSubscription,
+  isPastDueSubscription,
+  SAFE_ORG_ID,
+} from "./plan-switch";
 import { getPlanConfig, type Plan } from "./plans";
 import { resolveSubscriptionPlan } from "./subscription-plan";
 
 /**
  * A billing problem the org's admins must act on, surfaced as a dashboard
- * banner. Past-due orgs are deliberately downgraded to free by the
- * reconcile-on-read path (only active/trialing counts as live), so without
- * this the customer just sees "Free" with no idea a card failed.
+ * banner. A failed payment drops the org to free right away (the webhook and
+ * the reconcile-on-read path agree: only a live subscription grants a plan),
+ * so without this the customer just sees "Free" with no idea a card failed.
  *
  * - `past_due`: Stripe is still retrying. `invoiceUrl` is the open invoice's
  *   hosted page, where the customer can enter a card AND pay in one step,
@@ -31,11 +35,7 @@ export type PaymentIssue =
 /** How long after a payment-failure cancellation the "ended" banner shows. */
 export const ENDED_BANNER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-const PAST_DUE_STATUSES = new Set(["past_due", "unpaid"]);
-const LIVE_STATUSES = new Set(["active", "trialing"]);
-
-const hasLive = (subs: Stripe.Subscription[]) =>
-  subs.some((s) => LIVE_STATUSES.has(s.status));
+const hasLive = (subs: Stripe.Subscription[]) => subs.some(isLiveSubscription);
 
 /**
  * Subscriptions (any status) on the customer the org row uniquely claims,
@@ -121,7 +121,7 @@ export const findOrgPaymentIssue = async (
   const newestFirst = subs.sort((a, b) => b.created - a.created);
 
   for (const sub of newestFirst) {
-    if (!PAST_DUE_STATUSES.has(sub.status)) continue;
+    if (!isPastDueSubscription(sub)) continue;
     const invoice = sub.latest_invoice;
     if (
       invoice &&

@@ -15,7 +15,13 @@ import { useAgentPageAgent } from "./agent-page-frame";
  * field, grown up. Hosted only, which the page frame enforces: the rail never
  * links here for a BYO agent and a hand-typed URL never reaches this far.
  */
-export const InstructionsSection = () => {
+export const InstructionsSection = ({
+  /** The block heading. Off on the merged Knowledge page, which titles
+   *  the block itself. */
+  heading = true,
+}: {
+  heading?: boolean;
+} = {}) => {
   const { id: agentId } = useAgentPageAgent();
   const detail = useAgentDetail(agentId);
   const save = useUpdateInstructions();
@@ -40,13 +46,15 @@ export const InstructionsSection = () => {
 
   return (
     <div className="space-y-3">
-      <div>
-        <h2 className="text-sm font-medium">What should it do?</h2>
-        <p className="text-muted-foreground mt-1 text-xs">
-          The brief your agent starts every session with: who it is, what it
-          owns, and how it should work.
-        </p>
-      </div>
+      {heading && (
+        <div>
+          <h2 className="text-sm font-medium">What should it do?</h2>
+          <p className="text-muted-foreground mt-1 text-xs">
+            The brief your agent starts every session with: who it is, what it
+            owns, and how it should work.
+          </p>
+        </div>
+      )}
       <Textarea
         value={value}
         onChange={(e) => setDraft(e.target.value)}

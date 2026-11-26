@@ -1,3 +1,5 @@
+import type { ScheduleParse } from "@onecli/api/services/schedule-parse-service";
+import type { CronOutcome } from "@onecli/api/validations/crons";
 import { apiDelete, apiGet, apiPatch, apiPost } from "./client";
 
 /**
@@ -13,13 +15,20 @@ export interface AgentCron {
   prompt: string;
   schedule: string;
   timezone: string;
+  /** Shell command run before each fire, no model; null = none. */
+  gate: string | null;
+  /** The run condition in plain words, written by the agent. */
+  gateDescription: string | null;
   enabled: boolean;
   /** Set only by auto-disable: "authorization" | "failures". */
   disabledReason: string | null;
   nextFireAt: string;
   lastFiredAt: string | null;
-  /** "ok" | "failed" | "skipped_busy" */
-  lastOutcome: string | null;
+  /** How the last finished run went. */
+  lastOutcome: CronOutcome | null;
+  /** Its conversation is busy right now (a run, or a person's follow-up in
+   * it); derived server-side. */
+  running: boolean;
   consecutiveFailures: number;
   createdAt: string;
 }
@@ -29,6 +38,7 @@ export interface CronInput {
   prompt: string;
   schedule: string;
   timezone: string;
+  gate?: string | null;
 }
 
 export interface CronUpdate extends Partial<CronInput> {
@@ -59,6 +69,13 @@ export const runNow = (agentId: string, cronId: string) =>
     cronBase(agentId, `/${encodeURIComponent(cronId)}/run`),
     {},
   );
+
+/** "When" words the dialog's own rules missed, read by a fast model on the
+ * agent's key. Saves nothing. */
+export const parseWords = (
+  agentId: string,
+  input: { text: string; timezone: string },
+) => apiPost<ScheduleParse>(cronBase(agentId, "/parse"), input);
 
 export const remove = (agentId: string, cronId: string) =>
   apiDelete(cronBase(agentId, `/${encodeURIComponent(cronId)}`));

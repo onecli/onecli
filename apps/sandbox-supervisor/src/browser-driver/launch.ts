@@ -129,7 +129,7 @@ export const launchArgs = (
  * (which refuses private addresses) and wait out its timeout on a browser
  * that was up in two seconds. `node:http` reads no proxy variables.
  */
-export const browserListening = (): Promise<boolean> =>
+const browserListening = (): Promise<boolean> =>
   new Promise((resolve) => {
     const req = get(
       `${DEVTOOLS_ENDPOINT}/json/version`,

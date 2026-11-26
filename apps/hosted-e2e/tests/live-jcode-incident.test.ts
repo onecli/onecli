@@ -230,10 +230,17 @@ liveScenario(
           "echo NEVER`. Do not use background tasks. Reply when done.",
       }),
     );
+    // The abortable turn's OWN bash call, not a conversation-wide count:
+    // earlier turns' tool calls (a model may take two for the long turn)
+    // would otherwise satisfy the wait before this turn even starts, and the
+    // abort would land on a still-`dispatched` turn.
     await waitFor(
       () => fetchTranscript(stack.v1, conversationA.id),
       (events) =>
-        events.filter((event) => event.type === "tool.started").length >= 2,
+        events.some(
+          (event) =>
+            event.turnId === abortable.id && event.type === "tool.started",
+        ),
       "the abortable turn's bash call to start",
       240_000,
     );

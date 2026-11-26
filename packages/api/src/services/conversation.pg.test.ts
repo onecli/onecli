@@ -5,11 +5,14 @@ import { anthropic } from "../llm/anthropic.js";
 import {
   AGENT_NEVER_STARTED_MESSAGE,
   AGENT_RESTARTED_MESSAGE,
+  AGENT_RESUMING_NOTICE,
   AGENT_START_FAILED_MESSAGE,
   AT_CAPACITY_MESSAGE,
   HARNESS_BUSY_MESSAGE,
+  HOME_READ_ONLY_MESSAGE,
   IMAGE_UNAVAILABLE_MESSAGE,
   MODEL_PROVIDER_ERROR_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
   TRANSCRIPT_REJECTED_MESSAGE,
   TURN_STALLED_MESSAGE,
 } from "../validations/conversation.js";
@@ -1286,11 +1289,61 @@ describe.skipIf(!PROOF_URL)(
       expect(next.status).toBe("queued");
     });
 
-    it("a RUNNING turn still dies visibly — observable work is never re-run", async () => {
-      // The mid-run carve-out: once turn.started landed, side effects may
-      // exist and a silent re-send could double them. MUTATION-PROOF: widen
-      // the revival predicate to running and this fails on `queued`.
-      const { conversationId, sandboxId } = await seedTalkable("running-dies");
+    it("a read-only home closes its turns with the storage sentence, revives nothing, and (self-host, no hook) restarts as today", async () => {
+      // The supervisor saw its home go read-only. A cold revival would land
+      // the turn in a boot the platform is about to restart, so this stop
+      // closes every in-flight turn with the storage copy instead. With no
+      // hosted extension (a self-host, decision 2026-11-02) nothing is
+      // budgeted: the next message wakes a fresh boot, as for any stop.
+      const { conversationId, sandboxId } = await seedTalkable("readonly");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "mid-flight",
+        WEB_A,
+      );
+      await dueWork.claimDueWork(RUNNER_A, 5); // -> dispatched, never started
+
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+        error: "the agent's home is mounted read-only",
+        reasonCode: "home_read_only",
+        node: "node-a",
+      });
+
+      const row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("failed");
+      expect(row?.errorCode).toBe("home_read_only");
+      expect(row?.error).toBe(HOME_READ_ONLY_MESSAGE);
+      expect(row?.retriedAt).toBeNull();
+      // No hook, no event: a self-host records nothing and holds nothing.
+      expect(
+        await db.sandboxHomeReadOnlyEvent.count({ where: { sandboxId } }),
+      ).toBe(0);
+      const next = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "again",
+        WEB_A,
+      );
+      expect(next.status).toBe("queued");
+      expect(await dueWork.claimDueWork(RUNNER_A, 5)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "start", sandboxId }),
+        ]),
+      );
+    });
+
+    it("a read-only home never RESUMES a running turn: it closes with the storage sentence, no notice, no early boot", async () => {
+      // Where the resume arm meets the read-only stop: resuming would
+      // re-queue the turn and flip the box to `unprovisioned` for a boot
+      // that lands on the frozen home (and, hosted, would walk round the
+      // restart hold). The read-only stop owns the turn's words instead.
+      // MUTATION-PROOF: drop the read-only arm in applyRunnerEvent and this
+      // fails on `queued`.
+      const { conversationId, sandboxId } = await seedTalkable("ro-running");
       const turn = await turns.createTurn(
         WORKSPACE,
         conversationId,
@@ -1309,13 +1362,301 @@ describe.skipIf(!PROOF_URL)(
         kind: "sandbox.status",
         sandboxId,
         status: "stopped",
+        error: "the agent's home is mounted read-only",
+        reasonCode: "home_read_only",
+        node: "node-a",
       });
+
+      const row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("failed");
+      expect(row?.errorCode).toBe("home_read_only");
+      expect(row?.error).toBe(HOME_READ_ONLY_MESSAGE);
+      expect(row?.retriedAt).toBeNull();
+      expect(
+        await db.turnEvent.count({
+          where: { turnId: turn.id, type: "notice" },
+        }),
+      ).toBe(0);
+      expect(
+        (await db.sandbox.findUnique({ where: { id: sandboxId } }))?.status,
+      ).toBe("stopped");
+    });
+
+    it("a RUNNING turn is resumed once, in place: queued again, its start kept, its clocks reset, a fresh boot woken, and a notice under it", async () => {
+      // The mid-run law: once turn.started landed, side effects may exist,
+      // so the turn is never re-sent as new; it is resumed in its own
+      // session (the dispatch says so) and the person is told. MUTATION-
+      // PROOF: drop `resumeInterruptedTurns` from applyRunnerEvent and this
+      // fails on `failed`.
+      const { conversationId, sandboxId } = await seedTalkable("running-dies");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "mid-flight",
+        WEB_A,
+      );
+      await dueWork.claimDueWork(RUNNER_A, 5);
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        [{ type: "turn.started" }],
+      );
+      await turns.applyTurnProgress(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+      );
+      await db.turn.update({
+        where: { id: turn.id },
+        data: { ceilingWarnedAt: new Date() },
+      });
+      const startedAt = (await db.turn.findUnique({ where: { id: turn.id } }))
+        ?.startedAt;
+      expect(startedAt).toBeTruthy();
+
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+      });
+
+      const row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("queued");
+      expect(row?.error).toBeNull();
+      expect(row?.errorCode).toBeNull();
+      expect(row?.retriedAt).not.toBeNull();
+      // One run, measured from when it first started.
+      expect(row?.startedAt?.getTime()).toBe(startedAt?.getTime());
+      // The new attempt's stall and ceiling-warning clocks start clean.
+      expect(row?.lastProgressAt).toBeNull();
+      expect(row?.ceilingWarnedAt).toBeNull();
+      expect(
+        (await db.sandbox.findUnique({ where: { id: sandboxId } }))?.status,
+      ).toBe("unprovisioned");
+      const notices = await db.turnEvent.findMany({
+        where: { turnId: turn.id, type: "notice" },
+        select: { payload: true },
+      });
+      expect(notices.map((n) => n.payload)).toEqual([
+        { type: "notice", level: "info", text: AGENT_RESUMING_NOTICE },
+      ]);
+    });
+
+    it("the resumed turn is re-dispatched in its own session, framed for the agent as a resume", async () => {
+      const { conversationId, sandboxId } = await seedTalkable("resume-frame");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "build the report",
+        WEB_A,
+      );
+      await dueWork.claimDueWork(RUNNER_A, 5);
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        [{ type: "turn.started" }],
+      );
+      // The heartbeat carried the running session (the conversation's
+      // first turn: no terminal report ever persisted one).
+      await turns.applyTurnProgress(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        "session-1",
+      );
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+      });
+
+      // Fresh boot, then the turn arm hands the same row out again.
+      await dueWork.claimDueWork(RUNNER_A, 5);
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "supervisor.ready",
+        sandboxId,
+      });
+      const work = await dueWork.claimDueWork(RUNNER_A, 5);
+      const delivered = work.find(
+        (item) => item.kind === "turn" && item.turnId === turn.id,
+      );
+      expect(delivered).toMatchObject({
+        kind: "turn",
+        message: "build the report",
+        resumeSessionRef: "session-1",
+        resumed: true,
+      });
+      // `turn.started` of the new attempt keeps the first start.
+      const before = (await db.turn.findUnique({ where: { id: turn.id } }))
+        ?.startedAt;
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        [{ type: "turn.started" }],
+      );
+      const after = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(after?.status).toBe("running");
+      expect(after?.startedAt?.getTime()).toBe(before?.getTime());
+    });
+
+    it("the SECOND mid-run death closes the turn with today's honest copy: one resume, never a loop", async () => {
+      // MUTATION-PROOF: drop `retriedAt: null` from the resume predicate and
+      // this fails on `queued`.
+      const { conversationId, sandboxId } = await seedTalkable("resume-once");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "mid-flight",
+        WEB_A,
+      );
+      const runToDeath = async () => {
+        await dueWork.claimDueWork(RUNNER_A, 5);
+        await turns.applyTurnEvents(
+          reporter(RUNNER_A, sandboxId),
+          conversationId,
+          turn.id,
+          [{ type: "turn.started" }],
+        );
+        await sandboxes.applyRunnerEvent(RUNNER_A, {
+          kind: "sandbox.status",
+          sandboxId,
+          status: "stopped",
+        });
+      };
+      await runToDeath();
+      expect(
+        (await db.turn.findUnique({ where: { id: turn.id } }))?.status,
+      ).toBe("queued");
+
+      await dueWork.claimDueWork(RUNNER_A, 5); // fresh boot claimed
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "supervisor.ready",
+        sandboxId,
+      });
+      await runToDeath();
 
       const row = await db.turn.findUnique({ where: { id: turn.id } });
       expect(row?.status).toBe("failed");
       expect(row?.error).toBe(AGENT_RESTARTED_MESSAGE);
       expect(row?.errorCode).toBe("agent_restarted");
+      // One notice: the one resume.
+      expect(
+        await db.turnEvent.count({
+          where: { turnId: turn.id, type: "notice" },
+        }),
+      ).toBe(1);
+    });
+
+    it("a resume notice that cannot land costs only its own line: the others still land", async () => {
+      // Best-effort per turn, after the commit: a conversation that vanished
+      // (the write answers false) or a write that throws must not stop the
+      // loop. MUTATION-PROOF: let the throw escape and this rejects.
+      const { conversationId: goneId } = await seedTalkable("notice-gone");
+      const { conversationId: liveId } = await seedTalkable("notice-live");
+      const live = await turns.createTurn(WORKSPACE, liveId, "keep", WEB_A);
+
+      await expect(
+        turns.writeResumeNotices([
+          { id: "turn-of-a-gone-conversation", conversationId: "gone" },
+          // A real conversation but no such turn: the event's foreign key
+          // makes the write itself throw.
+          { id: "no-such-turn", conversationId: goneId },
+          { id: live.id, conversationId: liveId },
+        ]),
+      ).resolves.toBeUndefined();
+
+      const notices = await db.turnEvent.findMany({
+        where: { type: "notice", conversationId: { in: [goneId, liveId] } },
+        select: { turnId: true, payload: true },
+      });
+      expect(notices).toEqual([
+        {
+          turnId: live.id,
+          payload: {
+            type: "notice",
+            level: "info",
+            text: AGENT_RESUMING_NOTICE,
+          },
+        },
+      ]);
+    });
+
+    it("a turn someone asked to STOP is never resumed: the stop wins", async () => {
+      // MUTATION-PROOF: drop `abortRequested: false` from the resume
+      // predicate and this fails on `queued`.
+      const { conversationId, sandboxId } = await seedTalkable("resume-abort");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "mid-flight",
+        WEB_A,
+      );
+      await dueWork.claimDueWork(RUNNER_A, 5);
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        [{ type: "turn.started" }],
+      );
+      await turns.abortTurn(WORKSPACE, turn.id, USER_A);
+
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+      });
+
+      const row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("failed");
       expect(row?.retriedAt).toBeNull();
+    });
+
+    it("a mid-run death reported by the harness itself (finishTurn agent_restarted) resumes the turn the same way", async () => {
+      // The other death door: the supervisor's own coded turn.result. Both
+      // orders must converge on one resume: this one first, then the
+      // sandbox report, which finds the turn queued and recovers nothing.
+      const { conversationId, sandboxId } = await seedTalkable("resume-fin");
+      const turn = await turns.createTurn(
+        WORKSPACE,
+        conversationId,
+        "mid-flight",
+        WEB_A,
+      );
+      await dueWork.claimDueWork(RUNNER_A, 5);
+      await turns.applyTurnEvents(
+        reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turn.id,
+        [{ type: "turn.started" }],
+      );
+
+      await turns.finishTurn({
+        reporter: reporter(RUNNER_A, sandboxId),
+        conversationId,
+        turnId: turn.id,
+        status: "failed",
+        error: "harness connection closed",
+        errorCode: "agent_restarted",
+      });
+      let row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("queued");
+      expect(row?.retriedAt).not.toBeNull();
+
+      await sandboxes.applyRunnerEvent(RUNNER_A, {
+        kind: "sandbox.status",
+        sandboxId,
+        status: "stopped",
+      });
+      row = await db.turn.findUnique({ where: { id: turn.id } });
+      expect(row?.status).toBe("queued");
+      expect(
+        await db.turnEvent.count({
+          where: { turnId: turn.id, type: "notice" },
+        }),
+      ).toBe(1);
     });
 
     it("leaves QUEUED turns alone — they were never handed to anything", async () => {
@@ -1531,6 +1872,12 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
       turn.id,
       [{ type: "turn.started" }],
     );
+    // A turn whose one resume is already spent: a death report closes it
+    // with the code's canonical copy (a first death would resume it).
+    await db.turn.update({
+      where: { id: turn.id },
+      data: { retriedAt: new Date() },
+    });
 
     await turns.finishTurn({
       reporter: reporter(RUNNER_A, sandboxId),
@@ -1682,6 +2029,56 @@ describe.skipIf(!PROOF_URL)("finishTurn and the cold-death revival", () => {
     expect(row?.error).toBe(TRANSCRIPT_REJECTED_MESSAGE);
     expect(row?.errorCode).toBe("transcript_rejected");
     expect(row?.error).not.toContain("tool_use");
+  });
+
+  it("closes a model_refused turn failed with the canonical copy, keeps its usage, and frees the conversation", async () => {
+    // The model declined and wrote nothing: before, the turn closed `done`
+    // with no answer (silence). Failed + canonical copy is what the chat
+    // and the channel mirror render; the runtime's own sentence is operator
+    // material and never reaches a person. The usage still lands (the call
+    // cost tokens), and the next message runs normally.
+    const { conversationId, sandboxId } = await seedTalkable("fin-refused");
+    const turn = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "hey",
+      WEB_A,
+    );
+    await dueWork.claimDueWork(RUNNER_A, 5);
+    await turns.applyTurnEvents(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turn.id,
+      [{ type: "turn.started" }, { type: "turn.done" }],
+    );
+
+    await turns.finishTurn({
+      reporter: reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId: turn.id,
+      status: "failed",
+      error:
+        "Provider guardrail stopped the response (stop_reason: refusal). The model declined to answer this request.",
+      errorCode: "model_refused",
+      usage: { inputTokens: 41, outputTokens: 0 },
+    });
+
+    const row = await db.turn.findUnique({ where: { id: turn.id } });
+    expect(row?.status).toBe("failed");
+    expect(row?.error).toBe(MODEL_REFUSED_MESSAGE);
+    expect(row?.errorCode).toBe("model_refused");
+    expect(row?.error).not.toContain("guardrail");
+    expect(row?.usage).toEqual({ inputTokens: 41, outputTokens: 0 });
+
+    // A refusal is one turn's outcome: the conversation takes the next
+    // message (no 409, no revival of the refused turn).
+    const next = await turns.createTurn(
+      WORKSPACE,
+      conversationId,
+      "a different question",
+      WEB_A,
+    );
+    expect(next.status).toBe("queued");
   });
 
   it("an uncoded failure that carries its raw error never closes with a NULL error", async () => {
@@ -2025,6 +2422,79 @@ describe.skipIf(!PROOF_URL)("turn progress stamping", () => {
 
     const row = await db.turn.findUnique({ where: { id: turnId } });
     expect(row?.lastProgressAt).toBeNull();
+  });
+
+  it("a beat carrying the running session persists it as the conversation's resume handle", async () => {
+    // A sandbox that dies mid-turn never sends the terminal report that
+    // persists the ref otherwise; the beat is what leaves it behind.
+    // MUTATION-PROOF: drop the sessionRef write and this fails on null.
+    const { conversationId, sandboxId, turnId } =
+      await seedRunningTurn("progress-ref");
+
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, sandboxId),
+      conversationId,
+      turnId,
+      "session-live",
+    );
+
+    const conversation = await db.conversation.findUnique({
+      where: { id: conversationId },
+    });
+    expect(conversation?.harnessSessionRef).toBe("session-live");
+  });
+
+  it("an orphan's, a foreign sandbox's, or a restarted agent's beat never repoints the resume handle", async () => {
+    // The same three fences as the terminal persist: the beat must match
+    // this reporter's own RUNNING turn, and a boot an agent restart
+    // discarded (`stopRequestedAt`) must not hand back the session the
+    // restart threw away.
+    const orphan = await seedRunningTurn("progress-ref-orphan");
+    await db.turn.update({
+      where: { id: orphan.turnId },
+      data: { status: "failed", finishedAt: new Date() },
+    });
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, orphan.sandboxId),
+      orphan.conversationId,
+      orphan.turnId,
+      "orphan-ref",
+    );
+
+    const mine = await seedRunningTurn("progress-ref-mine");
+    const foreign = await seedTalkable("progress-ref-foreign");
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, foreign.sandboxId),
+      mine.conversationId,
+      mine.turnId,
+      "foreign-ref",
+    );
+
+    const restarted = await seedRunningTurn("progress-ref-restart");
+    await db.sandbox.update({
+      where: { id: restarted.sandboxId },
+      data: { stopRequestedAt: new Date() },
+    });
+    await turns.applyTurnProgress(
+      reporter(RUNNER_A, restarted.sandboxId),
+      restarted.conversationId,
+      restarted.turnId,
+      "discarded-ref",
+    );
+
+    const refs = await db.conversation.findMany({
+      where: {
+        id: {
+          in: [
+            orphan.conversationId,
+            mine.conversationId,
+            restarted.conversationId,
+          ],
+        },
+      },
+      select: { harnessSessionRef: true },
+    });
+    expect(refs.map((r) => r.harnessSessionRef)).toEqual([null, null, null]);
   });
 });
 

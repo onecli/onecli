@@ -1,4 +1,9 @@
-import type { LlmProvider, LlmProviderId } from "./types";
+import type {
+  LlmAuthAnswers,
+  LlmAuthMode,
+  LlmProvider,
+  LlmProviderId,
+} from "./types";
 import { anthropic } from "./anthropic";
 import { openai } from "./openai";
 
@@ -38,3 +43,22 @@ export const isLlmProviderId = (type: string): type is LlmProviderId =>
 
 export const llmProvider = (id: LlmProviderId): LlmProvider =>
   LLM_PROVIDERS[id];
+
+/**
+ * A provider's answers for one auth mode: its own, with a subscription
+ * login's `oauth` overrides on top. The one place `oauth` is read, so the
+ * default, the catalog and the offline list can never disagree about which
+ * product a credential is.
+ */
+export const forAuthMode = (
+  provider: LlmProvider,
+  authMode: LlmAuthMode,
+): LlmAuthAnswers => {
+  const override = authMode === "oauth" ? provider.oauth : undefined;
+  return {
+    defaultModel: override?.defaultModel ?? provider.defaultModel,
+    catalogUrl: override?.catalogUrl ?? provider.catalogUrl,
+    parseCatalog: override?.parseCatalog ?? provider.parseCatalog,
+    fallback: override?.fallback ?? provider.fallback,
+  };
+};

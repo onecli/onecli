@@ -6,7 +6,7 @@ import { Library } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { useOrgMembership } from "@/hooks/use-org";
 import { useOrgSkillLibrary } from "@/hooks/use-skill-library";
-import { readDefaultOrgCookie } from "@/lib/navigation";
+import { orgPath, readDefaultOrgCookie } from "@/lib/navigation";
 import { LibraryPickerDialog } from "./library-picker-dialog";
 
 export interface AddFromLibraryButtonProps {
@@ -55,7 +55,7 @@ export const AddFromLibraryButton = ({
 
   return (
     <Button size="sm" variant="outline" asChild>
-      <Link href={`/org/${encodeURIComponent(orgId)}/skills`}>
+      <Link href={orgPath(orgId, "skills")}>
         <Library className="size-4" />
         Add to library
       </Link>

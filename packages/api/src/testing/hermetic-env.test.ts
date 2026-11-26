@@ -12,6 +12,7 @@ import {
   PRESERVED_AMBIENT_VARS,
   applyHermeticEnv,
   normalizeTestEnv,
+  pinProofDatabaseUrl,
   workerBaselineHolder,
   type HermeticBaselineHolder,
 } from "./hermetic-env";
@@ -228,6 +229,66 @@ describe("applyHermeticEnv: one worker, many files", () => {
       TEST: "true",
       VITEST_POOL_ID: "2",
     });
+  });
+});
+
+describe("pinProofDatabaseUrl: the pg project's step after the reset", () => {
+  it("keeps the proof database in DATABASE_URL across the reset between files", () => {
+    // The incident: a suite's unawaited poll queried the shared Prisma
+    // client after the suite's $disconnect, the reset had just deleted
+    // DATABASE_URL, and every later pg file failed "Environment variable
+    // not found: DATABASE_URL". The reset alone deletes it; reset + pin,
+    // as the pg setup runs them, leaves the proof database in place.
+    const holder: HermeticBaselineHolder = {};
+    const proof = "postgresql://ci:ci@localhost:5440/onecli";
+    const env: NodeJS.ProcessEnv = { POLICY_PROOF_DATABASE_URL: proof };
+    applyHermeticEnv(env, holder);
+    pinProofDatabaseUrl(env);
+    expect(env.DATABASE_URL).toBe(proof);
+
+    // A suite repoints or deletes it; the next file's setup puts it back.
+    delete env.DATABASE_URL;
+    applyHermeticEnv(env, holder);
+    expect(env.DATABASE_URL).toBeUndefined();
+    pinProofDatabaseUrl(env);
+    expect(env.DATABASE_URL).toBe(proof);
+  });
+
+  it("never revives an ambient DATABASE_URL when no proof database is opted in", () => {
+    // Locally without POLICY_PROOF_DATABASE_URL the pg suites skip; a
+    // developer's real DATABASE_URL must stay deleted, not come back.
+    for (const proof of [undefined, ""]) {
+      const holder: HermeticBaselineHolder = {};
+      const env: NodeJS.ProcessEnv = {
+        DATABASE_URL: "postgresql://a-real-dev-database",
+        ...(proof !== undefined && { POLICY_PROOF_DATABASE_URL: proof }),
+      };
+      applyHermeticEnv(env, holder);
+      pinProofDatabaseUrl(env);
+      expect(env.DATABASE_URL).toBeUndefined();
+    }
+  });
+
+  it("is wired as the pg project's only setup file, and the unit project keeps the plain reset", async () => {
+    // The pin must run in the SAME setup file as the reset: a project's
+    // setupFiles are appended to the root's, so a root reset plus a pg-only
+    // pin would leave the gap open between the two files.
+    const { default: config } = await import("../../vitest.config");
+    const projects = (config.test?.projects ?? []).flatMap((project) =>
+      typeof project === "object" && "test" in project ? [project] : [],
+    );
+    const setupOf = (name: string) =>
+      projects.find((project) => project.test?.name === name)?.test?.setupFiles;
+    expect(config.test?.setupFiles).toBeUndefined();
+    expect(setupOf("pg")).toEqual(["./src/testing/pg-proof-env.setup.ts"]);
+    expect(setupOf("unit")).toEqual(["./src/testing/hermetic-env.setup.ts"]);
+    const pgSetup = readFileSync(
+      join(import.meta.dirname, "pg-proof-env.setup.ts"),
+      "utf8",
+    );
+    expect(pgSetup).toMatch(
+      /applyHermeticEnv\(process\.env, workerBaselineHolder\(\)\);\s*pinProofDatabaseUrl\(process\.env\);/,
+    );
   });
 });
 

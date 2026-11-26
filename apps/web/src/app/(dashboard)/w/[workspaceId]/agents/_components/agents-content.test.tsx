@@ -58,6 +58,7 @@ const state = vi.hoisted(() => ({
 vi.mock("@/hooks/use-agents", () => ({
   useAgents: () => ({ data: state.agents, isPending: false }),
   useCreateAgent: () => ({ mutate: vi.fn(), isPending: false }),
+  useSetStarterFace: () => vi.fn(),
   useCreateHostedAgent: () => ({
     mutate: vi.fn(),
     isPending: false,

@@ -1,16 +1,11 @@
-import GroupsPage from "@/ee/groups/groups-page";
-import { isEntitled } from "@onecli/api/lib/entitlements";
-import { EnterpriseLockedCard } from "@/lib/components/enterprise-locked-card";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function Page() {
-  // Directory groups + role mappings (#68/#69) are licensed — dark unlicensed.
-  if (!isEntitled()) {
-    return (
-      <EnterpriseLockedCard
-        feature="groups"
-        description="Organize members into directory groups, sync them from your IdP via SCIM, and map groups to org roles."
-      />
-    );
-  }
-  return <GroupsPage />;
+interface Props {
+  params: Promise<{ orgId: string }>;
+}
+
+/** An old URL: groups live under Settings > Security & SSO. */
+export default async function Page({ params }: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "security");
 }

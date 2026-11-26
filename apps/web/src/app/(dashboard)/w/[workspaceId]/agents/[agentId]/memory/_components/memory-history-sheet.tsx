@@ -182,7 +182,12 @@ export const MemoryHistorySheet = ({
                           <span className="sr-only">Loading full version</span>
                         </div>
                       ) : (
-                        <ChatMarkdown text={selectedContent} />
+                        // A side panel, not a conversation: the sheet's own
+                        // denser size, not the chat's reading size.
+                        <ChatMarkdown
+                          text={selectedContent}
+                          className="text-sm leading-relaxed"
+                        />
                       )}
                     </div>
                   )}

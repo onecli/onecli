@@ -1,10 +1,18 @@
-import { Suspense } from "react";
-import { GlobalLlmSecretsPage } from "../../_components/global-secrets-page";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function OrgLlmSecretsPage() {
-  return (
-    <Suspense>
-      <GlobalLlmSecretsPage />
-    </Suspense>
-  );
+interface Props {
+  params: Promise<{ orgId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/** An old URL: Settings > Shared apps, LLMs tab. */
+export default async function OrgLlmSecretsPage({
+  params,
+  searchParams,
+}: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "shared-apps", {
+    ...(await searchParams),
+    tab: "llms",
+  });
 }

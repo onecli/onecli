@@ -1,4 +1,5 @@
 import { createEditionSlot } from "../edition-state";
+import type { ThreadRef } from "../../validations/recipients";
 
 /**
  * One act-as-you tool call's answer: a result object for the model, or a
@@ -79,6 +80,9 @@ export interface ConversationSender {
      * targets that conversation and nothing else. Absent = an exact name. */
     conversationRef?: string;
     text: string;
+    /** send_message `thread`, parsed at the tool door: post inside that
+     * existing thread, which must be in the target conversation. */
+    thread?: ThreadRef;
     originConversationId: string | null;
     originTurnId: string | null;
     /** The reader picked "Send as me" for THIS exact message (a
@@ -92,6 +96,22 @@ export interface ConversationSender {
   edit(input: OwnMessageInput & { text: string }): Promise<ActAsYouOutcome>;
   /** `delete_my_message`: same fence; always held for the reader. */
   delete(input: OwnMessageInput): Promise<ActAsYouOutcome>;
+  /** The messages this agent sent AS the reader in the last 24h to one
+   * recipient (a channel id, or the person a DM is with), newest first,
+   * each with its whole text. Read-only; null reader or no token = none. */
+  listOwn(input: {
+    agentId: string;
+    readerUserId: string | null;
+    recipientRef: string;
+  }): Promise<{ messageId: string; text: string; sentAt: number }[]>;
+  /** Whether this agent sent `messageId` AS the reader to that recipient in
+   * the last 24h (the send_as_me record alone; no provider call). */
+  isOwn(input: {
+    agentId: string;
+    readerUserId: string | null;
+    recipientRef: string;
+    messageId: string;
+  }): Promise<boolean>;
 }
 
 export interface OwnMessageInput {
@@ -99,6 +119,9 @@ export interface OwnMessageInput {
   readerUserId: string | null;
   askerUserId?: string | null;
   conversation: string;
+  /** The exact provider conversation id when the platform already knows
+   * it (a ledger row): targets that grant and nothing else. */
+  conversationRef?: string;
   /** The messageId a send_as_me result returned. */
   messageId: string;
   originConversationId: string | null;

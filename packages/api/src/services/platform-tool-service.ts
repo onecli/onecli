@@ -14,6 +14,7 @@ import {
   deleteCron,
   listCrons,
   nextFireOrNull,
+  updateCronAsAgent,
 } from "./agent-cron-service";
 import {
   getMemoryByKey,
@@ -28,6 +29,7 @@ import {
 import {
   cancelTaskArgsSchema,
   scheduleTaskArgsSchema,
+  updateTaskArgsSchema,
 } from "../validations/crons";
 import { isAutomationSource } from "../validations/conversation";
 import {
@@ -173,6 +175,41 @@ export interface ToolContext {
 export type ContextPurpose = "origin" | "provenance";
 
 /**
+ * The chat an automation run reports to: its cron's, watch's or webhook's
+ * origin (`externalRef` is that row's id on a run conversation). Only a
+ * conversation of the same agent that is not itself an automation run, so
+ * an anchor can never chain from one hidden thread to another. Null when
+ * the automation has no chat, or for an automation kind with no origin
+ * (a memory review, a peer task).
+ */
+const automationOrigin = async (
+  agentId: string,
+  run: { source: string; externalRef: string | null },
+): Promise<string | null> => {
+  const ref = run.externalRef;
+  if (!ref) return null;
+  const where = { id: ref, agentId };
+  const select = { originConversationId: true } as const;
+  const row =
+    run.source === "cron"
+      ? await db.agentCron.findFirst({ where, select })
+      : run.source === "webhook"
+        ? await db.agentWebhook.findFirst({ where, select })
+        : run.source === "watch"
+          ? await db.processWatch.findFirst({
+              where: { id: ref, process: { sandbox: { agentId } } },
+              select,
+            })
+          : null;
+  if (!row?.originConversationId) return null;
+  const origin = await db.conversation.findFirst({
+    where: { id: row.originConversationId, agentId },
+    select: { id: true, source: true },
+  });
+  return origin && !isAutomationSource(origin.source) ? origin.id : null;
+};
+
+/**
  * Verify a claimed calling-turn context against a fenced agent, keeping only
  * what holds (anchoring, not authority — a forged context degrades delivery,
  * never authorization). Shared by the tool-call path and step 10's
@@ -188,7 +225,7 @@ export const resolveVerifiedContext = async (
   }
   const conversation = await db.conversation.findFirst({
     where: { id: claim.conversationId, agentId },
-    select: { id: true, source: true },
+    select: { id: true, source: true, externalRef: true },
   });
   if (!conversation) {
     log.warn(
@@ -197,20 +234,23 @@ export const resolveVerifiedContext = async (
     );
     return { originConversationId: null, createdByUserId: null, turnId: null };
   }
-  // An automation-sourced conversation (a cron/watch run) must never become
-  // an ORIGIN anchor: nothing renders those threads, so a watch anchored
-  // there delivers its report into a black hole — and the mistake chains
-  // (a wake turn arming the next watch at its own hidden conversation).
-  // Web and Slack conversations stay legal anchors; a rejected claim
-  // degrades to no anchor, exactly like a forged one. PROVENANCE consumers
-  // (memory revisions) keep the automation conversation — recording that a
-  // save came from a cron turn is honest, and nothing is delivered there.
+  // An automation-sourced conversation (a cron/watch/webhook run) never
+  // becomes an ORIGIN anchor itself: nothing renders those threads, so a
+  // watch anchored there would deliver its report into a black hole. The
+  // run's report has a chat, though: the one its schedule, watch or webhook
+  // reports to. Work the run starts (a long build it watches) reports there
+  // too, or a run that hands off to a watch is never heard from again.
+  // Anchoring only: no person typed the run, so it carries no creator and
+  // no turn, and a run whose automation has no chat stays unanchored.
+  // PROVENANCE consumers (memory revisions) keep the automation
+  // conversation: recording that a save came from a cron turn is honest,
+  // and nothing is delivered there.
   if (purpose === "origin" && isAutomationSource(conversation.source)) {
-    log.warn(
-      { agentId, conversationId: claim.conversationId },
-      "context claimed an automation conversation; ignoring it",
-    );
-    return { originConversationId: null, createdByUserId: null, turnId: null };
+    return {
+      originConversationId: await automationOrigin(agentId, conversation),
+      createdByUserId: null,
+      turnId: null,
+    };
   }
   if (!claim.turnId) {
     return {
@@ -247,12 +287,13 @@ export const resolveConversationReader = async (input: {
   if (!input.conversationId) return null;
   const conversation = await db.conversation.findFirst({
     where: { id: input.conversationId, agentId: input.agentId },
-    select: { source: true, externalRef: true, direct: true, userId: true },
+    select: { source: true, externalRef: true, userId: true },
   });
   if (!conversation) return null;
-  if (conversation.direct && conversation.userId) {
-    // A direct thread's turns are its owner's; a mismatched turn user would
-    // be an upstream bug, so refuse rather than guess.
+  if (conversation.userId) {
+    // A private thread's turns are its owner's (their direct thread, or a
+    // DM thread opened inside it: any owned conversation); a mismatched
+    // turn user would be an upstream bug, so refuse rather than guess.
     return input.turnUserId === null || input.turnUserId === conversation.userId
       ? conversation.userId
       : null;
@@ -267,7 +308,7 @@ export const resolveConversationReader = async (input: {
       where: { id: conversation.externalRef, agentId: input.agentId },
       select: {
         createdByUserId: true,
-        originConversation: { select: { direct: true, userId: true } },
+        originConversation: { select: { userId: true } },
         originConversationId: true,
       },
     });
@@ -275,11 +316,12 @@ export const resolveConversationReader = async (input: {
     // The run's REPORT is delivered to the schedule's origin. A schedule
     // created inside a shared channel thread reports into that channel, so
     // it is a shared audience: nobody. Only a report that stays private
-    // (no origin, or the creator's own direct thread) carries the creator.
+    // (no origin, or a private thread the creator owns) carries the
+    // creator; `createdByUserId` is non-null here, so owner equality alone
+    // says the origin is theirs.
     const privateDelivery =
       cron.originConversationId === null ||
-      (cron.originConversation?.direct === true &&
-        cron.originConversation.userId === cron.createdByUserId);
+      cron.originConversation?.userId === cron.createdByUserId;
     return privateDelivery ? cron.createdByUserId : null;
   }
   return null;
@@ -365,9 +407,10 @@ const fromOutcome = (outcome: ActAsYouOutcome): RunnerToolCallResponse =>
  * members, and the instructions steer every future event, so the audience
  * must be exactly one verified member:
  *
- * - Only a direct thread (web chat, or the same person's Slack DM) whose
- *   owner typed this turn: `resolveConversationReader`'s private-audience
- *   rule, with a known speaker required. A shared conversation (a channel
+ * - Only a private thread (web chat, the same person's Slack DM, or a
+ *   thread they opened inside that DM) whose owner typed this turn:
+ *   `resolveConversationReader`'s private-audience rule, with a known
+ *   speaker required. A shared conversation (a channel
  *   thread, a test run, a webhook/schedule run) fails: a guest's message
  *   there steers into a member's live run, so "a member asked" never holds
  *   for the whole run. A turn nobody typed (a platform-written report)
@@ -428,20 +471,26 @@ const auditAsCreator = async (
 };
 
 /** An own-reply edit or delete, audited under the person whose turn asked
- * (ids only, never the message text). */
+ * (ids only, never the message text): the asking conversation, and the
+ * one changed when it is elsewhere. */
 const auditOwnReply = (
   identity: ToolIdentity,
-  context: ToolContext,
+  caller: { askerUserId: string | null; originConversationId: string | null },
   action: (typeof AUDIT_ACTIONS)["UPDATE" | "DELETE"],
-  metadata: { presenceId: string; messageId: string },
+  metadata: {
+    presenceId: string;
+    messageId: string;
+    conversationRef: string | null;
+  },
 ): Promise<void> =>
-  auditAsCreator(
-    identity,
-    context.createdByUserId,
-    action,
-    AUDIT_SERVICES.CHANNEL,
-    { ...metadata, conversationId: context.originConversationId ?? "" },
-  );
+  auditAsCreator(identity, caller.askerUserId, action, AUDIT_SERVICES.CHANNEL, {
+    presenceId: metadata.presenceId,
+    messageId: metadata.messageId,
+    conversationId: caller.originConversationId ?? "",
+    ...(metadata.conversationRef && {
+      conversationRef: metadata.conversationRef,
+    }),
+  });
 
 const toolError = (message: string): RunnerToolCallResponse => ({
   ok: false,
@@ -473,8 +522,8 @@ const MAX_IMPORT_DESCRIPTION_CHARS = 200;
  * 32,000 UTF-8 bytes (jcode: 8,000 tokens at 4 bytes each). Listing nothing
  * fits by construction: at most MAX_SKILLS_PER_AGENT skills, each a short
  * name, a clipped description of plain text (cleanSkillDescription: no
- * control character, so nothing escapes past 2 characters) and a bounded
- * summary.
+ * control character, so nothing escapes past 2 characters), a bounded
+ * summary and a 64-character fingerprint.
  */
 const IMPORT_RESULT_MAX_CHARS = 15_000;
 const IMPORT_RESULT_MAX_BYTES = 30_000;
@@ -509,6 +558,7 @@ const skillImportResult = (
       groups: skill.groups,
       skipped: skill.skipped.slice(0, listed),
       skippedCount: skill.skipped.length,
+      fingerprint: skill.fingerprint,
       replaced: skill.replaced,
     })),
     problems: problems.slice(0, listed),
@@ -886,6 +936,7 @@ export const executeAttachmentUpload = async (
       caption: headers.caption ?? null,
       bytes,
       declaredSha256: headers.sha256,
+      ...(headers.purpose && { purpose: headers.purpose }),
     });
     if (!stored.ok) return { ok: false, error: stored.error };
 
@@ -911,6 +962,7 @@ export const executeAttachmentUpload = async (
           sizeBytes: String(stored.meta.sizeBytes),
           sha256: headers.sha256,
           direction: "outbound",
+          ...(headers.purpose === "send" && { staged: "true" }),
         },
       );
     } catch (auditError) {
@@ -1008,13 +1060,53 @@ export const executePlatformTool = async (
               name: cron.name,
               schedule: cron.schedule,
               timezone: cron.timezone,
+              ...(cron.gate && { gate: cron.gate }),
+              ...(cron.gateDescription && {
+                gateDescription: cron.gateDescription,
+              }),
               enabled: cron.enabled,
               ...(cron.disabledReason && {
                 disabledReason: cron.disabledReason,
               }),
               nextFireAt: cron.nextFireAt.toISOString(),
+              ...(cron.running && { running: true }),
               ...(cron.lastOutcome && { lastOutcome: cron.lastOutcome }),
             })),
+          },
+        };
+      }
+
+      case "update_task": {
+        const args = updateTaskArgsSchema.safeParse(request.args);
+        if (!args.success) {
+          return toolError(args.error.issues[0]?.message ?? "Invalid input");
+        }
+        const { cronId, ...update } = args.data;
+        const context = await resolveContext(identity, request);
+        const cron = await updateCronAsAgent(
+          identity.workspaceId,
+          identity.agentId,
+          cronId,
+          update,
+        );
+        await auditAsCreator(
+          identity,
+          context.createdByUserId,
+          AUDIT_ACTIONS.UPDATE,
+          AUDIT_SERVICES.CRON,
+          { cronId: cron.id, name: cron.name },
+        );
+        return {
+          ok: true,
+          result: {
+            cronId: cron.id,
+            name: cron.name,
+            schedule: cron.schedule,
+            ...(cron.gate && { gate: cron.gate }),
+            ...(cron.gateDescription && {
+              gateDescription: cron.gateDescription,
+            }),
+            nextFireAt: cron.nextFireAt.toISOString(),
           },
         };
       }
@@ -1485,6 +1577,10 @@ export const executePlatformTool = async (
             to: args.data.to,
             text: args.data.text,
             sendAs: args.data.sendAs,
+            ...(args.data.thread && { thread: args.data.thread }),
+            ...(args.data.attachmentIds && {
+              attachmentIds: args.data.attachmentIds,
+            }),
           }),
         );
       }
@@ -1570,16 +1666,31 @@ export const executePlatformTool = async (
       case "list_my_replies": {
         const args = listMyRepliesArgsSchema.safeParse(request.args ?? {});
         if (!args.success)
-          return toolError("list_my_replies takes no arguments");
+          return toolError(
+            "list_my_replies takes only an optional conversation",
+          );
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
+        const caller = await actAsYouCaller(identity, request);
         const replies = await listOwnReplies({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
+          ...(args.data.conversation && {
+            conversation: args.data.conversation,
+          }),
         });
-        return { ok: true, result: { replies } };
+        return {
+          ok: true,
+          result: {
+            replies,
+            ...(replies.length === 0 && {
+              note: "None in the last 24 hours. Don't retry with another name; tell the person in one short line.",
+            }),
+          },
+        };
       }
 
       case "edit_my_reply": {
@@ -1589,16 +1700,22 @@ export const executePlatformTool = async (
         }
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
-        const { presenceId } = await editOwnReply({
+        const caller = await actAsYouCaller(identity, request);
+        const change = await editOwnReply({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
           ...args.data,
         });
-        await auditOwnReply(identity, context, AUDIT_ACTIONS.UPDATE, {
-          presenceId,
+        // Sent as the person: the act-as-you seam audited (and maybe held)
+        // it; its answer goes back verbatim.
+        if (change.via === "you") return fromOutcome(change.outcome);
+        await auditOwnReply(identity, caller, AUDIT_ACTIONS.UPDATE, {
+          presenceId: change.presenceId,
           messageId: args.data.messageId,
+          conversationRef: change.conversationRef,
         });
         return {
           ok: true,
@@ -1613,16 +1730,22 @@ export const executePlatformTool = async (
         }
         const removedNotice = await removedPresenceNotice(identity.agentId);
         if (removedNotice) return toolError(removedNotice);
-        const context = await resolveContext(identity, request, "provenance");
-        const { presenceId } = await deleteOwnReply({
+        const caller = await actAsYouCaller(identity, request);
+        const change = await deleteOwnReply({
           agentId: identity.agentId,
-          conversationId: context.originConversationId,
-          turnId: context.turnId,
+          conversationId: caller.originConversationId,
+          turnId: caller.originTurnId,
+          readerUserId: caller.readerUserId,
+          askerUserId: caller.askerUserId,
           ...args.data,
         });
-        await auditOwnReply(identity, context, AUDIT_ACTIONS.DELETE, {
-          presenceId,
+        // Sent as the person: the act-as-you seam audited and held it; its
+        // answer goes back verbatim.
+        if (change.via === "you") return fromOutcome(change.outcome);
+        await auditOwnReply(identity, caller, AUDIT_ACTIONS.DELETE, {
+          presenceId: change.presenceId,
           messageId: args.data.messageId,
+          conversationRef: change.conversationRef,
         });
         return {
           ok: true,

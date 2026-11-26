@@ -5,6 +5,7 @@ import { ServiceError } from "../errors";
 import { canAccessWorkspaceAsUser } from "../workspace-access-check";
 import {
   ensureDirectConversation,
+  ensureDirectThreadConversation,
   ensureSourcedConversation,
 } from "../conversation-service";
 import {
@@ -885,11 +886,17 @@ export interface DirectMessageInput {
   files?: ChannelFileRef[];
   /**
    * The THREAD inside the DM this message was typed in, when there is one
-   * (Slack: `thread_ts`). The conversation is unchanged — a DM is one
-   * continuous thread (§3.18) — but the answer is owed where it was asked,
-   * and a DM link addresses only the DM itself.
+   * (Slack: `thread_ts`): where the answer is owed. Paired with
+   * `threadExternalId`, the thread's own address.
    */
   sourceThreadId?: string | null;
+  /**
+   * The provider's address for THAT thread (Slack: `directThreadId`), when
+   * the message was typed inside one: the key of the thread's own
+   * conversation and link, run beside the DM's top level. The generic
+   * layer never composes it: the packing is the provider's codec.
+   */
+  threadExternalId?: string | null;
   eventId: string;
 }
 
@@ -956,16 +963,36 @@ const directMessage = async (
     return { kind: "ignored", reason: "person-reach-denied" };
   }
 
-  const conversation = await ensureDirectConversation(
-    presence.agent.workspaceId,
-    presence.agent.id,
-    speaker.userId,
-    presence.provider as ChannelProviderId,
-  );
+  const threadRef =
+    input.sourceThreadId && input.threadExternalId
+      ? input.threadExternalId
+      : null;
+  const conversation = threadRef
+    ? // A reply typed INSIDE a thread of the DM: its own conversation, the
+      // person's own (see `ensureDirectThreadConversation`), so the thread
+      // runs beside the DM's top level instead of joining whatever that is
+      // doing. Under its own link of kind `direct`: the answer still posts
+      // to the IM, narrowed to the thread by the turn's `sourceThreadId`,
+      // and every DM-link reader keeps reading a direct link.
+      await ensureDirectThreadConversation(
+        presence.agent.workspaceId,
+        presence.agent.id,
+        speaker.userId,
+        {
+          source: presence.provider as ChannelProviderId,
+          externalRef: threadRef,
+        },
+      )
+    : await ensureDirectConversation(
+        presence.agent.workspaceId,
+        presence.agent.id,
+        speaker.userId,
+        presence.provider as ChannelProviderId,
+      );
   await upsertThreadLink({
     agentChannelId: presence.id,
     conversationId: conversation.id,
-    externalThreadId: input.externalThreadId,
+    externalThreadId: threadRef ?? input.externalThreadId,
     kind: "direct",
     externalUserId: input.externalUserId,
   });

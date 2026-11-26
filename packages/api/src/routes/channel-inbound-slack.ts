@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { db } from "@onecli/db";
 import {
+  approvalClickOf,
+  decidedText,
   escapeSlackText,
   followUpActionClickOf,
   groupClickOf,
@@ -660,10 +662,6 @@ export const channelInboundSlackRoutes = () => {
 
     const action = payload.actions?.[0];
     const clicker = payload.user?.id;
-    const actionable = (p: typeof payload, a: typeof action) =>
-      p.type === "block_actions" &&
-      !!a?.value &&
-      (a.action_id === "channel_approve" || a.action_id === "channel_deny");
     // The reach card's buttons (agent-reach-service): same shape, its own
     // door. The settlement is null unless this really is a block_actions
     // click on one of the card's action ids - the type guard is part of the
@@ -881,15 +879,14 @@ export const channelInboundSlackRoutes = () => {
       return c.json({ ok: true });
     }
 
-    if (!actionable(payload, action) || !action?.value || !clicker) {
-      return c.json({ ok: true });
-    }
+    // The single-request card (shared vocabulary with the adapter's socket
+    // arm: approve-similar.ts in @onecli/channels/slack).
+    const click = approvalClickOf(payload);
+    if (!click) return c.json({ ok: true });
 
     const decision = await decideApprovalFromChannel({
       presenceId,
-      approvalId: action.value,
-      decision: action.action_id === "channel_approve" ? "approve" : "deny",
-      clickerExternalUserId: clicker,
+      ...click,
     });
 
     // Update the card through response_url (block_actions ignores the HTTP
@@ -902,7 +899,11 @@ export const channelInboundSlackRoutes = () => {
       const responseUrl = payload.response_url;
       const text =
         decision.kind === "decided"
-          ? `${action.action_id === "channel_approve" ? "✅ Approved" : "⛔ Denied"} by ${escapeSlackText(decision.decidedByName)}`
+          ? decidedText(
+              click.decision,
+              decision.decidedByName,
+              decision.similar,
+            )
           : decision.kind === "already_settled"
             ? "This request was already decided."
             : escapeSlackText(decision.message);

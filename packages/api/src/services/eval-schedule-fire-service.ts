@@ -7,7 +7,11 @@ import {
   type DueEvalSchedule,
 } from "./due-work";
 import { nextFireOrNull } from "./agent-cron-service";
-import { NoEvalQuestionsError, startRun } from "./agent-eval-service";
+import {
+  NoEvalQuestionsError,
+  startRun,
+  type EvalRunSummary,
+} from "./agent-eval-service";
 import { ServiceError } from "./errors";
 import { logger } from "../lib/logger";
 import type { EvalScheduleOutcome } from "../validations/evals";
@@ -46,7 +50,7 @@ const setOutcome = (scheduleId: string, lastOutcome: EvalScheduleOutcome) =>
  * schedule), then workspace access (the RBAC answer where RBAC is on). */
 const creatorMayRun = async (
   creator: string,
-  due: DueEvalSchedule,
+  due: Pick<DueEvalSchedule, "workspaceId" | "organizationId">,
 ): Promise<boolean> => {
   const member = await db.organizationMember.count({
     where: {
@@ -116,6 +120,55 @@ export const fireClaimedEvalSchedule = async (
     await setOutcome(due.id, "failed");
     throw err;
   }
+};
+
+/**
+ * Run now: start a `scheduled` run immediately, on the schedule creator's
+ * authority (re-checked, like a timed fire), so its results go where the
+ * schedule sends them. The timed occurrence is untouched. Admission's own
+ * rules answer: no questions (422) or a run already going (409) reach the
+ * person who pressed it, instead of a silent skip on the next poll.
+ */
+export const runEvalScheduleNow = async (
+  workspaceId: string,
+  agentId: string,
+): Promise<EvalRunSummary> => {
+  const schedule = await db.agentEvalSchedule.findFirst({
+    where: { agentId, agent: { workspaceId } },
+    select: {
+      id: true,
+      enabled: true,
+      createdByUserId: true,
+      agent: { select: { workspace: { select: { organizationId: true } } } },
+    },
+  });
+  if (!schedule) throw new ServiceError("NOT_FOUND", "No eval schedule");
+  if (!schedule.enabled)
+    throw new ServiceError("UNPROCESSABLE", "The eval schedule is paused");
+  const organizationId = schedule.agent.workspace.organizationId;
+  const creator = schedule.createdByUserId;
+  if (
+    !creator ||
+    !(await creatorMayRun(creator, { workspaceId, organizationId }))
+  )
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "The person who set up this schedule can no longer run it. Save the schedule again to run it as you.",
+    );
+  const run = await startRun(
+    workspaceId,
+    organizationId,
+    creator,
+    agentId,
+    "scheduled",
+  );
+  // "Last scheduled run started <when>" must name this run, not the last
+  // timed one.
+  await db.agentEvalSchedule.updateMany({
+    where: { id: schedule.id },
+    data: { lastOutcome: "started", lastFiredAt: run.createdAt },
+  });
+  return run;
 };
 
 /** Fire every due eval schedule. Best-effort per schedule: one broken row

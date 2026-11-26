@@ -8,7 +8,11 @@ import {
 import {
   BLOCKED_BY_POLICY_MESSAGE,
   GATEWAY_UNAVAILABLE_MESSAGE,
+  HOME_READ_ONLY_HELD_MESSAGE,
+  HOME_READ_ONLY_MESSAGE,
+  MODEL_EMPTY_RESPONSE_MESSAGE,
   MODEL_KEY_UNREADABLE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
 } from "@onecli/api/validations/conversation";
 import { ControlPlaneError, type ControlPlaneClient } from "./control-plane";
 import {
@@ -1840,6 +1844,10 @@ describe("what gets posted", () => {
   it.each([
     ["blocked_by_policy", BLOCKED_BY_POLICY_MESSAGE],
     ["gateway_unavailable", GATEWAY_UNAVAILABLE_MESSAGE],
+    // A read-only home: the Slack reply is the canonical sentence, never
+    // the kernel's "Read-only file system (os error 30)".
+    ["home_read_only", HOME_READ_ONLY_MESSAGE],
+    ["home_read_only_held", HOME_READ_ONLY_HELD_MESSAGE],
   ])(
     "posts the canonical sentence for %s as plain text, no card",
     async (errorCode, error) => {
@@ -2178,6 +2186,59 @@ describe("failure surfacing — never silent on a terminal outcome", () => {
     expect(posted[0]?.form.text).toContain(
       "Something went wrong and this message didn",
     );
+  });
+
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) posts its canonical sentence: never silence",
+    async (errorCode, sentence) => {
+      // The shape the control plane closes a model's refusal or empty answer
+      // with: failed, coded, canonical copy on the row, and a transcript that
+      // holds only the run's start and clean end (no text, no error event).
+      // Before, the same turn closed `done` with nothing and posted nothing.
+      const controlPlane = createFakeControlPlane(
+        transcriptOf([
+          { type: "turn.started", payload: {} },
+          { type: "turn.done", payload: {} },
+        ]),
+      );
+
+      await mirror({
+        controlPlane,
+        workItem: item({
+          source: "slack",
+          status: "failed",
+          error: sentence,
+          errorCode,
+        }),
+      });
+
+      const posted = slack.callsTo("chat.postMessage");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.form.text).toContain(sentence);
+      expect(posted[0]?.form.text).not.toMatch(/stop_reason|guardrail/);
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) posts nothing: why it must close failed", async () => {
+    // The before-state, kept as a pin: a successful turn with no words is the
+    // mirror's legitimate quiet (a deliberate no-reply), so the only way a
+    // refusal reaches the thread is the failed close the supervisor now sends.
+    const controlPlane = createFakeControlPlane(
+      transcriptOf([
+        { type: "turn.started", payload: {} },
+        { type: "turn.done", payload: {} },
+      ]),
+    );
+
+    await mirror({
+      controlPlane,
+      workItem: item({ source: "slack", status: "done" }),
+    });
+
+    expect(slack.callsTo("chat.postMessage")).toHaveLength(0);
   });
 
   it("a FAILED turn with only a transcript error event posts that message", async () => {

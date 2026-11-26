@@ -11,6 +11,7 @@ import {
 } from "vitest";
 
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+import { grantModelKey } from "../../testing/model-key-grant.js";
 
 /**
  * The reach-grant lane (space grants: "may the agent answer everyone in this
@@ -120,39 +121,6 @@ const scriptGuestLane = () => {
 
 // ── Seeds (the channels.pg.test.ts shapes, prefix-fenced to THIS suite) ─────
 
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
-
 const seedAgent = async (suffix: string) => {
   const agent = await db.agent.create({
     data: {
@@ -165,7 +133,11 @@ const seedAgent = async (suffix: string) => {
     },
     select: { id: true },
   });
-  await grantLlmKey(agent.id, suffix);
+  await grantModelKey(db, {
+    workspaceId: WORKSPACE,
+    agentId: agent.id,
+    name: `${P}${suffix}`,
+  });
   return agent.id;
 };
 

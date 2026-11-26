@@ -25,12 +25,7 @@ vi.hoisted(() => {
 });
 
 vi.mock("@onecli/db", () => ({
-  // The live /v1/agents handler behind the not-410 probe reads the held-awake
-  // signal via a raw grouped query; `sql` must be constructible and the raw
-  // read answerable for the probe to stay sub-500.
-  Prisma: { sql: () => ({}) },
   db: {
-    $queryRaw: async () => [],
     apiKey: {
       findUnique: async ({ where }: { where: { key?: string } }) =>
         where.key === ORG_KEY

@@ -57,7 +57,12 @@ export const ApprovalDetailsContent = ({
       )}
       <ApprovalRawRequest approval={approval} />
       <DialogFooter>
-        <ApprovalActions approvalId={approval.id} onResolved={onResolved} />
+        <ApprovalActions
+          approvalId={approval.id}
+          similar={approval.similar}
+          agentName={approval.agent.name}
+          onResolved={onResolved}
+        />
       </DialogFooter>
     </>
   );

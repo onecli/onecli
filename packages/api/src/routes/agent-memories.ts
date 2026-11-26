@@ -27,6 +27,7 @@ import {
   recordAuditEvent,
 } from "../services/audit-service";
 import type { AuthContext } from "../providers/types";
+import { parseBody } from "../lib/request-body";
 
 /**
  * The agent's memory surface: /v1/agents/:agentId/memories[...] — composed
@@ -37,12 +38,6 @@ import type { AuthContext } from "../providers/types";
  * `recordAuditEvent`, never `withAudit`: the gateway reads no memory table,
  * so a cache flush would be pure noise (the cron-surface rule).
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 /** The dashboard door's provenance: a human editing directly. */
 const userAuthor = (a: AuthContext): MemoryAuthor => ({

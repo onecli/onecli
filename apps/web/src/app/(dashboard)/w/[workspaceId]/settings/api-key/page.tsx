@@ -1,19 +1,11 @@
-import type { Metadata } from "next";
-import { PageHeader } from "@dashboard/page-header";
-import { WorkspaceApiKeyCard } from "./_components/workspace-api-key-card";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export const metadata: Metadata = {
-  title: "API Key",
-};
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+}
 
-export default function WorkspaceApiKeyPage() {
-  return (
-    <div className="flex flex-1 flex-col gap-6">
-      <PageHeader
-        title="API Key"
-        description="Your personal API key for this workspace. The CLI and SDK sign in with it."
-      />
-      <WorkspaceApiKeyCard />
-    </div>
-  );
+/** An old URL: Settings > Account > API keys. */
+export default async function WorkspaceApiKeyPage({ params }: Props) {
+  const { workspaceId } = await params;
+  await redirectToSettingsModal({ workspaceId }, "api-keys");
 }

@@ -124,7 +124,7 @@ interface FakeSessionDeps {
   persist?: () => void;
 }
 
-class FakeSession implements HarnessSession {
+export class FakeSession implements HarnessSession {
   readonly sessionRef: string;
   private aborted = false;
   /** The in-flight gate, mirrored from the real adapter's contract. */
@@ -173,6 +173,8 @@ class FakeSession implements HarnessSession {
     yield* runDirective(parsed.directive, {
       sessionRef: this.sessionRef,
       turnsRun: () => this.state.turnsRun,
+      prompt: input.message,
+      contextTokens: input.contextTokens,
       toolsSocketPath: this.deps.toolsSocketPath,
       armLaunchFailure: this.deps.armLaunchFailure,
       markRunningTool: (name, move) => {
@@ -281,6 +283,14 @@ class FakeSession implements HarnessSession {
     this.aborted = true;
     return Promise.resolve();
   }
+
+  /** Every `setEnv` this session received, in order (test seam). */
+  readonly envUpdates: Record<string, string>[] = [];
+
+  setEnv(env: Record<string, string>): Promise<void> {
+    this.envUpdates.push(env);
+    return Promise.resolve();
+  }
 }
 
 /**
@@ -300,12 +310,19 @@ export interface FakeHarness extends Harness {
    */
   failNextStartSession(reason?: string): void;
   /**
-   * Every `startSession` call so far, in order, with the resume ref it was
-   * handed — the observable for "the supervisor restarted a session" (a
-   * restart on the same ref is otherwise invisible from outside: same ref,
-   * same transcript). Test seam only.
+   * Every `startSession` call so far, in order, with the resume ref and the
+   * session environment it was handed: the observable for "the supervisor
+   * restarted a session" (a restart on the same ref is otherwise invisible
+   * from outside: same ref, same transcript) and for "the session was
+   * started with/without the display". Test seam only.
    */
-  readonly sessionStarts: readonly { resumeSessionRef?: string }[];
+  readonly sessionStarts: readonly {
+    resumeSessionRef?: string;
+    env?: Record<string, string>;
+  }[];
+  /** The sessions handed out so far, in order (test seam): their `envUpdates`
+   * say what a late desktop handed each one. */
+  readonly sessions: readonly FakeSession[];
 }
 
 const DEFAULT_LAUNCH_FAILURE = "harness launch failed: spawn ENOENT";
@@ -331,7 +348,11 @@ export const createFakeHarness = (options?: {
   let counter = 0;
   let onFailure: ((reason: string) => void) | undefined;
   let launchFailure: string | undefined;
-  const sessionStarts: { resumeSessionRef?: string }[] = [];
+  const sessionStarts: {
+    resumeSessionRef?: string;
+    env?: Record<string, string>;
+  }[] = [];
+  const sessions: FakeSession[] = [];
   const liveness: Liveness = {};
 
   return {
@@ -361,11 +382,13 @@ export const createFakeHarness = (options?: {
       launchFailure = reason;
     },
     sessionStarts,
+    sessions,
     startSession(sessionOptions: StartSessionOptions) {
       sessionStarts.push({
         ...(sessionOptions.resumeSessionRef !== undefined && {
           resumeSessionRef: sessionOptions.resumeSessionRef,
         }),
+        ...(sessionOptions.env !== undefined && { env: sessionOptions.env }),
       });
       if (launchFailure) {
         const reason = launchFailure;
@@ -411,7 +434,10 @@ export const createFakeHarness = (options?: {
             persist: () => saveDurableSessions(store, homeDir),
           }),
         }),
-      );
+      ).then((session) => {
+        sessions.push(session);
+        return session;
+      });
     },
     dispose() {
       return Promise.resolve();

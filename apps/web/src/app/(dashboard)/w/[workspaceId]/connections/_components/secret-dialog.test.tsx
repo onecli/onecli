@@ -323,6 +323,59 @@ describe("SecretDialog provider guidance", () => {
     );
     expect(mocks.copy).toHaveBeenCalledWith("codex login --device-auth");
   });
+
+  it("names the OpenAI method picker by its visible heading", async () => {
+    await renderDialog({ defaultType: "openai" });
+    const group = screen.getByRole("radiogroup", { name: "How to connect" });
+    expect(group).toContainElement(
+      screen.getByRole("radio", { name: "Codex (OAuth)" }),
+    );
+  });
+
+  it("points the Setup guide at the method on screen, and teaches Codex in two numbered steps", async () => {
+    await renderDialog({ defaultType: "openai" });
+    expect(screen.getByRole("link", { name: "Setup guide" })).toHaveAttribute(
+      "href",
+      "https://onecli.sh/docs/integrations/openai#setup-api-key",
+    );
+
+    await userEvent.click(screen.getByRole("radio", { name: "Codex (OAuth)" }));
+    expect(screen.getByRole("link", { name: "Setup guide" })).toHaveAttribute(
+      "href",
+      "https://onecli.sh/docs/integrations/openai#setup-codex-oauth",
+    );
+    const steps = screen.getAllByRole("listitem");
+    expect(steps).toHaveLength(2);
+    expect(steps[0]).toHaveTextContent(
+      "In your terminal, run codex login --device-auth",
+    );
+    expect(steps[1]).toHaveTextContent(
+      "Upload the auth.json file it creates (below)",
+    );
+  });
+
+  it("keeps the Codex Setup guide when editing a ChatGPT login, and offers none for an API-key edit", async () => {
+    const openaiSecret = (authMode: "oauth" | "api-key") => ({
+      id: "s-openai",
+      name: "OpenAI",
+      type: "openai",
+      hostPattern: authMode === "oauth" ? "chatgpt.com" : "api.openai.com",
+      pathPattern: null,
+      injectionConfig: null,
+      metadata: { authMode },
+    });
+
+    const login = await renderDialog({ secret: openaiSecret("oauth") });
+    expect(screen.getByRole("link", { name: "Setup guide" })).toHaveAttribute(
+      "href",
+      "https://onecli.sh/docs/integrations/openai#setup-codex-oauth",
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    login.unmount();
+
+    await renderDialog({ secret: openaiSecret("api-key") });
+    expect(screen.queryByRole("link", { name: "Setup guide" })).toBeNull();
+  });
 });
 
 // The dialog takes the scope's whole action set; each test spies on one.

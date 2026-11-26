@@ -1,3 +1,7 @@
+import {
+  MAX_CRON_GATE_CHARS,
+  MAX_CRON_GATE_DESCRIPTION_CHARS,
+} from "@onecli/agent-protocol";
 import type { CapabilityFragment } from "../home/renderer";
 import type { PlatformToolDefinition } from "../platform-tools";
 
@@ -15,8 +19,9 @@ import type { PlatformToolDefinition } from "../platform-tools";
 export const cronsFragment: CapabilityFragment = {
   id: "crons",
   title: "Scheduled tasks",
-  body: `You can run work on a schedule with the schedule_task, list_tasks, and
-cancel_task tools.
+  body: `You can run work on a schedule with the schedule_task, update_task,
+list_tasks, and cancel_task tools. To change a schedule, use update_task: it
+keeps the schedule's history (cancel and recreate only to start over).
 
 - A schedule needs an explicit IANA timezone (like "America/Los_Angeles") — clock
   times mean nothing without one. If the person did not say a timezone, ask,
@@ -33,6 +38,21 @@ cancel_task tools.
   keeps its own memory between runs. Its report is delivered to the chat the
   schedule was created from.
 - Name schedules descriptively; the name appears on every delivered report.
+- Run conditions: when a person asks for a schedule that should only run when
+  something happens ("only when there's a new deck", "only at minute 7"),
+  YOU write the check. Put a small script in your workspace folder, run it
+  once yourself to confirm it behaves, then pass its command as \`gate\` and
+  the condition in plain words as \`gateDescription\` ("a new board deck
+  appears in Dropbox": this is what the person sees). The check runs before
+  each run with no model and no cost: no output (or {"wakeAgent": false} as
+  its last line) and exit 0 means you are not run at all; any other output
+  means you run with it;
+  a nonzero exit fails the run, so end with \`exit 0\` when nothing changed.
+  Write the prompt as what to do once the check fired; never repeat the
+  condition in it. When the person wants the condition changed, update the
+  script and gateDescription with update_task. Without a gate you run every
+  time, and a run with nothing worth reporting answers exactly \`[no reply]\`
+  so nothing is delivered.
 - If these tools are missing right after your very first startup, they load a
   moment later — mention it and continue; from the next message on they are
   available immediately.`,
@@ -69,8 +89,47 @@ export const cronsTools: PlatformToolDefinition[] = [
             'IANA timezone the schedule is read in, e.g. "America/Los_Angeles".',
           maxLength: 100,
         },
+        gate: {
+          type: "string",
+          description:
+            'Optional run condition: a shell command run before each run, in the workspace folder, with no model (free). Exit 0 with no output, or with {"wakeAgent": false} as its last line: the agent does not run. Any other output: the agent runs with that output. Nonzero exit: the run fails, so end with `exit 0` when nothing changed. Omit it to run the agent on every schedule.',
+          maxLength: MAX_CRON_GATE_CHARS,
+        },
+        gateDescription: {
+          type: "string",
+          description:
+            'The run condition in plain words, shown to the person instead of the command, e.g. "a new board deck appears in Dropbox". Required with a gate.',
+          maxLength: MAX_CRON_GATE_DESCRIPTION_CHARS,
+        },
       },
       required: ["name", "prompt", "schedule", "timezone"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_task",
+    description:
+      "Change an existing scheduled task in place (keeps its history): any of name, prompt, schedule, timezone, gate, gateDescription. A gate always needs its gateDescription; pass gate: null to remove the run condition (its description goes with it). Use list_tasks to find the id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cronId: { type: "string", description: "The schedule's id." },
+        name: { type: "string", maxLength: 100 },
+        prompt: { type: "string", maxLength: 10_000 },
+        schedule: { type: "string", maxLength: 100 },
+        timezone: { type: "string", maxLength: 100 },
+        gate: {
+          type: ["string", "null"],
+          description: "New run-condition command, or null to remove it.",
+          maxLength: MAX_CRON_GATE_CHARS,
+        },
+        gateDescription: {
+          type: ["string", "null"],
+          description: "The run condition in plain words.",
+          maxLength: MAX_CRON_GATE_DESCRIPTION_CHARS,
+        },
+      },
+      required: ["cronId"],
       additionalProperties: false,
     },
   },

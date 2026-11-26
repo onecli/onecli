@@ -39,6 +39,18 @@ export type FakeStep =
   | { op: "text"; text: string }
   | { op: "sleep"; ms: number }
   | { op: "state" }
+  /**
+   * Echo the delivered prompt's first line: the caller's message comes
+   * after any delivery-only context the supervisor prepends, so this is how
+   * a black-box caller witnesses what framed the turn for the agent.
+   */
+  | { op: "prompt" }
+  /**
+   * Echo the context size the platform delivered with the turn
+   * (`[contextTokens N]`, or `[contextTokens none]`): how a black-box
+   * caller witnesses the size reaching the harness.
+   */
+  | { op: "contextTokens" }
   | {
       op: "http";
       url: string;
@@ -81,6 +93,10 @@ const parseStep = (
     }
     case "state":
       return { op: "state" };
+    case "prompt":
+      return { op: "prompt" };
+    case "contextTokens":
+      return { op: "contextTokens" };
     case "http": {
       if (typeof raw.url !== "string")
         return { error: `step ${index}: "http" needs a string url` };
@@ -168,6 +184,10 @@ export const parseFakeDirective = (message: string): ParsedDirective => {
 export interface DirectiveContext {
   sessionRef: string;
   turnsRun: () => number;
+  /** The whole prompt the harness was handed for this turn. */
+  prompt: string;
+  /** The context size delivered with this turn, if the platform chose one. */
+  contextTokens: number | undefined;
   /** The platform-tools socket THIS process serves (test seam overridable). */
   toolsSocketPath: () => string;
   /** Arms the harness's one-shot launch failure (the dead-harness leg). */
@@ -296,6 +316,18 @@ export async function* runDirective(
         yield {
           type: "text.delta",
           text: `[state sessionRef=${ctx.sessionRef} turnsRun=${ctx.turnsRun()}]`,
+        };
+        break;
+      case "prompt":
+        yield {
+          type: "text.delta",
+          text: `[prompt ${excerpt(ctx.prompt.split("\n", 1)[0] ?? "")}]`,
+        };
+        break;
+      case "contextTokens":
+        yield {
+          type: "text.delta",
+          text: `[contextTokens ${ctx.contextTokens ?? "none"}]`,
         };
         break;
       case "http": {

@@ -7,14 +7,19 @@ import { Button } from "@onecli/ui/components/button";
 import { useImportSkillZip } from "@/hooks/use-skills";
 import type { SkillImportResult } from "@/lib/api";
 import { writeErrorToast } from "@/lib/api/write-error-toast";
+import { SkillFingerprint } from "./skill-fingerprint";
 
 export interface ImportSkillZipButtonProps {
   /** The agent to import into; omitted = the organization tier. */
   agentId?: string;
 }
 
-/** A finished import, said plainly: what was added, and what was left out
- * and why (the first reason, with a count of the rest). */
+/** Long enough to reach a skill's check command; hovering pauses it. */
+const IMPORTED_TOAST_MS = 10_000;
+
+/** A finished import, said plainly: what was added, what was left out and
+ * why (the first reason, with a count of the rest), and each skill's
+ * fingerprint with its check command. */
 const importSummary = ({ imported, problems }: SkillImportResult) => {
   const leftOut = [
     ...problems.map((p) => `${p.folder || "The zip"}: ${p.reason}`),
@@ -25,12 +30,24 @@ const importSummary = ({ imported, problems }: SkillImportResult) => {
   const first = leftOut[0];
   return {
     title: `Added ${imported.map((s) => s.name).join(", ")}`,
-    description:
-      first === undefined
-        ? undefined
-        : leftOut.length === 1
-          ? `Left out ${first}`
-          : `Left out ${leftOut.length} items, like ${first}`,
+    description: (
+      <>
+        {first !== undefined && (
+          <p>
+            {leftOut.length === 1
+              ? `Left out ${first}`
+              : `Left out ${leftOut.length} items, like ${first}`}
+          </p>
+        )}
+        {imported.map((s) => (
+          <SkillFingerprint
+            key={s.name}
+            fingerprint={s.fingerprint}
+            name={imported.length > 1 ? s.name : undefined}
+          />
+        ))}
+      </>
+    ),
   };
 };
 
@@ -52,7 +69,7 @@ export const ImportSkillZipButton = ({
       {
         onSuccess: (result) => {
           const { title, description } = importSummary(result);
-          toast.success(title, { description });
+          toast.success(title, { description, duration: IMPORTED_TOAST_MS });
         },
         // The server's reason, read long enough to act on.
         onError: (error) =>

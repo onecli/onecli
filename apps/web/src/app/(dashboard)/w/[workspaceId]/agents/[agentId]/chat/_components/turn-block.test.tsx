@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Turn } from "@/lib/api/types";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
 import type { RenderedTurn } from "@/lib/chat/transcript";
+import {
+  MODEL_EMPTY_RESPONSE_MESSAGE,
+  MODEL_REFUSED_MESSAGE,
+} from "@onecli/api/validations/conversation";
 import { TurnBlock } from "./turn-block";
+import { CAPTION_HOLD_MS } from "./activity-line";
 
 // Only the connect-card wiring test below renders the card's subtree; the
 // mocks keep its router/dialog dependencies out of this suite.
@@ -80,11 +85,21 @@ const rendered = (overrides: Partial<RenderedTurn> = {}): RenderedTurn => ({
   peerMessages: [],
   peerMessagesOpeningTask: new Set<number>(),
   tools: [],
+  steps: [],
+  reasoning: "",
   ended: true,
   ...overrides,
 });
 
 describe("TurnBlock", () => {
+  // The reveal's pacing has its own suite (use-smooth-text, smooth-reveal).
+  // Here words are shown whole on arrival (reduced motion), so assertions
+  // read the text the moment it is rendered.
+  beforeEach(() => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
   it("renders the agent's open desktop ask with an Open computer button, and a settled one as a plain line", async () => {
     const onOpenComputer = vi.fn();
     const { rerender } = render(
@@ -163,15 +178,16 @@ describe("TurnBlock", () => {
   });
 
   it("reads a Hebrew exchange right-to-left: the question, the narration and the answer", () => {
-    // The person's bubble, the live narration and the settled answer are
-    // three different renderers; each must decide its own direction from
-    // its own text, or one of them ends up with its bullets on the left.
+    // The person's bubble, the agent's opening sentence and the settled
+    // answer each decide their own direction from their own text, or one
+    // of them ends up with its bullets on the left.
     const { rerender } = render(
       <TurnBlock
         turn={turn({ status: "running", message: "תבדוק את ה-deploy בבקשה" })}
         rendered={rendered({
           ended: false,
           lead: "בודק את הלוגים של Cloudflare.",
+          tools: [{ callId: "c1", name: "bash" }],
         })}
       />,
     );
@@ -605,28 +621,28 @@ describe("TurnBlock", () => {
     });
   });
 
-  it("streams a follow-up's reply as it is written, then settles it to markdown", () => {
+  it("streams a follow-up's reply as it is written, then settles it IN PLACE", () => {
     // The reply's deltas ride the follow-up's own id while the agent
-    // writes; the durable `text` replaces them. Live: transient narration
-    // (plain text, never markdown: untrusted mid-turn output). Settled: the
-    // agent's markdown answer.
+    // writes; the durable `text` replaces them. Both are the same element,
+    // formatted as markdown from the first word (open syntax completed),
+    // with the "still writing" mark only while it is a draft.
     const followUps = [
       turn({ id: "f1", status: "joined", message: "use the Q3 numbers" }),
     ];
-    const { rerender } = render(
+    const { container, rerender } = render(
       <TurnBlock
         turn={turn({ status: "running" })}
         rendered={rendered({ ended: false })}
         followUps={followUps}
         followUpRendered={() =>
-          rendered({ turnId: "f1", liveText: "Using the **Q3**", ended: false })
+          rendered({ turnId: "f1", liveText: "Using the **Q3", ended: false })
         }
       />,
     );
-    // Streaming: the raw words, asterisks and all, inside a paragraph.
-    const live = screen.getByText("Using the **Q3**");
-    expect(live.tagName).toBe("P");
-    expect(screen.queryByText("Q3")).toBeNull();
+    const draft = screen.getByText("Q3");
+    expect(draft.tagName).toBe("STRONG");
+    expect(container.querySelector("[data-draft]")).not.toBeNull();
+    const element = draft.closest("[data-slot='bubble']");
 
     rerender(
       <TurnBlock
@@ -638,8 +654,38 @@ describe("TurnBlock", () => {
         }
       />,
     );
-    expect(screen.getByText("Q3").tagName).toBe("STRONG");
-    expect(screen.queryByText("Using the **Q3**")).toBeNull();
+    const settled = screen.getByText("Q3");
+    expect(settled.tagName).toBe("STRONG");
+    expect(screen.getByText(/numbers\./)).toBeInTheDocument();
+    // Same element: the draft became the answer, nothing was swapped in.
+    expect(settled.closest("[data-slot='bubble']")).toBe(element);
+    expect(container.querySelector("[data-draft]")).toBeNull();
+  });
+
+  it("never shows a follow-up's draft AND the turn's answer at once (poll lag)", () => {
+    // The turn's answer arrives on the stream a beat before the turns poll
+    // flips the status; for that beat the draft under the follow-up and
+    // the answer must not both be on screen.
+    const followUps = [
+      turn({ id: "f1", status: "joined", message: "add a fun fact" }),
+    ];
+    const live = rendered({
+      turnId: "f1",
+      liveText: "Fun fact: dolphins sleep with half their brain.",
+      ended: false,
+    });
+    render(
+      <TurnBlock
+        // Still "running" by the poll, but the answer is in.
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          text: "Done.\n\nFun fact: dolphins sleep with half their brain.",
+        })}
+        followUps={followUps}
+        followUpRendered={() => live}
+      />,
+    );
+    expect(screen.getAllByText(/dolphins sleep/)).toHaveLength(1);
   });
 
   it("drops a follow-up's live tail when the turn ends with those words as ITS answer", () => {
@@ -738,19 +784,194 @@ describe("TurnBlock", () => {
         })}
       />,
     );
-    await user.click(screen.getByRole("button", { name: /Ran a command/ }));
-    await user.click(screen.getByRole("button", { name: /echo/ }));
+    // The timeline is the same element across the settle, so the reader's
+    // open step stays open: the output appears where they were looking.
     expect(screen.getByText("Request")).toBeInTheDocument();
     expect(screen.getByText("Output")).toBeInTheDocument();
     expect(screen.getByText("Failed")).toBeInTheDocument();
     expect(screen.getByText("bash: denied")).toHaveClass("text-red-700");
   });
 
-  it("renders the running turn as a work log, in order, as plain text", () => {
+  it("says how long the work took once the turn settles, or that it stopped", () => {
+    const tools = [{ callId: "c1", name: "bash", output: "ok" }];
+    const times = {
+      startedAt: "2026-08-05T00:00:00Z",
+      finishedAt: "2026-08-05T00:00:42Z",
+    };
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn(times)}
+        rendered={rendered({ text: "Done.", tools })}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Worked for 42s/ }),
+    ).toBeInTheDocument();
+    rerender(
+      <TurnBlock
+        turn={turn({ ...times, status: "aborted" })}
+        rendered={rendered({ tools })}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Stopped after 42s/ }),
+    ).toBeInTheDocument();
+    // History with no finish time still says what was done.
+    rerender(
+      <TurnBlock turn={turn()} rendered={rendered({ text: "Done.", tools })} />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Ran a command/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a lead it showed when a stream reconnect drops the live text", () => {
+    // Deltas are not stored, so a reconnect's replay has no lead: without
+    // the hold, the settled answer would jump up under the reader.
+    const tools = [{ callId: "c1", name: "bash", output: "ok" }];
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          lead: "I'll check the date first.",
+          text: "It is Sunday.",
+          tools,
+        })}
+      />,
+    );
+    expect(screen.getByText("I'll check the date first.")).toBeInTheDocument();
+    rerender(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({ text: "It is Sunday.", tools })}
+      />,
+    );
+    expect(screen.getByText("I'll check the date first.")).toBeInTheDocument();
+  });
+
+  it("folds a draft the reader saw when a tool call closes it", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    const tools = [{ callId: "c1", name: "bash", output: "ok" }];
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools,
+          steps: [{ kind: "tool", index: 0 }],
+          liveText: "Now the config.",
+        })}
+      />,
+    );
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools: [...tools, { callId: "c2", name: "bash" }],
+          steps: [
+            { kind: "tool", index: 0 },
+            { kind: "note", text: "Now the config." },
+            { kind: "tool", index: 1 },
+          ],
+        })}
+      />,
+    );
+    expect(
+      container.querySelector("[data-slot='folding-note']"),
+    ).not.toBeNull();
+  });
+
+  it("never flashes narration in just to fold it (it arrived with the tool)", () => {
+    // The note and the tool that closed it can arrive in ONE network read,
+    // so the draft was never on screen; playing its collapse would show
+    // the words for 300 ms out of nowhere. Motion on, or nothing folds.
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
+          steps: [{ kind: "tool", index: 0 }],
+        })}
+      />,
+    );
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: false,
+          tools: [
+            { callId: "c1", name: "bash", output: "ok" },
+            { callId: "c2", name: "bash" },
+          ],
+          steps: [
+            { kind: "tool", index: 0 },
+            { kind: "note", text: "Now the config." },
+            { kind: "tool", index: 1 },
+          ],
+        })}
+      />,
+    );
+    expect(container.querySelector("[data-slot='folding-note']")).toBeNull();
+  });
+
+  it("flows in the answer of a turn the reader watched, even when it lands whole", () => {
+    // After tool calls the answer usually arrives as ONE text event.
+    // Watched, it must read as arriving, not pop in as a block. Motion on.
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    vi.useFakeTimers({
+      toFake: ["requestAnimationFrame", "cancelAnimationFrame", "performance"],
+    });
+    const answer = "The deploy is green and every check passed. ".repeat(12);
+    const tools = [{ callId: "c1", name: "bash", output: "ok" }];
+    const { container, rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false, tools })}
+      />,
+    );
+    rerender(
+      <TurnBlock turn={turn()} rendered={rendered({ text: answer, tools })} />,
+    );
+    const answerText = () =>
+      container.querySelector("[data-role='answer']")?.textContent ?? "";
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(answerText().length).toBeLessThan(answer.trim().length / 2);
+    for (let i = 0; i < 130; i++) {
+      act(() => {
+        vi.advanceTimersToNextFrame();
+      });
+    }
+    expect(answerText()).toBe(answer.trim());
+    vi.useRealTimers();
+  });
+
+  it("shows history's answer whole at once, never replayed", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    const answer = "Loaded from history, already complete. ".repeat(12);
+    const { container } = render(
+      <TurnBlock
+        turn={turn()}
+        rendered={rendered({
+          text: answer,
+          tools: [{ callId: "c1", name: "bash", output: "ok" }],
+        })}
+      />,
+    );
+    expect(container.querySelector("[data-role='answer']")?.textContent).toBe(
+      answer.trim(),
+    );
+  });
+
+  it("renders the running turn as a work log, in order: the plan, the work, the reply being written", () => {
     // The live view: the agent's opening sentence, the run header for its
-    // tool calls, then the still-streaming tail. Narration is UNTRUSTED
-    // mid-turn model text and must render as TEXT: markdown syntax stays
-    // literal (the answer bubble is the only markdown surface).
+    // tool calls, then the reply still being written. All of it formatted
+    // through the hardened markdown renderer (no raw HTML; see
+    // chat-markdown.test), the opening sentence in a quieter color.
     const { container } = render(
       <TurnBlock
         turn={turn({ status: "running" })}
@@ -758,26 +979,24 @@ describe("TurnBlock", () => {
           ended: false,
           lead: "Let me **check** the logs.",
           tools: [{ callId: "c1", name: "bash", output: "ok" }],
-          liveText: "Now the config.",
+          liveText: "Now the <b>config</b>.",
         })}
       />,
     );
-    // Markdown stays literal — the ** marks render as characters.
-    const narration = screen.getByText("Let me **check** the logs.");
-    expect(narration).toBeInTheDocument();
-    expect(container.querySelector("strong")).toBeNull();
-    expect(screen.getByText(/Now the config\./)).toBeInTheDocument();
-    // Order: the lead precedes the run header, which precedes the tail.
-    // The header stays live ("Running…") until the answer arrives.
+    const lead = screen.getByText("check").closest("[data-slot='bubble']")!;
+    expect(lead).toHaveAttribute("data-role", "lead");
+    // Raw HTML stays inert in a draft, exactly as in an answer.
+    expect(container.querySelector("b")).toBeNull();
     const tool = screen.getByText("Running a command");
-    const tail = screen.getByText(/Now the config\./);
+    const tail = screen.getByText(/Now the/);
     expect(
-      narration.compareDocumentPosition(tool) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+      lead.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
       tool.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    // The reply below the work is a draft until the answer lands.
+    expect(tail.closest("[data-draft]")).not.toBeNull();
   });
 
   it("lists every tool call as a step under one live header", async () => {
@@ -831,7 +1050,9 @@ describe("TurnBlock", () => {
   it("shows the run header's tool phrase once, but still announces it", () => {
     // The header already says "Running a command"; a visible caption would
     // echo it word for word. It stays in the polite live region (sr-only),
-    // the screen reader's progress cue. The agent's own words still show.
+    // the screen reader's progress cue. The agent's own words still show,
+    // once the previous caption has been up long enough to read.
+    vi.useFakeTimers();
     const { container, rerender } = render(
       <TurnBlock
         turn={turn({ status: "running" })}
@@ -856,16 +1077,22 @@ describe("TurnBlock", () => {
         })}
       />,
     );
+    act(() => {
+      vi.advanceTimersByTime(CAPTION_HOLD_MS);
+    });
     expect(
       screen.getByText("Checking the CI logs").closest("p"),
     ).not.toHaveClass("sr-only");
+    vi.useRealTimers();
   });
 
-  it("drops the narration and promotes only the answer when the turn settles", () => {
-    // The fade-away decision (1a): the work log is transient by design —
-    // history carries no deltas, so what a refresh shows and what the live
-    // viewer ends on must agree: tools + answer, no narration.
-    const { rerender } = render(
+  it("keeps the opening sentence above the work and settles the reply IN PLACE", () => {
+    // The reply being written is the same element as the answer it becomes:
+    // the durable `text` replaces the draft's words in place (usually the
+    // same words), the "still writing" mark goes, and nothing is swapped.
+    // The opening sentence stays above the work (live only: history has no
+    // deltas, so a reload shows the work and the answer).
+    const { container, rerender } = render(
       <TurnBlock
         turn={turn({ status: "running" })}
         rendered={rendered({
@@ -876,7 +1103,8 @@ describe("TurnBlock", () => {
         })}
       />,
     );
-    expect(screen.getByText("Let me check the logs.")).toBeInTheDocument();
+    const draft = screen.getByText("CI passed").closest("[data-slot='bubble']");
+    expect(draft).toHaveAttribute("data-draft");
 
     rerender(
       <TurnBlock
@@ -889,12 +1117,47 @@ describe("TurnBlock", () => {
         })}
       />,
     );
-    expect(
-      screen.queryByText("Let me check the logs."),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("CI passed; nothing to do.")).toBeInTheDocument();
-    // The tool record survives the settle — only narration is transient.
-    expect(screen.getByText("Ran a command")).toBeInTheDocument();
+    const answer = screen
+      .getByText("CI passed; nothing to do.")
+      .closest("[data-slot='bubble']");
+    expect(answer).toBe(draft);
+    expect(answer).not.toHaveAttribute("data-draft");
+    expect(container.querySelector("[data-draft]")).toBeNull();
+    expect(screen.getByText("Let me check the logs.")).toBeInTheDocument();
+  });
+
+  it("settles a reply with no tools in place too, and never shows a repeated lead twice", () => {
+    const { rerender } = render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({ ended: false, liveText: "It is 4" })}
+      />,
+    );
+    const draft = screen.getByText("It is 4").closest("[data-slot='bubble']");
+    rerender(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({ text: "It is 4." })}
+      />,
+    );
+    expect(screen.getByText("It is 4.").closest("[data-slot='bubble']")).toBe(
+      draft,
+    );
+
+    // A turn stopped mid-tool keeps its last words as the answer: when
+    // those are the opening sentence, they show once.
+    render(
+      <TurnBlock
+        turn={turn({ id: "t2", status: "aborted" })}
+        rendered={rendered({
+          turnId: "t2",
+          lead: "Checking the deploy.",
+          text: "Checking the deploy.",
+          tools: [{ callId: "c1", name: "bash" }],
+        })}
+      />,
+    );
+    expect(screen.getAllByText("Checking the deploy.")).toHaveLength(1);
   });
 
   it("prefers the turn row's error — the one witness when no event arrived", () => {
@@ -924,7 +1187,24 @@ describe("TurnBlock", () => {
       />,
     );
     expect(screen.queryByText("raw provider blob")).not.toBeInTheDocument();
-    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    // The stream says the turn is over: no caption claims it is thinking.
+    expect(screen.queryByText("Thinking…")).toBeNull();
+  });
+
+  it("never says Thinking… after Stop while the poll catches up", () => {
+    // After Stop the stream ends the turn before the poll flips it to
+    // aborted; falling back to "Thinking…" in between would read as the
+    // agent starting again.
+    render(
+      <TurnBlock
+        turn={turn({ status: "running" })}
+        rendered={rendered({
+          ended: true,
+          tools: [{ callId: "c1", name: "bash" }],
+        })}
+      />,
+    );
+    expect(screen.queryByText("Thinking…")).toBeNull();
   });
 
   it("still shows the stream's error once the turn settles without a row error", () => {
@@ -940,16 +1220,26 @@ describe("TurnBlock", () => {
     expect(screen.getByText("the stream's own error")).toBeInTheDocument();
   });
 
-  it("says it is waking before the agent runs, thinking once it does", () => {
+  it("says thinking from the first beat, whatever the lifecycle: a waking machine is never announced", () => {
     const { rerender } = render(
       <TurnBlock turn={turn({ status: "queued" })} rendered={undefined} />,
     );
-    expect(screen.getByText("Waking the agent…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.queryByText(/waking/i)).toBeNull();
+    // The lifecycle still rides the line for support, as data, never copy.
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "queued",
+    );
 
     rerender(
       <TurnBlock turn={turn({ status: "running" })} rendered={undefined} />,
     );
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.getByText("Thinking…").closest("p")).toHaveAttribute(
+      "data-turn-status",
+      "running",
+    );
   });
 
   it("marks an aborted turn as stopped", () => {
@@ -1166,6 +1456,42 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     ).toBeNull();
   });
 
+  it.each([
+    ["model_refused", MODEL_REFUSED_MESSAGE],
+    ["model_empty_response", MODEL_EMPTY_RESPONSE_MESSAGE],
+  ])(
+    "an unanswered turn (%s) reads as its notice under the message, never an empty bubble",
+    (errorCode, message) => {
+      // The exact row the control plane stores, with the transcript the run
+      // left: started and a clean end, no text, no error event. Not a key
+      // problem, so no Models-page door; the sentence itself says what to do.
+      render(
+        <TurnBlock
+          turn={turn({ status: "failed", error: message, errorCode })}
+          rendered={rendered({ text: "", ended: true })}
+          modelsHref="/w/p1/agents/a1/models"
+        />,
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(message);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByText(/stop_reason|guardrail/)).toBeNull();
+    },
+  );
+
+  it("the SAME turn closed `done` (the old outcome) renders nothing at all", () => {
+    // The before-state the fix exists for: a done turn with no words shows
+    // no reply and no notice. Kept as a pin so the failed close stays the
+    // only way a refusal becomes visible.
+    const { container } = render(
+      <TurnBlock
+        turn={turn({ status: "done" })}
+        rendered={rendered({ text: "", ended: true })}
+      />,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(container).not.toHaveTextContent(/declined|empty answer/);
+  });
+
   it("offers the key check for a model-provider refusal — same door, its own label", () => {
     // A key EXISTS but the provider refused it (limit, expiry): the fix
     // lives on the same Models page, and the label says "check", not
@@ -1263,6 +1589,8 @@ describe("a turn that could not run for a reason the reader can fix", () => {
     ["turn_time_limit", "This turn reached its time limit."],
     ["blocked_by_policy", "A OneCLI policy stopped this request."],
     ["gateway_unavailable", "OneCLI couldn't reach the model provider."],
+    ["home_read_only", "The agent hit a storage problem and is restarting."],
+    ["home_read_only_held", "The agent could not restart by itself."],
     [null, "harness event stream ended unexpectedly"],
   ])(
     "renders a %s failure as a notice with its own sentence",
@@ -1471,7 +1799,9 @@ describe("a turn that could not run for a reason the reader can fix", () => {
         />
       </QueryClientProvider>,
     );
-    expect(screen.getByText("Apps that could help")).toBeInTheDocument();
+    // The card under an answer is the rows alone: the agent's sentence
+    // introduces it, so no consent line.
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Connect Gmail" }),
     ).toBeInTheDocument();

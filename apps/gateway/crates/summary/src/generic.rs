@@ -114,7 +114,7 @@ const NOISE_WORDS: &[&str] = &["api", "rest", "services", "data", "batch"];
 const SELF_WORDS: &[&str] = &["me", "self"];
 
 /// Longest query-parameter label: a name is agent-written.
-const MAX_LABEL_LEN: usize = 60;
+const MAX_QUERY_LABEL_LEN: usize = 60;
 /// Most prose blocks (a template, a message body) a nested card shows.
 const MAX_PROSE_ROWS: usize = 3;
 /// Settings shown beside text that leads a card (the rest are counted).
@@ -563,7 +563,7 @@ fn push_query(s: &mut ApprovalSummary, path: &str) {
         };
         let label = one_line(
             &humanize_key(k.trim_start_matches(['$', '@'])),
-            MAX_LABEL_LEN,
+            MAX_QUERY_LABEL_LEN,
         );
         s.push(label, value);
     }

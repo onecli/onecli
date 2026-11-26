@@ -1,12 +1,16 @@
-import { Skeleton } from "@onecli/ui/components/skeleton";
+"use client";
 
-/** Shown inside the agent page frame, which supplies the section shell. */
+import { usePathname } from "next/navigation";
+import { matchAgentPage } from "@/lib/navigation";
+import { AgentSectionSkeleton } from "./_components/agent-section-skeleton";
+
+/**
+ * The agent page while a section renders, inside the agent frame. Shaped
+ * like the section being opened (the URL says which), so opening Chat
+ * shows the chat's thread and composer from the first frame, never a
+ * generic list that turns into one.
+ */
 export default function AgentSectionLoading() {
-  return (
-    <div className="space-y-3">
-      {[1, 2, 3].map((i) => (
-        <Skeleton key={i} className="h-14 w-full" />
-      ))}
-    </div>
-  );
+  const section = matchAgentPage(usePathname())?.section ?? "";
+  return <AgentSectionSkeleton section={section} />;
 }

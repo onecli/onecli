@@ -1,7 +1,7 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
 import { useAgentModels } from "@/hooks/use-agents";
+import { Character } from "@/lib/components/character";
 import { GreetingConnectCard } from "./greeting-connect-card";
 
 /**
@@ -38,9 +38,7 @@ export const EmptyThreadWelcome = ({
 
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 py-10">
-      <div className="bg-brand/10 flex size-10 items-center justify-center rounded-full">
-        <Sparkles className="text-brand size-5" aria-hidden />
-      </div>
+      <Character name="cloud" size={56} className="-mb-2" />
       {/* Only the greeting is centered. The card below is a list, and a
           list reads from the start edge (its rows would center otherwise). */}
       <div className="text-center">

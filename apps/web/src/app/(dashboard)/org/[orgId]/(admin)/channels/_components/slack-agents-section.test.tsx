@@ -177,7 +177,7 @@ describe("SlackAgentsSection", () => {
     expect(rowOf("Ofer").getByText("@ofer-bot")).toBeInTheDocument();
     expect(
       rowOf("Ofer").getByRole("link", { name: "Settings" }),
-    ).toHaveAttribute("href", "/w/ws-ops/agents/ag-ofer/channels");
+    ).toHaveAttribute("href", "/w/ws-ops/agents/ag-ofer/contacts");
     expect(
       rowOf("Ofer").getByRole("link", { name: /Open in Slack/ }),
     ).toHaveAttribute(
@@ -276,13 +276,13 @@ describe("SlackAgentsSection", () => {
     // No consent click exists: the tokens are pasted on the agent's page.
     expect(
       rowOf("Fresh").getByRole("link", { name: /Set up/ }),
-    ).toHaveAttribute("href", "/w/ws-sales/agents/ag-fresh/channels");
+    ).toHaveAttribute("href", "/w/ws-sales/agents/ag-fresh/contacts");
     expect(
       rowOf("Half").getByText(/Paste its tokens on its Slack page/),
     ).toBeInTheDocument();
     expect(
       rowOf("Half").getByRole("link", { name: "Finish setup" }),
-    ).toHaveAttribute("href", "/w/ws-sales/agents/ag-half/channels");
+    ).toHaveAttribute("href", "/w/ws-sales/agents/ag-half/contacts");
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(open).not.toHaveBeenCalled();
     expect(mocks.attach).not.toHaveBeenCalled();

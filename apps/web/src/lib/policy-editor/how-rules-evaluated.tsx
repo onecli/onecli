@@ -7,17 +7,13 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@onecli/ui/components/popover";
-// Alias key on purpose (the edition seam): EE reads `true` and gets the
-// two-level explainer; OSS reads `false` and gets the single-list one.
-import { ORG_GUARDRAILS_AVAILABLE } from "@/lib/policy-editor/editor-chrome";
 
 /**
  * A quiet "how rules are evaluated" affordance for the policy console. It spells
  * out the top-down first-match model precisely — the part the subtitle can't
  * carry without becoming a paragraph, and the two things people otherwise get
- * wrong: the Default Rule catch-all, and that modifiers don't stack. The EE
- * editions describe the two-level (org guardrails + workspace) model; OSS has no
- * organization level, so it describes the single workspace list.
+ * wrong: the Default Rule catch-all, and that modifiers don't stack. It
+ * describes the two-level model: org guardrails, then workspace rules.
  */
 export const HowRulesEvaluated = () => (
   <Popover>
@@ -38,41 +34,27 @@ export const HowRulesEvaluated = () => (
       <p className="text-muted-foreground mt-1 text-xs">
         For each request an agent makes:
       </p>
-      {ORG_GUARDRAILS_AVAILABLE ? (
-        <ol className="text-muted-foreground mt-2 ml-4 list-decimal space-y-1.5 text-xs">
-          <li>
-            <span className="text-foreground">Organization guardrails</span> are
-            checked top-down. The first rule that matches is the org&rsquo;s
-            decision.
-          </li>
-          <li>
-            <span className="text-foreground">Workspace rules</span> are checked
-            the same way, in their listed order.
-          </li>
-          <li>
-            The <span className="text-foreground font-medium">stricter</span> of
-            the two wins: Block beats Allow, and requiring approval beats a rate
-            limit.
-          </li>
-          <li>
-            If no rule at a level matches, that level&rsquo;s{" "}
-            <span className="text-foreground">Default Rule</span> gives its
-            verdict, and the stricter verdict wins.
-          </li>
-        </ol>
-      ) : (
-        <ol className="text-muted-foreground mt-2 ml-4 list-decimal space-y-1.5 text-xs">
-          <li>
-            <span className="text-foreground">Rules</span> are checked top-down,
-            in their listed order. The first rule that matches decides.
-          </li>
-          <li>
-            If no rule matches, the{" "}
-            <span className="text-foreground">Default Rule</span> gives the
-            verdict.
-          </li>
-        </ol>
-      )}
+      <ol className="text-muted-foreground mt-2 ml-4 list-decimal space-y-1.5 text-xs">
+        <li>
+          <span className="text-foreground">Organization guardrails</span> are
+          checked top-down. The first rule that matches is the org&rsquo;s
+          decision.
+        </li>
+        <li>
+          <span className="text-foreground">Workspace rules</span> are checked
+          the same way, in their listed order.
+        </li>
+        <li>
+          The <span className="text-foreground font-medium">stricter</span> of
+          the two wins: Block beats Allow, and requiring approval beats a rate
+          limit.
+        </li>
+        <li>
+          If no rule at a level matches, that level&rsquo;s{" "}
+          <span className="text-foreground">Default Rule</span> gives its
+          verdict, and the stricter verdict wins.
+        </li>
+      </ol>
       <p className="text-muted-foreground mt-3 border-t pt-2 text-xs">
         Only one rule ever decides: rate limits and approvals don&rsquo;t stack.
       </p>

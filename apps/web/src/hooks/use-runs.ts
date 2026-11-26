@@ -1,6 +1,11 @@
 "use client";
 
-import { infiniteQueryOptions, useQuery } from "@tanstack/react-query";
+import { useCallback } from "react";
+import {
+  infiniteQueryOptions,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { runs } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import type { RunsFilter } from "@/lib/api/runs";
@@ -36,3 +41,20 @@ export const useRun = (agentId: string, turnId: string | null) =>
       return status && isActiveTurnStatus(status) ? ACTIVE_RUN_POLL_MS : false;
     },
   });
+
+/**
+ * A schedule's newest run id (still going or done), fetched when ASKED: the
+ * schedules list carries no turn ids, and a run started since the last read
+ * must be the one found, so this always asks the server.
+ */
+export const useNewestScheduleRun = (agentId: string, cronId: string) => {
+  const qc = useQueryClient();
+  return useCallback(async (): Promise<string | null> => {
+    const page = await qc.fetchQuery({
+      queryKey: queryKeys.runs.newest(agentId, cronId),
+      queryFn: () => runs.list({ agentId, cronId }),
+      staleTime: 0,
+    });
+    return page.runs[0]?.turnId ?? null;
+  }, [qc, agentId, cronId]);
+};

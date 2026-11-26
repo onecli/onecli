@@ -10,6 +10,7 @@ import { grants, instance } from "@/lib/api";
 import type { Connection, InstanceInfo } from "@/lib/api";
 import { queryKeys } from "@/lib/api/keys";
 import { ConnectAppPickerDialog } from "./connect-app-picker-dialog";
+import { ChatSendContext } from "@/lib/chat/chat-send";
 
 const pushMock = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -59,6 +60,9 @@ const renderPicker = ({
   onOpenChange = vi.fn(),
   onConnected = undefined as ((connectionId: string) => void) | undefined,
   open = true,
+  // Present = rendered inside an agent chat (the empty search can hand the
+  // app to the agent); absent = the Connections page.
+  chatSend = undefined as ((message: string) => void) | undefined,
 } = {}) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -78,7 +82,13 @@ const renderPicker = ({
     name: "Arik",
   });
   const wrapper = ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      {chatSend ? (
+        <ChatSendContext value={chatSend}>{children}</ChatSendContext>
+      ) : (
+        children
+      )}
+    </QueryClientProvider>
   );
   const view = render(
     <ConnectAppPickerDialog
@@ -323,5 +333,69 @@ describe("ConnectAppPickerDialog", () => {
     expect(
       screen.getByTitle("Connect another Gmail account"),
     ).toBeInTheDocument();
+  });
+
+  describe("a search with no match, in a chat, hands the app to the agent", () => {
+    const search = async (text: string) =>
+      userEvent.type(screen.getByRole("textbox"), text);
+
+    it("offers 'Connect X as a custom connection' and sends the agent the request", async () => {
+      const chatSend = vi.fn();
+      const { onOpenChange } = renderPicker({ chatSend });
+      await search("AcmeCRM");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      await userEvent.click(
+        screen.getByRole("button", {
+          name: /Connect “AcmeCRM” as a custom connection/,
+        }),
+      );
+      expect(chatSend).toHaveBeenCalledWith(
+        "I want to connect AcmeCRM as a custom connection with an API key.",
+      );
+      // The dialog closes so the person sees the agent pick it up.
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("sends a clean, clipped name: invisible characters dropped, capped at a connection name's length", async () => {
+      const chatSend = vi.fn();
+      renderPicker({ chatSend });
+      await userEvent.click(screen.getByRole("textbox"));
+      // A zero-width space hidden in the name, and a pasted paragraph.
+      await userEvent.paste(`  Acme\u200bCRM   ${"x".repeat(200)}`);
+      const name = `AcmeCRM ${"x".repeat(72)}`;
+      expect(name).toHaveLength(80);
+      // What the button shows is exactly what is sent.
+      await userEvent.click(
+        screen.getByRole("button", { name: new RegExp(`“${name}”`) }),
+      );
+      expect(chatSend).toHaveBeenCalledWith(
+        `I want to connect ${name} as a custom connection with an API key.`,
+      );
+    });
+
+    it("is not offered when the search finds an app", async () => {
+      renderPicker({ chatSend: vi.fn() });
+      await search("Gmail");
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
+
+    it("is not offered for a built-in app the org hides here: the platform refuses a custom one", async () => {
+      // MUTATION-PROOF: decide on the visible (org-filtered) list and this
+      // offers a custom GitHub the propose step then refuses.
+      renderPicker({
+        chatSend: vi.fn(),
+        availability: { restricted: true, providers: ["gmail"] },
+      });
+      await search("GitHub");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
+
+    it("is not offered outside a chat (the Connections page)", async () => {
+      renderPicker();
+      await search("AcmeCRM");
+      expect(screen.getByText("No apps found.")).toBeInTheDocument();
+      expect(screen.queryByText(/as a custom connection/)).toBeNull();
+    });
   });
 });

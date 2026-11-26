@@ -614,6 +614,140 @@ describe("redaction", () => {
     expect(serialized).not.toContain("org-b");
   });
 
+  // Shared fixture for the ordering/dedupe cases below: two org grants, then
+  // two workspace grants, one of which repeats a logicalId (the same logical
+  // rule reached through two rows).
+  const mixedRows = () => ({
+    orgRows: [
+      simRow({
+        id: "o1",
+        scope: "organization",
+        workspaceId: null,
+        organizationId: "org-1",
+        logicalId: "org-a",
+        name: BAIT,
+        identities: [identityRow({ agentId: "a-1" })],
+        targets: [targetRow({ kind: "connection", appConnectionId: "conn-1" })],
+      }),
+      simRow({
+        id: "o2",
+        scope: "organization",
+        workspaceId: null,
+        organizationId: "org-1",
+        logicalId: "org-b",
+        name: `${BAIT}-2`,
+        identities: [identityRow({ id: "i2", agentId: "a-1" })],
+        targets: [
+          targetRow({
+            id: "t2",
+            kind: "app",
+            appProvider: "gmail",
+            appConnectionScope: "workspace",
+          }),
+        ],
+      }),
+    ],
+    workspaceRows: [
+      simRow({
+        id: "w1",
+        logicalId: "ws-a",
+        name: "Workspace grant A",
+        identities: [identityRow({ id: "i3", agentId: "a-1" })],
+        targets: [
+          targetRow({
+            id: "t3",
+            kind: "connection",
+            appConnectionId: "conn-1",
+          }),
+        ],
+      }),
+      simRow({
+        id: "w2",
+        logicalId: "ws-b",
+        name: "Workspace grant B",
+        identities: [identityRow({ id: "i4", agentId: "a-1" })],
+        targets: [
+          targetRow({
+            id: "t4",
+            kind: "connection",
+            appConnectionId: "conn-1",
+          }),
+        ],
+      }),
+      simRow({
+        id: "w3",
+        logicalId: "ws-a",
+        name: "Workspace grant A (second row)",
+        identities: [identityRow({ id: "i5", agentId: "a-1" })],
+        targets: [
+          targetRow({
+            id: "t5",
+            kind: "connection",
+            appConnectionId: "conn-1",
+          }),
+        ],
+      }),
+    ],
+  });
+
+  it("a member sees ONE marker first, then each workspace grant once, in rule order", async () => {
+    armStubs({ agents: [{ id: "a-1", name: "A" }], ...mixedRows() });
+
+    const result = await effectiveAgents("conn-1", {
+      ...CTX,
+      viewerSeesOrgRules: false,
+    });
+
+    expect(result.agents[0]?.credential).toEqual({
+      status: "viaRule",
+      provenance: [
+        { kind: "rule", scope: "organization", redacted: true },
+        {
+          kind: "rule",
+          scope: "workspace",
+          rule: { logicalId: "ws-a", name: "Workspace grant A" },
+        },
+        {
+          kind: "rule",
+          scope: "workspace",
+          rule: { logicalId: "ws-b", name: "Workspace grant B" },
+        },
+      ],
+    });
+  });
+
+  it("an org-admin sees every grant once, org first, first row of a repeated logicalId wins", async () => {
+    armStubs({ agents: [{ id: "a-1", name: "A" }], ...mixedRows() });
+
+    const result = await effectiveAgents("conn-1", CTX);
+
+    expect(result.agents[0]?.credential).toEqual({
+      status: "viaRule",
+      provenance: [
+        {
+          kind: "rule",
+          scope: "organization",
+          rule: { logicalId: "org-a", name: BAIT },
+        },
+        {
+          kind: "rule",
+          scope: "organization",
+          rule: { logicalId: "org-b", name: `${BAIT}-2` },
+        },
+        {
+          kind: "rule",
+          scope: "workspace",
+          rule: { logicalId: "ws-a", name: "Workspace grant A" },
+        },
+        {
+          kind: "rule",
+          scope: "workspace",
+          rule: { logicalId: "ws-b", name: "Workspace grant B" },
+        },
+      ],
+    });
+  });
+
   it("an org-admin DOES see the org rule name (proves the member redaction is non-vacuous)", async () => {
     armStubs({
       agents: [{ id: "a-1", name: "A" }],

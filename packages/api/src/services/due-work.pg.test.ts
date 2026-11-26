@@ -19,12 +19,14 @@ type DueWork = typeof import("./due-work");
 type Placement = typeof import("./placement");
 type Sandboxes = typeof import("./sandbox-service");
 type Channels = typeof import("./runner-channel-service");
+type Processes = typeof import("./sandbox-process-service");
 
 let db: Db;
 let dueWork: DueWork;
 let placement: Placement;
 let sandboxes: Sandboxes;
 let channels: Channels;
+let processes: Processes;
 
 const P = "dw-";
 const ORG = `${P}org`;
@@ -115,6 +117,7 @@ beforeAll(async () => {
   placement = await import("./placement");
   sandboxes = await import("./sandbox-service");
   channels = await import("./runner-channel-service");
+  processes = await import("./sandbox-process-service");
 
   await reset();
   await db.organization.create({ data: { id: ORG, name: ORG, slug: ORG } });
@@ -239,6 +242,70 @@ describe.skipIf(!PROOF_URL)("claimDueWork over real PostgreSQL", () => {
     await seedSandbox("sb-fresh", agentId, RUNNER_A, { status: "starting" });
 
     expect(await dueWork.claimDueWork(RUNNER_A, 5)).toEqual([]);
+  });
+
+  it("a live supervisor's ports and desktop frames never refresh a stuck claim's stale clock", async () => {
+    // A stop the runner could not report (its backend was unreachable for
+    // exactly that call) leaves the row `stopping` with the container still
+    // up. The supervisor inside keeps re-sending its slow-clock frames
+    // (ports, desktop) every ~30 s. Those writes must not move `updated_at`,
+    // which is this arm's only recovery clock: while they did, a stuck
+    // `stopping` row stayed fresh forever and every turn against it died at
+    // the never-started ceiling.
+    const agentId = await seedAgent("stuck");
+    const staleAt = new Date(Date.now() - 10 * 60 * 1000);
+    await seedSandbox("sb-stuck", agentId, RUNNER_A, {
+      status: "stopping",
+      updatedAt: staleAt,
+      containerRef: "cont-stuck",
+    });
+
+    await processes.applySandboxPorts(RUNNER_A, {
+      kind: "sandbox.ports",
+      sandboxId: `${P}sb-stuck`,
+      containerRef: "cont-stuck",
+      ports: [8080],
+    });
+    await processes.applySandboxDesktop(RUNNER_A, {
+      kind: "sandbox.desktop",
+      sandboxId: `${P}sb-stuck`,
+      containerRef: "cont-stuck",
+      viewable: true,
+    });
+
+    const row = await db.sandbox.findUnique({
+      where: { id: `${P}sb-stuck` },
+      select: { updatedAt: true, listeningPorts: true, desktopViewable: true },
+    });
+    // The facts land; the clock does not move.
+    expect(row?.listeningPorts).toEqual([8080]);
+    expect(row?.desktopViewable).toBe(true);
+    expect(row?.updatedAt).toEqual(staleAt);
+
+    // The common beat: nothing listening, no screen. The empty array must
+    // land as an empty array (not fail the frame), and still not tick.
+    await processes.applySandboxPorts(RUNNER_A, {
+      kind: "sandbox.ports",
+      sandboxId: `${P}sb-stuck`,
+      containerRef: "cont-stuck",
+      ports: [],
+    });
+    await processes.applySandboxDesktop(RUNNER_A, {
+      kind: "sandbox.desktop",
+      sandboxId: `${P}sb-stuck`,
+      containerRef: "cont-stuck",
+      viewable: false,
+    });
+    const quiet = await db.sandbox.findUnique({
+      where: { id: `${P}sb-stuck` },
+      select: { updatedAt: true, listeningPorts: true, desktopViewable: true },
+    });
+    expect(quiet?.listeningPorts).toEqual([]);
+    expect(quiet?.desktopViewable).toBe(false);
+    expect(quiet?.updatedAt).toEqual(staleAt);
+
+    const claimed = await dueWork.claimDueWork(RUNNER_A, 5);
+    expect(claimed.map((c) => c.sandboxId)).toEqual([`${P}sb-stuck`]);
   });
 
   it("claims a stop for a sandbox idle past its window", async () => {

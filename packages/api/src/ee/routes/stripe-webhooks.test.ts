@@ -3,10 +3,10 @@ import type Stripe from "stripe";
 
 // The webhook is the source of truth for subscriptionStatus. These tests drive
 // the real route with Stripe + the DB mocked, and assert the write behavior of
-// customer.subscription.updated (immediate plan reconcile) and .deleted
-// (downgrade to free). Plan *resolution* is unit-tested in
-// subscription-plan.test.ts; here it's stubbed so assertions read the status
-// gating, not the price map.
+// customer.subscription.updated (immediate plan reconcile, free on a failed
+// payment) and .deleted (downgrade to free). Plan *resolution* is unit-tested
+// in subscription-plan.test.ts; here it's stubbed so assertions read the
+// status gating, not the price map.
 
 // The router is edition-dark off cloud and `IS_CLOUD` freezes at module load,
 // so pin cloud before the graph loads — this file tests the in-cloud
@@ -146,6 +146,14 @@ const updatedEvent = (
   data: { object },
 });
 
+/** The freshly retrieved subscription after a payment on it failed. */
+const pastDueSub = (status: "past_due" | "unpaid") => ({
+  id: "sub_1",
+  status,
+  customer: "cus_1",
+  metadata: { organizationId: "org-1" },
+});
+
 beforeEach(() => {
   state.updateManyCalls = [];
   state.retrieveSub = null;
@@ -197,9 +205,10 @@ describe("customer.subscription.updated", () => {
     expect(state.updateManyCalls[0]!.data.subscriptionStatus).toBe("team");
   });
 
-  it("does NOT change the plan while a payment is retrying (past_due)", async () => {
-    // Dunning is non-terminal: hold the current plan and let retries resolve.
-    state.retrieveSub = { status: "past_due" };
+  it("drops the org to free as soon as a payment fails (past_due)", async () => {
+    // The product rule: a failed payment means free right away, not after
+    // Stripe's retries run out. The plan comes back when a payment succeeds.
+    state.retrieveSub = pastDueSub("past_due");
     const res = await post(
       updatedEvent({
         id: "sub_1",
@@ -208,8 +217,168 @@ describe("customer.subscription.updated", () => {
       }),
     );
     expect(res.status).toBe(200);
-    expect(state.updateManyCalls).toHaveLength(0);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+    // Still a subscriber while Stripe retries: not churn.
+    expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
   });
+
+  it("drops the org to free when retries stopped without canceling (unpaid)", async () => {
+    state.retrieveSub = pastDueSub("unpaid");
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+  });
+
+  it("restores the plan when the payment succeeds after a failure", async () => {
+    const event = updatedEvent({
+      id: "sub_1",
+      metadata: { organizationId: "org-1" },
+      cancel_at_period_end: false,
+    });
+
+    state.retrieveSub = pastDueSub("past_due");
+    await post(event);
+    state.retrieveSub = { ...pastDueSub("past_due"), status: "active" };
+    await post(event);
+
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+      { subscriptionStatus: "team" },
+    ]);
+  });
+
+  it("keeps the plan of another live subscription the org still holds", async () => {
+    state.retrieveSub = pastDueSub("past_due");
+    state.searchSubs = [
+      {
+        id: "sub_live",
+        status: "active",
+        customer: "cus_other",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(
+      state.updateManyCalls.find((c) => "subscriptionStatus" in c.data)?.data,
+    ).toEqual({ subscriptionStatus: "team" });
+    expect(
+      state.updateManyCalls.find((c) => "stripeCustomerId" in c.data)?.data,
+    ).toEqual({ stripeCustomerId: "cus_other" });
+  });
+
+  it("still drops to free when the search only echoes the failing subscription", async () => {
+    // Stripe's search index lags: it can still report the failing sub as
+    // active. That echo must not count as another live subscription.
+    state.retrieveSub = pastDueSub("past_due");
+    state.searchSubs = [
+      {
+        id: "sub_1",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+    ]);
+  });
+
+  it("ignores another org's live subscription on a shared customer", async () => {
+    // Cross-tenant fence: a shared customer's sub labeled with ANOTHER org's
+    // id must never keep this past-due org on a paid plan.
+    state.retrieveSub = pastDueSub("past_due");
+    state.listSubs = [
+      {
+        id: "sub_other",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-2" },
+      },
+    ];
+
+    await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+  });
+
+  it("falls back to free when the remaining-subscription lookup fails", async () => {
+    state.retrieveSub = pastDueSub("past_due");
+    state.listThrows = true;
+
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+    ]);
+  });
+
+  it.each(["incomplete", "incomplete_expired", "paused"])(
+    "leaves the plan alone for a %s subscription",
+    async (status) => {
+      state.retrieveSub = { status };
+      const res = await post(
+        updatedEvent({
+          id: "sub_1",
+          metadata: { organizationId: "org-1" },
+          cancel_at_period_end: false,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(state.updateManyCalls).toHaveLength(0);
+    },
+  );
 
   it("does NOT re-provision when a stale update arrives after cancellation", async () => {
     // The event payload can look active, but webhooks are unordered — we act on
@@ -701,7 +870,9 @@ describe("invoice.paid: adopt the paying payment method", () => {
     ]);
     expect(vi.mocked(notifyDiscord)).toHaveBeenCalledWith(
       "payment_collected",
-      expect.objectContaining({ organizationName: "Org One", plan: "pro" }),
+      // The paid subscription's plan (stubbed "team"), not the org row's
+      // ("pro"): a recovery payment can land while the row still says free.
+      expect.objectContaining({ organizationName: "Org One", plan: "team" }),
     );
   });
 });

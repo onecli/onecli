@@ -12,8 +12,9 @@ export interface PendingActionApprovalItem {
   /** A standing question about who the agent wants to reach: the only
    * answers are Always allow and Never. */
   standingChoice: boolean;
-  /** The asking turn's conversation, where the chat renders it inline;
-   * null = bell only. */
+  /** Where the agent's chat renders it inline: the asking turn's
+   * conversation, or the chat a scheduled run, watch or webhook reports
+   * to; null = no conversation (every member's chat with the agent). */
   conversationId: string | null;
   /** ISO timestamps. */
   createdAt: string;
@@ -58,19 +59,14 @@ export interface WebhookChangeView {
   enabled: boolean | null;
 }
 
-/** An agent-proposed custom connection as the approve card renders it.
- * Non-secret by construction: the proposal has no value field. */
+/** An agent-proposed custom connection as the approve card renders it: the
+ * name and where the key goes. Non-secret by construction (the proposal has
+ * no value field). */
 export interface CustomConnectionProposalView {
   name: string;
   hostPattern: string;
-  /** The owner the key is sent to: highlighted on the card. */
+  /** The owner the key is sent to: the card names it. */
   registrableDomain: string | null;
-  pathPattern: string | null;
-  headerName: string;
-  /** Contains "{value}" exactly once. */
-  valueFormat: string;
-  docsUrl: string | null;
-  reason: string;
 }
 
 export interface PendingReachAskItem {

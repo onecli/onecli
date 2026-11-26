@@ -16,11 +16,13 @@ const state = vi.hoisted(() => ({
   availability: "ready" as string,
   counts: { apps: 0, secrets: 0 },
   renderedCounts: undefined as { apps: number; secrets: number } | undefined,
+  existing: [] as string[],
 }));
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   mutate: vi.fn(),
   reset: vi.fn(),
+  setStarterFace: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -34,10 +36,11 @@ vi.mock("@/hooks/use-agents", () => ({
     isPending: false,
     error: null,
   }),
+  useAgents: () => ({ data: state.existing.map((name) => ({ name })) }),
+  useSetStarterFace: () => mocks.setStarterFace,
 }));
 vi.mock("@/hooks/use-hosted-availability", () => ({
   useHostedAvailability: () => state.availability,
-  useHomeDurabilityMessage: () => null,
 }));
 // The rendered counts may lag; the chooser decision asks the live answer.
 vi.mock("@/hooks/use-counts", () => ({
@@ -74,6 +77,7 @@ vi.mock("./choose-connections-dialog", () => ({
 }));
 
 const { NewHostedAgentDialog } = await import("./new-hosted-agent-dialog");
+const { AGENT_NAMES } = await import("@/lib/agents/agent-names");
 
 const open = () => render(<NewHostedAgentDialog open onOpenChange={vi.fn()} />);
 
@@ -92,6 +96,7 @@ beforeEach(() => {
   state.availability = "ready";
   state.counts = { apps: 0, secrets: 0 };
   state.renderedCounts = undefined;
+  state.existing = [];
   mocks.push.mockClear();
   mocks.mutate.mockClear();
 });
@@ -129,7 +134,7 @@ describe("the hosted create dialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("creates from a name alone, deriving the identifier", async () => {
+  it("creates from a name alone (the server derives the identifier)", async () => {
     const user = userEvent.setup();
     open();
     await user.clear(nameField());
@@ -137,7 +142,7 @@ describe("the hosted create dialog", () => {
     await user.click(screen.getByRole("button", { name: "Create agent" }));
 
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Support Triage", identifier: "support-triage" },
+      { name: "Support Triage" },
       expect.anything(),
     );
   });
@@ -148,9 +153,30 @@ describe("the hosted create dialog", () => {
     await user.clear(nameField());
     await user.type(nameField(), "Donna{Enter}");
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna" },
+      { name: "Donna" },
       expect.anything(),
     );
+  });
+
+  it("sends ONE create however many submits land before the first settles", async () => {
+    // The mock's `isPending` never flips, so this is the window before React
+    // re-renders: Enter and a click in the same tick must not mint two
+    // agents (the second would 409 on the derived identifier).
+    const user = userEvent.setup();
+    open();
+    await user.clear(nameField());
+    await user.type(nameField(), "Donna{Enter}");
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await user.type(nameField(), "{Enter}");
+    expect(mocks.mutate).toHaveBeenCalledTimes(1);
+
+    // Settled (a refusal): the door opens again for a retry.
+    const settle = mocks.mutate.mock.calls[0]?.[1] as {
+      onSettled: () => void;
+    };
+    settle.onSettled();
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    expect(mocks.mutate).toHaveBeenCalledTimes(2);
   });
 
   it("sends the brief once it has been opened and filled", async () => {
@@ -166,7 +192,7 @@ describe("the hosted create dialog", () => {
     await user.click(screen.getByRole("button", { name: "Create agent" }));
 
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna", instructions: "Triage the inbox." },
+      { name: "Donna", instructions: "Triage the inbox." },
       expect.anything(),
     );
   });
@@ -190,7 +216,7 @@ describe("the hosted create dialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Create agent" }));
     expect(mocks.mutate).toHaveBeenCalledWith(
-      { name: "Donna", identifier: "donna" },
+      { name: "Donna" },
       expect.anything(),
     );
   });
@@ -288,5 +314,50 @@ describe("the hosted create dialog", () => {
     open();
     expect(screen.getByRole("button", { name: "Create agent" })).toBeDisabled();
     expect(screen.getByText(/can't start until they're back/i)).toBeVisible();
+  });
+
+  it("opens with a famous assistant's name, never one already used here", () => {
+    state.existing = AGENT_NAMES.filter((n) => n !== "Alfred");
+    open();
+    expect(nameField().value).toBe("Alfred");
+  });
+
+  it("the dice roll another name, and it can still be edited by hand", async () => {
+    const user = userEvent.setup();
+    open();
+    const first = nameField().value;
+    expect(AGENT_NAMES).toContain(first);
+    await user.click(screen.getByRole("button", { name: /^shuffle/i }));
+    const second = nameField().value;
+    expect(AGENT_NAMES).toContain(second);
+    expect(second).not.toBe(first);
+
+    await user.clear(nameField());
+    await user.type(nameField(), "Support Triage{Enter}");
+    expect(mocks.mutate).toHaveBeenCalledWith(
+      { name: "Support Triage" },
+      expect.anything(),
+    );
+  });
+
+  it("opens with a random robot picture; the dice change it, and creating gives it to the agent", async () => {
+    const user = userEvent.setup();
+    open();
+    const picture = () =>
+      (document.querySelector("img") as HTMLImageElement).getAttribute("src");
+    const first = picture();
+    expect(first).toMatch(/^\/agent-faces\/robot-\d{2}\.jpg$/);
+    await user.click(
+      screen.getByRole("button", { name: "Shuffle name and picture" }),
+    );
+    const second = picture();
+    expect(second).toMatch(/^\/agent-faces\/robot-\d{2}\.jpg$/);
+    expect(second).not.toBe(first);
+
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    const [, { onSuccess }] = mocks.mutate.mock.calls[0]!;
+    act(() => onSuccess({ id: "ag-1", name: "Donna", llmKeys: ["sec-1"] }));
+    const face = Number(second!.match(/robot-(\d{2})/)![1]) - 1;
+    expect(mocks.setStarterFace).toHaveBeenCalledWith("ag-1", face);
   });
 });

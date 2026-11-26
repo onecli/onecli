@@ -257,13 +257,68 @@ describe.skipIf(!PROOF_URL)(
       const ids = await seed("dup");
       const first = Buffer.from("first");
       const second = Buffer.from("second");
-      await attach(ids, "Skill.zip", first);
-      await attach(ids, "skill.zip", second);
+      // Sent one after the other. Two inserts can share a millisecond, and
+      // then the random id decides which one is "first" (the tie case has
+      // its own test below), so the second is dated a second later.
+      const a = await attach(ids, "Skill.zip", first);
+      const b = await attach(ids, "skill.zip", second);
+      await db.conversationAttachment.update({
+        where: { id: b.id },
+        data: { createdAt: new Date(a.createdAt.getTime() + 1000) },
+      });
       const found = await attachmentService.getAgentAttachmentBytesByPath(
         ids.agentId,
         `attachments/${ids.turnId}/skill-2.zip`,
       );
       expect(found?.equals(second)).toBe(true);
+    });
+
+    it("same-named files written in the SAME millisecond are read in one fixed order, so the manifest and the by-path read agree on which landed where", async () => {
+      // A message's files are written in a burst, so equal `created_at`
+      // values are normal, and Postgres returns tied rows in whatever order
+      // it meets them on disk, which an UPDATE (a bind, a status flip)
+      // changes. The id breaks the tie. Ids are written in DESCENDING order
+      // and two rows are then updated, so neither insert nor heap order can
+      // pass for the id order by luck.
+      const ids = await seed("tie");
+      const at = new Date(Date.now() - 60_000);
+      const bodies = ["one", "two", "three", "four"].map((s) => Buffer.from(s));
+      const rowIds = bodies.map((_, i) => `${P}tie-${9 - i}`);
+      for (const [i, bytes] of bodies.entries())
+        await db.conversationAttachment.create({
+          data: {
+            id: rowIds[i],
+            conversationId: ids.conversationId,
+            turnId: ids.turnId,
+            userId: USER,
+            source: "user",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: bytes.length,
+            sha256: sha(bytes),
+            data: new Uint8Array(bytes),
+            status: "bound",
+            direction: "inbound",
+            createdAt: at,
+          },
+        });
+      await db.conversationAttachment.updateMany({
+        where: { id: { in: rowIds.filter((_, i) => i % 2 === 1) } },
+        data: { error: null },
+      });
+      const { manifest } = await attachmentService.planTurnAttachments(
+        ids.turnId,
+        MAX_ATTACHMENTS_PER_MESSAGE,
+      );
+      // The id order, which is the reverse of the order they were written.
+      expect(manifest.map((entry) => entry.id)).toEqual([...rowIds].sort());
+      for (const entry of manifest) {
+        const found = await attachmentService.getAgentAttachmentBytesByPath(
+          ids.agentId,
+          entry.path,
+        );
+        expect(found && sha(found)).toBe(entry.sha256);
+      }
     });
   },
 );
@@ -531,6 +586,7 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
   const inbound = (
     ids: { conversationId: string; turnId: string },
     name: string,
+    createdAt?: Date,
   ) =>
     db.conversationAttachment.create({
       data: {
@@ -542,6 +598,7 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
         sizeBytes: 1,
         sha256: sha(Buffer.from("i")),
         status: "bound",
+        ...(createdAt ? { createdAt } : {}),
       },
       select: { id: true },
     });
@@ -1109,7 +1166,12 @@ describe.skipIf(!PROOF_URL)("outbound attachments: the read side", () => {
       { length: MAX_ATTACHMENTS_PER_MESSAGE },
       (_, i) => `dpa-${i}.pdf`,
     );
-    for (const name of names) await inbound(ids, name);
+    // One millisecond apart, the order the person attached them in: rows
+    // written in the same millisecond have no defined order (the service
+    // breaks the tie by id, which is stable but not the attach order).
+    const base = Date.now() - 60_000;
+    for (const [i, name] of names.entries())
+      await inbound(ids, name, new Date(base + i));
 
     // A current runner: every file rides the manifest, none is held back.
     const full = await attachmentService.planTurnAttachments(

@@ -105,6 +105,32 @@ export const isBareHostname = (host: string): boolean =>
  */
 export const NO_REPLY_TOKEN = "[no reply]";
 
+/** Appended to every automated run's header (schedule, webhook), so it is
+ * read on every run: keep it short. The reply is what the person sees, so it
+ * must carry the result (an agent that only says "sent it" leaves the chat
+ * empty); `[no reply]` delivers nothing. */
+export const QUIET_RUN_SENTENCE = `Your reply is what the person sees: include the result itself, not "sent it". Nothing worth reporting: answer exactly \`${NO_REPLY_TOKEN}\`.`;
+
+/** The notice a scheduled run's check leaves when it wakes the agent. Its
+ * presence makes the run's report mandatory: the check already decided
+ * there is something, so a `[no reply]` delivers the check's output. */
+export const GATE_WAKE_NOTICE_PREFIX = "Schedule check found: ";
+
+/**
+ * Text from outside the platform (a webhook's body, a schedule check's
+ * output) in a code fence longer than any backtick run inside it, so the
+ * text cannot close the fence early and smuggle words out of the DATA
+ * block. The caller labels the block as untrusted data.
+ */
+export const fenceUntrusted = (text: string): string => {
+  const longest = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map((run) => run.length),
+  );
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}\n${text}\n${fence}`;
+};
+
 export const isNoReply = (answer: string | null | undefined): boolean => {
   if (!answer) return false;
   const bare = answer

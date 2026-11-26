@@ -150,6 +150,7 @@ const reset = async () => {
   await db.policyRuleV2.deleteMany({ where: { logicalId: { startsWith: P } } });
   await db.secret.deleteMany({ where: { name: { startsWith: P } } });
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
+  await db.runner.deleteMany({ where: { id: { startsWith: P } } });
   await db.onboardingSurvey.deleteMany({ where: { workspaceId: WORKSPACE } });
   await db.apiKey.deleteMany({ where: { key: ORG_KEY } });
   await db.organizationMember.deleteMany({
@@ -460,6 +461,109 @@ describe.skipIf(!PROOF_URL)(
       // returns the "[Context from your automated runs …]" block carrying
       // the agent's own hello.
       expect(bridge).toBeNull();
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "ACCEPTANCE: opening a thread wakes a parked agent before the message",
+  () => {
+    /** A parked sandbox (`stopped`, the idle-park state) for the agent. */
+    const parkSandbox = async (
+      agentId: string,
+      status: "stopped" | "failed" | "running" = "stopped",
+    ) => {
+      const runnerId = `${P}runner-${agentId}`;
+      await db.runner.create({
+        data: { id: runnerId, name: "runner", token: `rnr_${runnerId}` },
+      });
+      return db.sandbox.create({
+        data: {
+          agentId,
+          runnerId,
+          status,
+          homeRef: `home-${agentId}`,
+        },
+        select: { id: true },
+      });
+    };
+    const statusOf = async (sandboxId: string) =>
+      (
+        await db.sandbox.findUniqueOrThrow({
+          where: { id: sandboxId },
+          select: { status: true, wakeReason: true },
+        })
+      ).status;
+
+    it("a person opening a dashboard thread starts a parked agent waking (the start arm claims `unprovisioned`), without posting any turn", async () => {
+      const agentId = await seedAgent("open-wake", {
+        withKey: true,
+        onboarding: false,
+      });
+      const sandbox = await parkSandbox(agentId);
+
+      const { doorStatus, turns } = await openThread(agentId);
+
+      expect(doorStatus).toBe(200);
+      expect(turns).toEqual([]);
+      expect(await statusOf(sandbox.id)).toBe("unprovisioned");
+      // The idle clock is not touched: a look is not engagement, so a box
+      // nobody then writes to sleeps again on the ordinary idle window.
+      const row = await db.sandbox.findUniqueOrThrow({
+        where: { id: sandbox.id },
+        select: { lastActiveAt: true, lastEngagedAt: true, wakeReason: true },
+      });
+      expect(row.lastActiveAt).toBeNull();
+      expect(row.lastEngagedAt).toBeNull();
+      expect(row.wakeReason).toBeNull();
+    });
+
+    it("never wakes an agent that cannot run (no model key): the start would be refused and parked failed", async () => {
+      const agentId = await seedAgent("open-keyless", {
+        withKey: false,
+        onboarding: false,
+      });
+      const sandbox = await parkSandbox(agentId);
+
+      await openThread(agentId);
+
+      expect(await statusOf(sandbox.id)).toBe("stopped");
+    });
+
+    it("never bypasses the failed-start backoff, and never touches a box already up", async () => {
+      const failed = await seedAgent("open-failed", {
+        withKey: true,
+        onboarding: false,
+      });
+      const running = await seedAgent("open-running", {
+        withKey: true,
+        onboarding: false,
+      });
+      const failedBox = await parkSandbox(failed, "failed");
+      const runningBox = await parkSandbox(running, "running");
+
+      await openThread(failed);
+      await openThread(running);
+
+      expect(await statusOf(failedBox.id)).toBe("failed");
+      expect(await statusOf(runningBox.id)).toBe("running");
+    });
+
+    it("an API-KEY open wakes nothing: a program's open is not a person about to type", async () => {
+      const agentId = await seedAgent("open-apikey", {
+        withKey: true,
+        onboarding: false,
+      });
+      const sandbox = await parkSandbox(agentId);
+
+      currentSession = null;
+      const res = await app.request(
+        `/v1/agents/${agentId}/conversations/direct`,
+        { method: "PUT", headers: AUTH },
+      );
+
+      expect(res.status).toBe(200);
+      expect(await statusOf(sandbox.id)).toBe("stopped");
     });
   },
 );

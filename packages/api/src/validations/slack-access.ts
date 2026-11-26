@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { threadRefSchema } from "./recipients";
 
 /**
  * "Grant the agent access to act as you in Slack" requests: what
@@ -39,6 +40,9 @@ export const slackAccessPayloadSchema = z.object({
   conversationLabel: z.string().nullable(),
   /** A write request's message, sent once approved. */
   text: z.string().min(1).max(4000).optional(),
+  /** A write request's thread (send_message `thread`), posted into once
+   * approved. */
+  thread: threadRefSchema.optional(),
   /** The write came from the person's own "Send as me" pick: once they
    * connect, it is sent without another card (see ConversationSender). */
   consented: z.boolean().optional(),

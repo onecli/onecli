@@ -2,6 +2,7 @@ import type {
   EvalCheckKind,
   EvalOutcomeCounts,
   EvalQuestionInput,
+  EvalReport,
   EvalResultView,
   EvalRunStatus,
   EvalRunTrigger,
@@ -55,6 +56,18 @@ export interface EvalSchedule {
   nextFireAt: string;
   lastFiredAt: string | null;
   lastOutcome: EvalScheduleOutcome | null;
+  /** Whether results sent to "chat" reach the viewer's own chat (they go
+   * to whoever last saved the schedule). */
+  createdByViewer: boolean;
+  /** Where a scheduled run's results are sent; null = only in Results. */
+  report: EvalReport | null;
+}
+
+/** A channel the agent's bot is in (where results can be sent). */
+export interface EvalReportChannel {
+  ref: string;
+  name: string;
+  private: boolean;
 }
 
 export interface EvalsView {
@@ -87,11 +100,23 @@ export const archiveQuestion = (agentId: string, questionId: string) =>
 export const startRun = (agentId: string) =>
   apiPost<EvalRunSummary>(base(agentId, "/runs"), {});
 
+export const stopRun = (agentId: string, runId: string) =>
+  apiPost<{ id: string }>(
+    base(agentId, `/runs/${encodeURIComponent(runId)}/stop`),
+    {},
+  );
+
 export const getRun = (agentId: string, runId: string) =>
   apiGet<EvalRunDetail>(base(agentId, `/runs/${encodeURIComponent(runId)}`));
 
 export const saveSchedule = (agentId: string, input: EvalScheduleInput) =>
   apiPut<EvalSchedule>(base(agentId, "/schedule"), input);
+
+export const reportChannels = (agentId: string) =>
+  apiGet<EvalReportChannel[]>(base(agentId, "/schedule/channels"));
+
+export const runScheduleNow = (agentId: string) =>
+  apiPost<EvalRunSummary>(base(agentId, "/schedule/run"), {});
 
 export const deleteSchedule = (agentId: string) =>
   apiDelete(base(agentId, "/schedule"));

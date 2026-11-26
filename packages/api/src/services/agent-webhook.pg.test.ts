@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../testing/pg-proof";
+import { grantModelKey } from "../testing/model-key-grant";
 import { MAX_WEBHOOKS_PER_AGENT } from "../validations/webhooks";
 import { TURN_FAILED_RAW_ERROR_MESSAGE } from "../validations/conversation";
 
@@ -39,36 +40,11 @@ const seedAgent = async () => {
     },
     select: { id: true },
   });
-  // Door 1: an injectable LLM key (the cron proof's seed), so turns queue.
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WS,
-      name: `${P}key-${seq}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WS,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}key-${seq}`,
-      name: `${P}key-${seq}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId: agent.id }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
+  // Door 1: an injectable LLM key, so turns queue.
+  await grantModelKey(db, {
+    workspaceId: WS,
+    agentId: agent.id,
+    name: `${P}key-${seq}`,
   });
   const origin = await db.conversation.create({
     data: { agentId: agent.id, source: "web", direct: true, userId: OWNER },
@@ -445,6 +421,83 @@ describe.skipIf(!PROOF_URL)("agent webhooks", () => {
     expect(text).toContain("The run failed: The agent ran into an error");
     expect(text).not.toContain("no detail was reported");
     expect(text).not.toContain("invalid_request_error");
+  });
+
+  it("[no reply] delivers nothing on a done run, but a FAILED run with the same text still reports", async () => {
+    const closeWith = async (status: "done" | "failed") => {
+      const { agentId, originId } = await seedAgent();
+      const hook = await create(agentId, originId);
+      await hooks.receiveWebhook(
+        tokenOf(hook.url),
+        meetingEvent,
+        "application/json",
+      );
+      const conversation = await db.conversation.findFirstOrThrow({
+        where: { agentId, source: "webhook" },
+        select: { id: true },
+      });
+      const turn = await db.turn.findFirstOrThrow({
+        where: { conversationId: conversation.id },
+        select: { id: true },
+      });
+      await db.turnEvent.create({
+        data: {
+          conversationId: conversation.id,
+          turnId: turn.id,
+          seq: 1,
+          type: "text",
+          payload: { type: "text", text: "**[No Reply]**" },
+        },
+      });
+      const runnerId = `${P}runner-quiet-${status}`;
+      await db.runner.create({
+        data: {
+          id: runnerId,
+          name: "quiet",
+          token: `rnr_${P}quiet-${status}`,
+          capabilities: {},
+        },
+      });
+      const sandbox = await db.sandbox.create({
+        data: { agentId, runnerId, status: "running" },
+        select: { id: true },
+      });
+      await db.turn.update({
+        where: { id: turn.id },
+        data: { status: "running", startedAt: new Date() },
+      });
+      try {
+        await turns.finishTurn({
+          reporter: { runnerId, sandboxId: sandbox.id },
+          conversationId: conversation.id,
+          turnId: turn.id,
+          status,
+        });
+      } finally {
+        await db.sandbox.delete({ where: { id: sandbox.id } });
+        await db.runner.delete({ where: { id: runnerId } });
+      }
+      return {
+        outcome: (
+          await db.agentWebhook.findUniqueOrThrow({
+            where: { id: hook.id },
+          })
+        ).lastOutcome,
+        deliveries: await db.turn.findMany({
+          where: { conversationId: originId, source: "webhook" },
+          select: { id: true },
+        }),
+      };
+    };
+
+    // The token tolerates case and markdown emphasis, as in channels.
+    const quiet = await closeWith("done");
+    expect(quiet.outcome).toBe("ok");
+    expect(quiet.deliveries).toHaveLength(0);
+
+    const failed = await closeWith("failed");
+    expect(failed.outcome).toBe("failed");
+    expect(failed.deliveries).toHaveLength(1);
   });
   it("webhook_runs and the runs list narrow to ONE webhook, fenced to its workspace", async () => {
     const { agentId, originId } = await seedAgent();

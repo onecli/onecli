@@ -16,7 +16,7 @@ import type { MintedSshCertificate } from "@/lib/api/types";
 const shellSingleQuote = (value: string): string =>
   `'${value.replaceAll("'", `'\\''`)}'`;
 
-export const SSH_CERT_PATH = "~/.ssh/id_ed25519-cert.pub";
+const SSH_CERT_PATH = "~/.ssh/id_ed25519-cert.pub";
 
 export const buildSshConnectCommand = (
   minted: Pick<MintedSshCertificate, "certificate" | "user" | "host" | "port">,

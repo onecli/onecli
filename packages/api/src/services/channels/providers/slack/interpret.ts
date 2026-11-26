@@ -1,4 +1,8 @@
-import { groupThreadId, userMentionToken } from "@onecli/channels/slack";
+import {
+  directThreadId,
+  groupThreadId,
+  userMentionToken,
+} from "@onecli/channels/slack";
 import { z } from "zod";
 import type { ChannelFileRef, SpeakerKind } from "../../types";
 import { messageText } from "./table-text";
@@ -176,6 +180,30 @@ const agentSessionStoppedEvent = z.object({
   user: z.string().min(1),
 });
 
+/**
+ * A reaction on a message (docs.slack.dev/reference/events/reaction_added,
+ * checked 2026-11-09; needs `reactions:read`). Parsed strictly in its
+ * branch below, like the Stop: its loose fallback in the union also matches
+ * the type name, and a reaction naming no message names nothing to read.
+ * `item_user` is the reacted message's author, and Slack OMITS it for a
+ * post no user authored: the agent's own answers posted with its avatar
+ * (`icon_url`) come back as `bot_message` with no user. `channel_type`
+ * rides Slack's example payload but not its item reference, so it is read
+ * when present and never required.
+ */
+const reactionAddedEvent = z.object({
+  type: z.literal("reaction_added"),
+  user: z.string().min(1),
+  reaction: z.string().min(1),
+  item_user: z.string().optional(),
+  item: z.object({
+    type: z.literal("message"),
+    channel: z.string().min(1),
+    ts: z.string().min(1),
+    channel_type: z.string().optional(),
+  }),
+});
+
 /** One event as it arrives — from the HTTP envelope or the socket payload. */
 export const slackEventSchema = z.union([
   messageEvent,
@@ -210,14 +238,19 @@ export type SlackDoorCall =
        * WHERE THIS MESSAGE WAS ASKED: the DM thread's root when the person
        * typed inside a thread, else null for the top-level DM.
        *
-       * A DM is ONE conversation (§3.18: the same row their web chat reads),
-       * and that stays true — threads inside it are a presentation of the
-       * same exchange, not separate contexts. What they DO change is the
-       * address the answer belongs at: a reply typed in a thread is owed an
-       * answer in that thread, not at the bottom of the DM where nobody is
-       * looking.
+       * The DM's top level is the person's ONE direct conversation (§3.18:
+       * the same row their web chat reads). A thread opened inside it is
+       * its own conversation (`threadExternalId`), run beside the top
+       * level; the answer is owed in that thread either way.
        */
       replyThreadTs: string | null;
+      /**
+       * The THREAD's own address (`directThreadId`), when the person typed
+       * inside one: the conversation and link key of that thread, distinct
+       * from the DM's (`externalThreadId`, the bare IM). Null at the top
+       * level.
+       */
+      threadExternalId: string | null;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
     }
@@ -284,6 +317,21 @@ export type SlackDoorCall =
       externalUserId: string;
       channel: string;
       threadTs: string;
+    }
+  | {
+      /** A person reacted to a message that MAY be the agent's own (Slack
+       * names no author for an icon-posted answer, so the dispatcher
+       * re-reads the message to decide). It enters through the DM or
+       * joined-thread door as a short note, never as a new conversation. */
+      door: "reaction";
+      externalUserId: string;
+      channel: string;
+      /** Whether `channel` is the person's DM with the agent. */
+      inDm: boolean;
+      /** The reacted-to message's ts. */
+      itemTs: string;
+      /** Slack's emoji name, without colons (e.g. "+1::skin-tone-2"). */
+      reaction: string;
     }
   | { door: "ignore"; reason: string };
 
@@ -401,6 +449,41 @@ export const interpretSlackEvent = (
     };
   }
 
+  if (event.type === "reaction_added") {
+    const parsed = reactionAddedEvent.safeParse(event);
+    if (!parsed.success) {
+      return { door: "ignore", reason: "reaction:not-a-message" };
+    }
+    const { user, reaction, item_user: author, item } = parsed.data;
+    // Our own identity unknown: the "seen" receipt the agent puts on every
+    // message could not be told from a person's reaction.
+    if (!ctx.botUserId) {
+      return { door: "ignore", reason: "reaction:unverifiable-self" };
+    }
+    if (user === ctx.botUserId) return { door: "ignore", reason: "self" };
+    if (isSlackSystemUser(user)) {
+      return { door: "ignore", reason: "slack-system-user" };
+    }
+    // A message some PERSON wrote is never the agent's: other people's
+    // messages stay private. No author at all is how the agent's own
+    // icon-posted answer arrives, so that one goes on to the re-read.
+    if (author !== undefined && author !== ctx.botUserId) {
+      return { door: "ignore", reason: "reaction:not-on-agent-message" };
+    }
+    return {
+      door: "reaction",
+      externalUserId: user,
+      channel: item.channel,
+      // Slack's own label when it sends one; otherwise its id convention
+      // (a DM's id starts with D). A proactive DM has no link row to ask.
+      inDm: item.channel_type
+        ? item.channel_type === "im"
+        : item.channel.startsWith("D"),
+      itemTs: item.ts,
+      reaction,
+    };
+  }
+
   if (event.type === "app_mention") {
     const mention = event as z.infer<typeof appMentionEvent>;
     const speaker = resolveSpeaker(mention, ctx);
@@ -460,12 +543,14 @@ export const interpretSlackEvent = (
         text: messageText(message),
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
-        // The thread the person actually typed in, when they typed in one.
-        // The CONVERSATION is still the DM's single direct row — only the
-        // reply address narrows — so a threaded DM keeps one continuous
-        // context and simply answers where it was asked. Before this, every
-        // DM thread reply was answered at the bottom of the DM instead.
+        // The thread the person actually typed in, when they typed in one:
+        // the answer goes there, and the thread is its own conversation
+        // (`threadExternalId`), opened off the DM's direct row and run
+        // beside it. The top level keeps the one direct row.
         replyThreadTs: message.thread_ts ?? null,
+        threadExternalId: message.thread_ts
+          ? directThreadId(message.channel, message.thread_ts)
+          : null,
         messageTs: message.ts,
       };
     }

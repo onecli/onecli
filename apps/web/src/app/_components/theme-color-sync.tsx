@@ -3,9 +3,11 @@
 import { useEffect } from "react";
 import { useTheme } from "next-themes";
 
+// `--background` in @onecli/ui's globals.css: on a phone the page panel
+// fills the screen, so the browser chrome continues its top bar.
 const THEME_COLORS = {
-  light: "#fbfbfb",
-  dark: "#1f1e1d",
+  light: "#fdfbf7",
+  dark: "#1a1917",
 } as const;
 
 export const ThemeColorSync = () => {

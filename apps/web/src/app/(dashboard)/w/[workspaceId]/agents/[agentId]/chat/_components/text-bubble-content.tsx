@@ -1,6 +1,7 @@
 "use client";
 
 import { BubbleContent } from "@onecli/ui/components/bubble";
+import { cn } from "@onecli/ui/lib/utils";
 import { messageDirection } from "@/lib/markdown/text-direction";
 
 /**
@@ -12,10 +13,16 @@ import { messageDirection } from "@/lib/markdown/text-direction";
  * Text only, never markdown: the markdown surface is the agent's answer
  * (ChatMarkdown, with its own no-raw-HTML posture).
  */
-export const TextBubbleContent = ({ text }: { text: string }) => (
+export const TextBubbleContent = ({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) => (
   <BubbleContent
     dir={messageDirection(text)}
-    className="text-sm break-words whitespace-pre-wrap"
+    className={cn("text-sm break-words whitespace-pre-wrap", className)}
   >
     {text}
   </BubbleContent>

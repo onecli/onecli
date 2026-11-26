@@ -2,6 +2,7 @@ import {
   apiGet,
   apiPatch,
   apiPost,
+  apiPostNoContent,
   apiDelete,
   refusal,
   workspaceScope,
@@ -12,6 +13,7 @@ import type {
   AgentDetail,
   AgentEffort,
   AgentModels,
+  AgentSandbox,
   CreatedAgent,
   CreateAgentInput,
   MintedSshCertificate,
@@ -57,10 +59,13 @@ export const update = (
     model?: string | null;
     effort?: AgentEffort | null;
   },
+  // The onboarding rename targets a workspace the URL does not carry.
+  options: { workspaceId?: string } = {},
 ) =>
   apiPatch<{ success: boolean }>(
     `/v1/agents/${encodeURIComponent(agentId)}`,
     input,
+    workspaceScope(options.workspaceId),
   );
 
 /**
@@ -71,11 +76,17 @@ export const update = (
 export const uploadImage = async (
   agentId: string,
   file: Blob,
+  // The onboarding avatar targets a workspace the URL does not carry.
+  options: { workspaceId?: string } = {},
 ): Promise<{ imageUrl: string }> => {
   const res = await apiUpload(
     `/v1/agents/${encodeURIComponent(agentId)}/image`,
     file,
-    { method: "PUT", contentType: file.type },
+    {
+      method: "PUT",
+      contentType: file.type,
+      workspaceId: options.workspaceId,
+    },
   );
   if (!res.ok) throw await refusal(res);
   return res.json();
@@ -92,6 +103,25 @@ export const restart = (agentId: string) =>
   apiPost<{ success: boolean }>(
     `/v1/agents/${encodeURIComponent(agentId)}/restart`,
     {},
+  );
+
+/**
+ * A person is heading for this agent: start a parked machine now, so what
+ * they do next finds it awake. A hint (204, idempotent, best-effort on the
+ * server), never something to await before navigating.
+ */
+export const wake = (agentId: string) =>
+  apiPostNoContent(`/v1/agents/${encodeURIComponent(agentId)}/wake`);
+
+/** The machine's lifecycle status (`null` for a BYO agent). */
+export const sandbox = (
+  agentId: string,
+  // The onboarding boot screen reads it from outside any workspace URL.
+  options: { workspaceId?: string } = {},
+) =>
+  apiGet<AgentSandbox>(
+    `/v1/agents/${encodeURIComponent(agentId)}/sandbox`,
+    workspaceScope(options.workspaceId),
   );
 
 /**

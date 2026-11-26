@@ -61,7 +61,7 @@ export const agentRunRoutes = () => {
     const workspaceId = requireWorkspaceId(a);
     const agentId = c.req.param("agentId");
     const turnId = c.req.param("turnId");
-    const { run, viewedOthersDirect } = await getRun(
+    const { run, viewedOthersPrivateThread } = await getRun(
       workspaceId,
       a.organizationId,
       a.userId,
@@ -71,7 +71,7 @@ export const agentRunRoutes = () => {
     // Opening a colleague's private run is the one audited read. It is a
     // condition of access: if the record cannot be written, nothing is
     // released. IDs only, never the question.
-    if (viewedOthersDirect) {
+    if (viewedOthersPrivateThread) {
       await recordAuditEvent(
         {
           workspaceId,

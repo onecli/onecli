@@ -107,8 +107,9 @@ export const BillingContent = ({
       </div>
 
       <div
+        id="plans"
         className={cn(
-          "grid grid-cols-1 gap-4 md:grid-cols-2",
+          "grid scroll-mt-6 grid-cols-1 gap-4 md:grid-cols-2",
           plans.length >= 4 ? "xl:grid-cols-4" : "xl:grid-cols-3",
         )}
       >

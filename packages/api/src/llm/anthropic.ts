@@ -41,11 +41,15 @@ export const anthropic: LlmProvider = {
   id: "anthropic",
   label: "Anthropic",
   order: 0,
-  // Sonnet, per the standing default. Verified accepted by the harness against
-  // a placeholder key (the sandbox's actual condition) — a default that the
-  // harness rejects would degrade every agent nobody has configured, which is
-  // most of them.
-  defaultModel: "claude-sonnet-5",
+  // Sonnet, per the standing default: the newest one. The runtime accepts any
+  // id the account's own model list carries, so a new model needs no runtime
+  // bump. Until that list has loaded the runtime knows only its built-in
+  // names, and a default it refuses degrades to the runtime's own default
+  // with a visible notice, never a failed turn.
+  defaultModel: "claude-sonnet-5-5",
+  // Low thinking for the default model: fast, cheap turns for the agents
+  // nobody has tuned. A user picks higher in the Models card.
+  defaultEffort: "low",
   efforts: [
     { id: "low", label: "Low" },
     { id: "medium", label: "Medium" },
@@ -59,7 +63,6 @@ export const anthropic: LlmProvider = {
   // bearer: the `anthropic-beta: oauth-…` header the Messages call sends with
   // it (`services/llm-direct-call.ts`) is deprecated on this endpoint.
   // A token the endpoint refuses degrades to the pinned list like any failure.
-  canList: () => true,
   catalogHeaders: (credential, authMode) => ({
     "anthropic-version": "2023-06-01",
     ...(authMode === "oauth"
@@ -69,14 +72,17 @@ export const anthropic: LlmProvider = {
   parseCatalog,
   isSelectable: (id) => id.startsWith("claude-"),
   labelFor: humanize,
-  // The offline answer only — the live list is the real one. Every id here was
-  // verified accepted by the harness, because this list is what a user picks
-  // from when the provider cannot be reached.
+  // The offline answer only — the live list is the real one. This list is what
+  // a user picks from when the provider cannot be reached, newest first; an id
+  // the account cannot run degrades to the runtime's default with a notice.
   fallback: [
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
-    "claude-opus-4-6",
     "claude-sonnet-4-6",
     "claude-haiku-4-5",
   ],

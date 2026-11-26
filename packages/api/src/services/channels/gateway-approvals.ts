@@ -15,10 +15,27 @@ import { getGatewayInternalUrl } from "../../lib/env";
 
 const CALL_TIMEOUT_MS = 10_000;
 
-const decisionResponse = z.object({ success: z.boolean().optional() });
+const decisionResponse = z.object({
+  success: z.boolean().optional(),
+  // The "Approve similar" window the decision opened. A malformed value
+  // only loses the "until" line on the card; the decision stands.
+  similar: z
+    .object({ label: z.string(), until: z.iso.datetime({ offset: true }) })
+    .optional()
+    .catch(undefined),
+});
+
+/** The "Approve similar" window a decision opened: what it covers, and when
+ * it closes (RFC 3339). */
+export type OpenedSimilarWindow = NonNullable<
+  z.infer<typeof decisionResponse>["similar"]
+>;
 
 export type GatewayDecisionResult =
-  | { outcome: "decided" }
+  | {
+      outcome: "decided";
+      similar?: OpenedSimilarWindow;
+    }
   /** 410 — someone else (or the timeout) got there first. Treated as settled,
    * the same way the web client does. */
   | { outcome: "already_settled" }
@@ -31,6 +48,8 @@ export const decideApprovalAtGateway = async (input: {
   decision: "approve" | "deny";
   /** Why a deny happened, when it was not a reviewer's plain no. */
   reason?: "superseded";
+  /** `similar`: approve this and open the window the card offered. */
+  scope?: "similar";
 }): Promise<GatewayDecisionResult> => {
   const response = await fetch(
     `${getGatewayInternalUrl()}/v1/approvals/${encodeURIComponent(input.approvalId)}/decision`,
@@ -43,6 +62,7 @@ export const decideApprovalAtGateway = async (input: {
       body: JSON.stringify({
         decision: input.decision,
         ...(input.reason && { reason: input.reason }),
+        ...(input.scope && { scope: input.scope }),
       }),
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     },
@@ -56,8 +76,8 @@ export const decideApprovalAtGateway = async (input: {
   if (!response.ok) {
     throw new Error(`gateway decision answered HTTP ${response.status}`);
   }
-  decisionResponse.parse(await response.json());
-  return { outcome: "decided" };
+  const { similar } = decisionResponse.parse(await response.json());
+  return { outcome: "decided", ...(similar && { similar }) };
 };
 
 /** The fields of a held approval the control plane reads. Everything else

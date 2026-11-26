@@ -1,4 +1,5 @@
 import {
+  CHANNEL_LIVENESS,
   SESSION_RESUME_BUDGET,
   workItemSchema,
   type SequencedFrame,
@@ -72,6 +73,13 @@ export interface WsTransportOptions {
    * Default is generous but FINITE — see the constant below.
    */
   maxAttempts?: number;
+  /**
+   * The channel liveness law (`CHANNEL_LIVENESS`): how often to beat while
+   * a session is held, and how long to go without any ack from the runner
+   * before the socket is declared dead and closed from this side.
+   * Injectable for tests; defaults to the protocol's.
+   */
+  liveness?: { intervalMs: number; timeoutMs: number };
 }
 
 /** A promise plus the handles to settle it — one queue slot for `incoming`. */
@@ -95,6 +103,7 @@ export const createWsTransport = (
     maxBackoffMs = SESSION_RESUME_BUDGET.maxBackoffMs,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     random = Math.random,
+    liveness = CHANNEL_LIVENESS,
   } = options;
 
   const separator = url.includes("?") ? "&" : "?";
@@ -193,6 +202,7 @@ export const createWsTransport = (
 
   /** Drop every acked frame: the runner has applied them. */
   const acknowledge = (ack: number) => {
+    lastAckAt = Date.now();
     let acked = 0;
     while (acked < outbound.length) {
       const seq = outbound[acked]!.seq;
@@ -200,6 +210,63 @@ export const createWsTransport = (
       acked += 1;
     }
     if (acked > 0) outbound.splice(0, acked);
+  };
+
+  /**
+   * THE LIVENESS WATCHDOG. A half-open socket delivers no `close` and no
+   * `error`, and the WHATWG client exposes no ping event, so without this
+   * a supervisor whose runner vanished without a FIN would sit on a dead
+   * socket forever (well, until the runner's reconcile reported the
+   * container dead; seen live). While a session is held: beat every
+   * `intervalMs` (a sequenced frame the runner acks like any other), and
+   * if NO ack of any kind arrives for `timeoutMs`, close the socket from
+   * here and reconnect at once. Only with a session: a bare `heartbeat`
+   * would fail an old runner's parse, and a session-less socket has no
+   * ack law to wait on.
+   */
+  let lastAckAt = 0;
+  let livenessTimer: ReturnType<typeof setInterval> | undefined;
+  const stopLiveness = () => {
+    if (livenessTimer) clearInterval(livenessTimer);
+    livenessTimer = undefined;
+  };
+  const startLiveness = () => {
+    stopLiveness();
+    lastAckAt = Date.now();
+    livenessTimer = setInterval(() => {
+      const ws = socket;
+      if (closed || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastAckAt > liveness.timeoutMs) {
+        log("warn", "runner channel silent; closing it to redial", {
+          silentMs: Date.now() - lastAckAt,
+        });
+        stopLiveness();
+        // The beats this dead socket swallowed carry nothing: a replay of
+        // them on the next socket would be pure noise ahead of the frames
+        // the backlog exists for. Their seqs stay spent (the cursor law
+        // tolerates gaps: a seq the runner never saw is simply skipped).
+        for (let i = outbound.length - 1; i >= 0; i -= 1) {
+          if (outbound[i]!.raw.includes('"kind":"heartbeat"'))
+            outbound.splice(i, 1);
+        }
+        // Close from this side, then reconnect WITHOUT waiting for the
+        // close event: on a half-open socket it comes only after the
+        // library's own timeout, if at all. The superseded socket's late
+        // events are ignored (`isCurrent`).
+        try {
+          ws.close();
+        } catch {
+          // Already closing: nothing to do.
+        }
+        socket = undefined;
+        scheduleReconnect();
+        return;
+      }
+      transportSend({ kind: "heartbeat" });
+    }, liveness.intervalMs);
+    // Never the thing keeping a finished container alive; the reconnect
+    // timer owns that job.
+    livenessTimer.unref?.();
   };
 
   /**
@@ -275,6 +342,7 @@ export const createWsTransport = (
       // With a session, the replay waits for the runner's hand-off (its
       // cursor decides what to resend); without one, drain as before.
       if (session === undefined) flush();
+      else startLiveness();
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
@@ -305,6 +373,7 @@ export const createWsTransport = (
         // replays. The one place the cursor is set.
         acknowledge(item.data.ack);
         sentUpTo = item.data.ack;
+        if (!resumed) startLiveness();
         log(
           "info",
           resumed ? "runner session resumed" : "runner session held",
@@ -321,7 +390,10 @@ export const createWsTransport = (
         return;
       }
       deliver(item.data);
-      if (item.data.kind === "shutdown") closed = true;
+      if (item.data.kind === "shutdown") {
+        closed = true;
+        stopLiveness();
+      }
     });
 
     // A failed connect may raise only this — no `close` follows — so the
@@ -329,17 +401,60 @@ export const createWsTransport = (
     ws.addEventListener("error", () => {
       if (!isCurrent()) return;
       log("warn", "runner channel error");
+      stopLiveness();
       scheduleReconnect();
     });
 
     ws.addEventListener("close", () => {
       if (!isCurrent()) return;
+      stopLiveness();
       if (closed) {
         deliver(null);
         return;
       }
       scheduleReconnect();
     });
+  };
+
+  const transportSend = (message: SupervisorMessage): void => {
+    // Liveness heartbeats are only worth anything fresh: a beat that would
+    // sit in a dead channel's backlog is stale on arrival, and a long
+    // outage's worth of them would flood the runner's report queue on
+    // reconnect — racing the very `turn.result` frames the backlog exists
+    // to preserve. Every other kind still buffers; the next timer tick
+    // re-beats within a minute of the channel coming back.
+    //
+    // Port stream frames (sandbox ports) are the same: the runner tears
+    // every stream of a sandbox down the moment its channel drops, so a
+    // replayed `port.*` frame names a stream nobody holds any more, and
+    // a busy preview would fill the backlog with byte chunks that crowd
+    // out the turn results it exists for.
+    if (
+      (message.kind === "progress" ||
+        message.kind === "heartbeat" ||
+        message.kind.startsWith("port.")) &&
+      (!socket || socket.readyState !== WebSocket.OPEN)
+    ) {
+      return;
+    }
+    if (session === undefined) {
+      outbound.push({ seq: undefined, raw: JSON.stringify(message) });
+    } else {
+      nextSeq += 1;
+      const frame: SequencedFrame = { seq: nextSeq, message };
+      outbound.push({ seq: nextSeq, raw: JSON.stringify(frame) });
+    }
+    if (outbound.length > MAX_OUTBOUND_MESSAGES) {
+      const dropped = outbound.length - MAX_OUTBOUND_MESSAGES;
+      outbound.splice(0, dropped);
+      if (!warnedOutbound) {
+        warnedOutbound = true;
+        log("warn", "control channel backlog full; dropping oldest events", {
+          cap: MAX_OUTBOUND_MESSAGES,
+        });
+      }
+    }
+    flush();
   };
 
   connect();
@@ -362,44 +477,7 @@ export const createWsTransport = (
       }
     },
 
-    send(message: SupervisorMessage): void {
-      // Liveness heartbeats are only worth anything fresh: a beat that would
-      // sit in a dead channel's backlog is stale on arrival, and a long
-      // outage's worth of them would flood the runner's report queue on
-      // reconnect — racing the very `turn.result` frames the backlog exists
-      // to preserve. Every other kind still buffers; the next timer tick
-      // re-beats within a minute of the channel coming back.
-      //
-      // Port stream frames (sandbox ports) are the same: the runner tears
-      // every stream of a sandbox down the moment its channel drops, so a
-      // replayed `port.*` frame names a stream nobody holds any more, and
-      // a busy preview would fill the backlog with byte chunks that crowd
-      // out the turn results it exists for.
-      if (
-        (message.kind === "progress" || message.kind.startsWith("port.")) &&
-        (!socket || socket.readyState !== WebSocket.OPEN)
-      ) {
-        return;
-      }
-      if (session === undefined) {
-        outbound.push({ seq: undefined, raw: JSON.stringify(message) });
-      } else {
-        nextSeq += 1;
-        const frame: SequencedFrame = { seq: nextSeq, message };
-        outbound.push({ seq: nextSeq, raw: JSON.stringify(frame) });
-      }
-      if (outbound.length > MAX_OUTBOUND_MESSAGES) {
-        const dropped = outbound.length - MAX_OUTBOUND_MESSAGES;
-        outbound.splice(0, dropped);
-        if (!warnedOutbound) {
-          warnedOutbound = true;
-          log("warn", "control channel backlog full; dropping oldest events", {
-            cap: MAX_OUTBOUND_MESSAGES,
-          });
-        }
-      }
-      flush();
-    },
+    send: transportSend,
 
     close(): Promise<void> {
       // Everything `send` was given has already reached the socket — it writes
@@ -411,6 +489,7 @@ export const createWsTransport = (
       // supervisor closes after its in-flight turns have reported, so the
       // `unhealthy` report and a dying turn's result are already out.
       closed = true;
+      stopLiveness();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;

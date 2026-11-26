@@ -45,6 +45,14 @@ import { createApiApp } from "../app";`;
     });
   });
 
+  it("the shared model-key grant is a load-safe import", () => {
+    const source = `import { grantModelKey } from "../testing/model-key-grant.js";\n${pinInBeforeAll}`;
+    expect(classifyPgSuite(source)).toEqual({
+      invariant: true,
+      reason: "pin-before-dynamic-imports",
+    });
+  });
+
   it("a type-only import never counts against the pin", () => {
     const source = `import type { db } from "@onecli/db";\n${pinInBeforeAll}`;
     expect(classifyPgSuite(source).invariant).toBe(true);

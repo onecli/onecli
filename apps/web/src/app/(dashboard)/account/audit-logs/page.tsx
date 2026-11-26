@@ -1,1 +1,1 @@
-export { default } from "@/lib/account/audit-logs-page";
+export { default, metadata } from "@/lib/account/account-page";

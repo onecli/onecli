@@ -27,26 +27,18 @@ const signJwt = (privateKey: string, clientEmail: string): string => {
   return `${unsigned}.${signature}`;
 };
 
-const exchangeServiceAccount = async (
-  fields: Record<string, string>,
-): Promise<OAuthExchangeResult> => {
-  const { privateKey, clientEmail, projectId } = fields;
-  if (!privateKey || !clientEmail) {
-    throw new Error("Service account email and private key are required");
-  }
-  if (!projectId) {
-    throw new Error("GCP Project ID is required");
-  }
-
-  const jwt = signJwt(privateKey, clientEmail);
-
+/**
+ * POST a grant to Google's token endpoint. An HTTP error throws Google's
+ * `error_description`, or `<httpErrorPrefix>: <status>` when there is none.
+ */
+const requestGoogleToken = async (
+  grant: Record<string, string>,
+  httpErrorPrefix: string,
+): Promise<{ accessToken: string; expiresAt: number | undefined }> => {
   const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
+    body: new URLSearchParams(grant),
   });
 
   if (!tokenRes.ok) {
@@ -54,8 +46,7 @@ const exchangeServiceAccount = async (
       error_description?: string;
     };
     throw new Error(
-      body.error_description ??
-        `Service account token exchange failed: ${tokenRes.status}`,
+      body.error_description ?? `${httpErrorPrefix}: ${tokenRes.status}`,
     );
   }
 
@@ -76,10 +67,34 @@ const exchangeServiceAccount = async (
     ? Math.floor(Date.now() / 1000) + tokenData.expires_in
     : undefined;
 
+  return { accessToken: tokenData.access_token, expiresAt };
+};
+
+const exchangeServiceAccount = async (
+  fields: Record<string, string>,
+): Promise<OAuthExchangeResult> => {
+  const { privateKey, clientEmail, projectId } = fields;
+  if (!privateKey || !clientEmail) {
+    throw new Error("Service account email and private key are required");
+  }
+  if (!projectId) {
+    throw new Error("GCP Project ID is required");
+  }
+
+  const jwt = signJwt(privateKey, clientEmail);
+
+  const { accessToken, expiresAt } = await requestGoogleToken(
+    {
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    },
+    "Service account token exchange failed",
+  );
+
   return {
     credentials: {
       type: "service_account",
-      access_token: tokenData.access_token,
+      access_token: accessToken,
       private_key: privateKey,
       client_email: clientEmail,
       project_id: projectId,
@@ -101,45 +116,18 @@ const exchangeAuthorizedUser = async (
     throw new Error("Refresh token, client ID, and client secret are required");
   }
 
-  const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
+  const { accessToken, expiresAt } = await requestGoogleToken(
+    {
       client_id: clientId,
       client_secret: clientSecret,
       refresh_token: refreshToken,
       grant_type: "refresh_token",
-    }),
-  });
-
-  if (!tokenRes.ok) {
-    const body = (await tokenRes.json().catch(() => ({}))) as {
-      error_description?: string;
-    };
-    throw new Error(
-      body.error_description ?? `Token refresh failed: ${tokenRes.status}`,
-    );
-  }
-
-  const tokenData = (await tokenRes.json()) as {
-    access_token?: string;
-    expires_in?: number;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (tokenData.error || !tokenData.access_token) {
-    throw new Error(
-      tokenData.error_description ?? "Failed to obtain access token",
-    );
-  }
-
-  const expiresAt = tokenData.expires_in
-    ? Math.floor(Date.now() / 1000) + tokenData.expires_in
-    : undefined;
+    },
+    "Token refresh failed",
+  );
 
   const credentials: Record<string, unknown> = {
-    access_token: tokenData.access_token,
+    access_token: accessToken,
     refresh_token: refreshToken,
     token_type: "Bearer",
     expires_at: expiresAt,
@@ -148,7 +136,7 @@ const exchangeAuthorizedUser = async (
   let metadata: Record<string, unknown> = { quotaProjectId };
 
   const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (userRes.ok) {
     const user = (await userRes.json()) as {

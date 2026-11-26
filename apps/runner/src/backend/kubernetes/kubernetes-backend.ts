@@ -8,6 +8,7 @@ import {
   type SandboxSpec,
 } from "../types";
 import { labelSelector, type KubeClient } from "./kube-client";
+import { createInjectablePathGuard } from "../injectable-path";
 import { log } from "../../log";
 
 /**
@@ -104,41 +105,21 @@ const sleep = (ms: number): Promise<void> =>
  * in, the same conservative allowlist the Docker backend enforces on the
  * identical payload. `/onecli-init` is this substrate's own read-only mount.
  */
-const FORBIDDEN_PATH_PREFIXES = [
-  `${HOME_MOUNT}/`,
-  `${INIT_MOUNT}/`,
-  "/usr/",
-  "/bin/",
-  "/sbin/",
-  "/proc/",
-  "/sys/",
-  "/dev/",
-  "/etc/",
-  "/var/run/",
-];
-
-export const assertInjectablePath = (containerPath: string): void => {
-  if (
-    containerPath.length > 300 ||
-    !/^\/[A-Za-z0-9._/-]+$/.test(containerPath)
-  ) {
-    throw new Error(
-      `payload file path is not an absolute, conservative path: ${containerPath}`,
-    );
-  }
-  if (containerPath.split("/").includes("..")) {
-    throw new Error(`payload file path contains "..": ${containerPath}`);
-  }
-  if (
-    containerPath === HOME_MOUNT ||
-    containerPath === INIT_MOUNT ||
-    FORBIDDEN_PATH_PREFIXES.some((prefix) => containerPath.startsWith(prefix))
-  ) {
-    throw new Error(
-      `payload file path targets the durable home or a system directory: ${containerPath}`,
-    );
-  }
-};
+export const assertInjectablePath = createInjectablePathGuard({
+  exact: [HOME_MOUNT, INIT_MOUNT],
+  prefixes: [
+    `${HOME_MOUNT}/`,
+    `${INIT_MOUNT}/`,
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+    "/etc/",
+    "/var/run/",
+  ],
+});
 
 /** POSIX single-quote: close, escaped quote, reopen. */
 const sq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;

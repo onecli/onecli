@@ -1,11 +1,17 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@onecli/ui/components/button";
-import { Skeleton } from "@onecli/ui/components/skeleton";
 import { MAX_JOINING_FOLLOW_UPS } from "@onecli/api/validations/conversation";
 import { queryKeys } from "@/lib/api/keys";
 import { ApiError } from "@/lib/api/client";
@@ -22,13 +28,14 @@ import {
   type OutgoingMessage,
 } from "@/hooks/use-conversations";
 import { useUploadAttachment } from "@/hooks/use-attachments";
+import { ChatSendContext, type ChatSend } from "@/lib/chat/chat-send";
 import { useConversationTranscript } from "@/hooks/use-conversation-transcript";
 import { useHostedAvailability } from "@/hooks/use-hosted-availability";
 import { useHasDesktop } from "@/hooks/use-has-desktop";
 import { usePortalHost } from "@/hooks/use-portal-host";
 import dynamic from "next/dynamic";
-import { usePathname, useRouter } from "next/navigation";
-import { agentComputerPath, agentSectionPath } from "@/lib/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { agentComputerPath, mergedSectionPath } from "@/lib/navigation";
 import type { DesktopDockHandle } from "@/ee/desktop/desktop-dock";
 import { useAgentPageAgent } from "../../_components/agent-page-frame";
 import { EmptyState } from "../../_components/empty-state";
@@ -37,21 +44,15 @@ import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_com
 import type { TurnsPage } from "@/lib/api";
 import { ChatThread } from "./chat-thread";
 import { Composer, type ComposerHandle } from "./composer";
+import { ComposerSkeleton } from "./composer-skeleton";
 import { FileDropZone } from "./file-drop-zone";
 import { OfflineBanner } from "./offline-banner";
+import { ThreadSkeleton } from "./thread-skeleton";
 
 // The agent's hosted desktop (hosted platform only). Lazy, so its code never
 // enters a self-host's static graph; rendered only on the cloud edition.
 const DesktopDock = dynamic(() =>
   import("@/ee/desktop/desktop-dock").then((m) => m.DesktopDock),
-);
-
-const ThreadSkeleton = () => (
-  <div className="flex-1 space-y-4 p-6">
-    <Skeleton className="ms-auto h-10 w-1/2 rounded-lg" />
-    <Skeleton className="h-16 w-2/3 rounded-lg" />
-    <Skeleton className="ms-auto h-10 w-1/3 rounded-lg" />
-  </div>
 );
 
 /**
@@ -82,6 +83,15 @@ export const DirectThreadSection = () => {
   const dock = useRef<DesktopDockHandle>(null);
   /** Files dropped anywhere on the pane stage in the composer. */
   const composer = useRef<ComposerHandle>(null);
+  // `?draft=` opens the chat with a message ready to finish and send (the
+  // schedule dialog's "Change" link). From the router, not window.location:
+  // on an in-app navigation the first render still sees the old URL there.
+  // Read once, then dropped from the URL so a reload never re-seeds it.
+  const searchParams = useSearchParams();
+  const [draft] = useState(() => searchParams.get("draft") ?? undefined);
+  useEffect(() => {
+    if (draft) router.replace(pathname);
+  }, [draft, pathname, router]);
   // The chat renders into this node, never straight into the frame: the
   // theater moves the node, not the React subtree, so draft text, staged
   // files and scroll state survive.
@@ -107,10 +117,28 @@ export const DirectThreadSection = () => {
   // as this send does: a failed or reset send drops it, so history and other
   // tabs never pin.
   const [sentFresh, setSentFresh] = useState(false);
-  const send = (outgoing: OutgoingMessage, fresh: boolean) => {
-    setSentFresh(fresh);
-    sendMessage.mutate(outgoing);
-  };
+  const { mutate: mutateSend } = sendMessage;
+  const send = useCallback(
+    (outgoing: OutgoingMessage, fresh: boolean) => {
+      setSentFresh(fresh);
+      mutateSend(outgoing);
+    },
+    [mutateSend],
+  );
+  // What the person sends from the thread: the composer, and anything inside
+  // the thread that writes their next message for them (the app picker's
+  // custom-connection door, through ChatSendContext). Stable while the run
+  // state holds: the thread re-renders on every stream read, and a new
+  // context value would re-render every reader with it, memo or not.
+  const idle = active === undefined;
+  const sendNow = useCallback(
+    (outgoing: OutgoingMessage) => send(outgoing, idle),
+    [send, idle],
+  );
+  const chatSend = useCallback<ChatSend>(
+    (message) => sendNow({ message }),
+    [sendNow],
+  );
   const pinnedSend =
     sentFresh && (sendMessage.isPending || sendMessage.isSuccess);
 
@@ -295,9 +323,11 @@ export const DirectThreadSection = () => {
     );
   }
 
-  // The door hasn't answered yet — there is nothing to send to, so the
-  // composer waits with the thread rather than accepting a doomed message.
-  if (conversationId === undefined) return frame(<ThreadSkeleton />);
+  // The door hasn't answered yet: there is nothing to send to, so the
+  // composer's strip holds its place (a skeleton, never a live box that
+  // would accept a doomed message) and the real one replaces it in place.
+  if (conversationId === undefined)
+    return frame(<ThreadSkeleton />, <ComposerSkeleton />);
 
   const transcriptLoading = transcript.loading;
 
@@ -306,29 +336,31 @@ export const DirectThreadSection = () => {
       {transcriptLoading ? (
         <ThreadSkeleton />
       ) : (
-        <ChatThread
-          turns={turns}
-          folded={folded}
-          pending={pending}
-          conversationId={conversationId}
-          modelsHref={agentSectionPath(pathname, agentId, "models")}
-          computerHref={hasDesktop ? computerHref : undefined}
-          onOpenComputer={
-            hasDesktop
-              ? (requestId) => {
-                  if (dock.current) dock.current.expand();
-                  else router.push(computerHref(requestId));
-                }
-              : undefined
-          }
-          agentName={agent.name}
-          agentId={agentId}
-          onConnectModelKey={() => setKeyDialogOpen(true)}
-          hasOlder={transcript.hasOlder}
-          loadingOlder={transcript.loadingOlder}
-          onLoadOlder={transcript.loadOlder}
-          pinnedSend={pinnedSend}
-        />
+        <ChatSendContext value={chatSend}>
+          <ChatThread
+            turns={turns}
+            folded={folded}
+            pending={pending}
+            conversationId={conversationId}
+            modelsHref={mergedSectionPath(pathname, agentId, "models")}
+            computerHref={hasDesktop ? computerHref : undefined}
+            onOpenComputer={
+              hasDesktop
+                ? (requestId) => {
+                    if (dock.current) dock.current.expand();
+                    else router.push(computerHref(requestId));
+                  }
+                : undefined
+            }
+            agentName={agent.name}
+            agentId={agentId}
+            onConnectModelKey={() => setKeyDialogOpen(true)}
+            hasOlder={transcript.hasOlder}
+            loadingOlder={transcript.loadingOlder}
+            onLoadOlder={transcript.loadOlder}
+            pinnedSend={pinnedSend}
+          />
+        </ChatSendContext>
       )}
     </>,
     <>
@@ -347,7 +379,7 @@ export const DirectThreadSection = () => {
 
       <Composer
         ref={composer}
-        onSend={(outgoing) => send(outgoing, active === undefined)}
+        onSend={sendNow}
         uploadFile={(file) => uploadAttachment.mutateAsync(file)}
         sendPending={sendMessage.isPending}
         sendError={sendMessage.error}
@@ -359,6 +391,7 @@ export const DirectThreadSection = () => {
         }
         onStop={active ? () => abortTurn.mutate(active.id) : undefined}
         stopPending={abortTurn.isPending}
+        initialDraft={draft}
         autoFocus
       />
     </>,

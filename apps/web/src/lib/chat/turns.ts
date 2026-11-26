@@ -86,6 +86,31 @@ export const hasActiveTurn = (turns: Turn[] | undefined): boolean =>
 export const hasUnsettledTurn = (turns: Turn[] | undefined): boolean =>
   turns?.some((turn) => UNSETTLED.includes(turn.status)) ?? false;
 
+/** The turns poll while a turn is booting its machine (`queued` or
+ * `dispatched`): the stream has no event to push in that window, so the poll
+ * is the only thing that can notice the agent start. */
+export const BOOTING_TURN_POLL_MS = 1_000;
+
+/** The turns poll once the agent is running: the stream carries its progress
+ * from there, so the poll only owns the no-event failure gap. */
+export const RUNNING_TURN_POLL_MS = 2_500;
+
+/**
+ * The POLL CADENCE beside the poll predicate: `false` once nothing is owed an
+ * outcome (`hasUnsettledTurn`), fast while a turn has not reached the agent
+ * yet (its machine may be booting, and the chat's caption flips the moment
+ * the poll sees `running`), slower once it has.
+ */
+export const turnsPollInterval = (
+  turns: Turn[] | undefined,
+): number | false => {
+  if (!hasUnsettledTurn(turns)) return false;
+  const booting = turns?.some(
+    (turn) => turn.status === "queued" || turn.status === "dispatched",
+  );
+  return booting ? BOOTING_TURN_POLL_MS : RUNNING_TURN_POLL_MS;
+};
+
 /**
  * Whether a failed turn's code means "no usable key: add one" (none yet, or
  * the free trial credit ran out). These are the codes the chat's in-place

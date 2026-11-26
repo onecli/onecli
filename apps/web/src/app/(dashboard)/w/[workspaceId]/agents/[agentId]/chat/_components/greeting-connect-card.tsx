@@ -88,7 +88,6 @@ export const GreetingConnectCard = memo(
         <ConnectorSuggestionsCard
           suggestions={suggestions}
           channels={channels}
-          hideHeader
           bare={greeting}
         />
       </div>

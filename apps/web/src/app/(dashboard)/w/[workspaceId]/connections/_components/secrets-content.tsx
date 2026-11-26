@@ -87,10 +87,23 @@ export const SecretsContent = ({
     const createType = searchParams.get("create");
     const host = searchParams.get("host");
     const action = searchParams.get("action");
+    // A handled deep link drops its own params and keeps the Settings
+    // modal's (`?settings=&tab=`) when the tab renders inside it, so the
+    // link opens the dialog over the modal instead of closing it.
+    const clearLinkParams = () => {
+      const kept = new URLSearchParams();
+      for (const key of ["settings", "tab"]) {
+        const val = searchParams.get(key);
+        if (val) kept.set(key, val);
+      }
+      const qs = kept.toString();
+      const path = window.location.pathname;
+      router.replace(qs ? `${path}?${qs}` : path, { scroll: false });
+    };
     if (action === "new") {
       paramHandled.current = true;
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "anthropic" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -99,7 +112,7 @@ export const SecretsContent = ({
         name: "Anthropic Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "openai" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -108,7 +121,7 @@ export const SecretsContent = ({
         name: "OpenAI Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "codex" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -117,7 +130,7 @@ export const SecretsContent = ({
         name: "Codex Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "generic" && typeFilter === "generic" && host) {
       paramHandled.current = true;
       setPrefill({
@@ -131,7 +144,7 @@ export const SecretsContent = ({
         paramFormat: safeDecode(searchParams.get("paramFormat")),
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     }
   }, [searchParams, loading, router, typeFilter]);
 

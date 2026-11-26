@@ -7,6 +7,7 @@ import { docker } from "./docker";
 import { github } from "./github";
 import { githubApp } from "./github-app";
 import { gitlab } from "./gitlab";
+import { bitbucket } from "./bitbucket";
 import { gmail } from "./gmail";
 import { jira } from "./jira";
 import { googleAdmin } from "./google-admin";
@@ -85,6 +86,7 @@ const staticApps: AppDefinition[] = [
   github,
   githubApp,
   gitlab,
+  bitbucket,
   googleDrive,
   googleCalendar,
   googleChat,

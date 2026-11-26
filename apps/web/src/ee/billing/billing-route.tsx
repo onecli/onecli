@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { CAPS } from "@/lib/env";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
+import { orgHomePath } from "@/lib/navigation";
 import { requireOrgAdmin } from "@/ee/auth/require-org-admin";
 import BillingPage from "@/ee/billing/page";
 
@@ -10,7 +11,7 @@ export default async function BillingRoute() {
   // Billing is a paid-plan surface: editions without billing hide it from nav
   // and shouldn't serve the route either — send direct navigations to the
   // org's workspaces.
-  if (!CAPS.billing) redirect(`/org/${organizationId}/workspaces`);
+  if (!CAPS.billing) redirect(orgHomePath(organizationId));
 
   // Kept alongside the (admin) route-group guard as defense-in-depth: billing's
   // underlying reads are member-readable at the data layer, so this is the

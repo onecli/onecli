@@ -19,7 +19,6 @@ import {
   channelProviderUi,
 } from "@/lib/agents/channel-providers/registry";
 import { isPresenceConnected } from "@/lib/agents/channel-providers";
-import { useInstance } from "@/hooks/use-instance";
 
 /** The install-return toast. `pending` = installed but a step is left (the
  * card below names it), so this section stays provider-neutral. */
@@ -44,7 +43,6 @@ const installReturnToast = (name: string, pending: boolean): string =>
 export const ChannelsSection = () => {
   const agent = useAgentPageAgent();
   const qc = useQueryClient();
-  const instance = useInstance();
   const view = useAgentChannels(agent.id);
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -166,9 +164,8 @@ export const ChannelsSection = () => {
               presence={presence}
               hasOrgCredentials={hasOrgCredentials}
             />
-            {ui.ReadAccessCard && instance?.entitled && (
-              <ui.ReadAccessCard agentId={agent.id} agentName={agent.name} />
-            )}
+            {/* No pointer to Contacts' own-account access here: this
+                section renders ON Contacts. */}
           </div>
         ) : (
           <ui.AttachCard
@@ -180,7 +177,6 @@ export const ChannelsSection = () => {
             // posture.
             pendingTransport={presence?.transport}
             hasOrgCredentials={hasOrgCredentials}
-            organizationId={data.organizationId}
             viewerIsOrgAdmin={data.viewerIsOrgAdmin ?? true}
             // Both a half-finished setup and an app the workspace REMOVED on
             // the provider's side resume the same row (same app id, same

@@ -33,9 +33,11 @@ mod record_links;
 mod records;
 mod redact;
 
+mod bitbucket;
 pub mod bulk;
 mod change;
 mod generic;
+mod git;
 mod github;
 mod gmail;
 mod google_calendar;
@@ -43,6 +45,7 @@ mod google_drive;
 mod google_sheets;
 mod graphql;
 mod heyreach;
+mod json_prefix;
 mod nested;
 mod onedrive;
 /// What an approved request actually did (see `outcome.rs`).
@@ -63,6 +66,9 @@ pub use redact::{is_sensitive_key, is_url_credential, mask_secrets};
 
 /// Max length of any single detail value shown to the approver.
 pub const MAX_VALUE_LEN: usize = 240;
+/// Max length of a detail's label. Usually a short field name; a row that
+/// names an item by its own name (a file being uploaded) stays bounded too.
+pub(crate) const MAX_LABEL_LEN: usize = 120;
 /// Max length of a rendered body / generic-fallback value.
 pub const MAX_BODY_LEN: usize = 500;
 /// Max length of the whole rendered text block (kept well under chat limits).
@@ -192,7 +198,7 @@ impl ApprovalSummary {
             return;
         }
         self.details.push(ApprovalDetail {
-            label: label.into(),
+            label: one_line(&label.into(), MAX_LABEL_LEN),
             value,
             url: None,
         });
@@ -223,7 +229,7 @@ impl ApprovalSummary {
             named,
         });
         self.details.push(ApprovalDetail {
-            label: label.into(),
+            label: one_line(&label.into(), MAX_LABEL_LEN),
             value: clamp(&shown.into(), MAX_VALUE_LEN),
             url: None,
         });
@@ -323,6 +329,7 @@ static OUTLOOK_MAIL: outlook_mail::OutlookMail = outlook_mail::OutlookMail;
 static OUTLOOK_CALENDAR: outlook_calendar::OutlookCalendar = outlook_calendar::OutlookCalendar;
 static SALESFORCE: salesforce::Salesforce = salesforce::Salesforce;
 static ZOOM: zoom::Zoom = zoom::Zoom;
+static BITBUCKET: bitbucket::Bitbucket = bitbucket::Bitbucket;
 static GOOGLE_SHEETS: google_sheets::GoogleSheets = google_sheets::GoogleSheets;
 static GOOGLE_DRIVE: google_drive::GoogleDrive = google_drive::GoogleDrive;
 static TWILIO: twilio::Twilio = twilio::Twilio;
@@ -346,6 +353,7 @@ fn summarizer(provider: &str) -> Option<&'static dyn RequestSummarizer> {
         "google-drive" => Some(&GOOGLE_DRIVE),
         "twilio" => Some(&TWILIO),
         "zendesk" => Some(&ZENDESK),
+        "bitbucket" => Some(&BITBUCKET),
         _ => None,
     }
 }
@@ -375,6 +383,15 @@ pub fn reads_whole_body(provider: &str, method: &str, path: &str) -> bool {
     provider == "salesforce" && salesforce::reads_whole_body(method, path)
 }
 
+/// Whether this request may upload several files at once (a Salesforce
+/// sObject Collections create, whose records may each carry a whole file
+/// as base64), so its whole-body read needs room for megabytes. Only its
+/// body says whether it really is one.
+#[must_use]
+pub fn may_upload_files(provider: &str, method: &str, path: &str) -> bool {
+    provider == "salesforce" && salesforce::may_upload_files(method, path)
+}
+
 /// Build a human-readable summary for a held request.
 ///
 /// `provider` is the OneCLI provider id (from `apps::provider_for_host_and_path`);
@@ -395,8 +412,10 @@ pub fn summarize_request(
         content_type,
         body,
     };
-    summarizer(provider)
-        .and_then(|s| s.summarize(&req))
+    // A git push/clone is binary on the wire for every host (GitHub, GitLab,
+    // Bitbucket): say what it does, never dump the pack.
+    git::summarize(&req)
+        .or_else(|| summarizer(provider).and_then(|s| s.summarize(&req)))
         .unwrap_or_else(|| generic::summarize(&req))
 }
 

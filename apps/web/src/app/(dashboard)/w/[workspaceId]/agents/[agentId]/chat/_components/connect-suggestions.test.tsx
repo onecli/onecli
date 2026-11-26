@@ -9,7 +9,11 @@ import { grants } from "@/lib/api";
 import type { Connection } from "@/lib/api";
 import type { AppPermissionDefinitionSummary } from "@onecli/api/apps/app-permissions/types";
 import { queryKeys } from "@/lib/api/keys";
-import { ConnectorSuggestions } from "./connect-suggestions";
+import {
+  ConnectorSuggestions,
+  ConnectorSuggestionsCard,
+} from "./connect-suggestions";
+import { extractConnectSuggestions } from "@/lib/chat/connect-links";
 import { GreetingConnectCard } from "./greeting-connect-card";
 
 // Mutable so the no-agent fence is testable (the mock factory is hoisted).
@@ -75,6 +79,9 @@ const renderCard = (
     connections = [] as Connection[],
     grantedConnectionIds = [] as string[],
     definitions = [] as AppPermissionDefinitionSummary[],
+    // "chat" = the card under an agent answer (no consent line); "full" =
+    // the same card with its consent line (the welcome card's shape).
+    mode = "chat" as "chat" | "full",
   } = {},
 ) => {
   const queryClient = new QueryClient({
@@ -115,7 +122,16 @@ const renderCard = (
   );
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   return {
-    ...render(<ConnectorSuggestions text={text} />, { wrapper }),
+    ...render(
+      mode === "chat" ? (
+        <ConnectorSuggestions text={text} />
+      ) : (
+        <ConnectorSuggestionsCard
+          suggestions={extractConnectSuggestions(text)}
+        />
+      ),
+      { wrapper },
+    ),
     invalidateSpy,
   };
 };
@@ -161,7 +177,12 @@ describe("ConnectorSuggestions card", () => {
 
   it("renders the suggestion and opens the popup with agent + workspace context", async () => {
     renderCard(GMAIL_CONNECT_URL);
-    expect(screen.getByText("Apps that could help")).toBeInTheDocument();
+    // The agent's sentence above the card introduces it: no consent line,
+    // but the "Browse all apps" door stays.
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Browse all apps" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Gmail")).toBeInTheDocument();
 
     await userEvent.click(
@@ -178,7 +199,10 @@ describe("ConnectorSuggestions card", () => {
   });
 
   it("discloses at the point of consent: this agent alone, and what needs approval", () => {
-    renderCard(GMAIL_CONNECT_URL, { definitions: [GMAIL_CATALOG] });
+    renderCard(GMAIL_CONNECT_URL, {
+      definitions: [GMAIL_CATALOG],
+      mode: "full",
+    });
     expect(
       screen.getByText(
         "Only this agent gets access. Writes, and reads that could expose secrets, need your approval.",
@@ -189,6 +213,7 @@ describe("ConnectorSuggestions card", () => {
   it("names only writes for a catalog checked safe for reads", () => {
     renderCard(GMAIL_CONNECT_URL, {
       definitions: [{ ...GMAIL_CATALOG, unlistedReads: "allow" }],
+      mode: "full",
     });
     expect(
       screen.getByText(
@@ -198,7 +223,7 @@ describe("ConnectorSuggestions card", () => {
   });
 
   it("never promises approval for an app with no tool list (it gets full access)", () => {
-    renderCard(GMAIL_CONNECT_URL);
+    renderCard(GMAIL_CONNECT_URL, { mode: "full" });
     expect(
       screen.getByText("Only this agent gets access. It gets full access."),
     ).toBeInTheDocument();
@@ -591,7 +616,13 @@ describe("ConnectorSuggestions card", () => {
   });
 
   it("hides the consent line when no suggested app would be a new connect", () => {
-    renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
+    // The full card, which would otherwise show it: the line is about the
+    // Connect click, so with nothing to connect there is nothing to consent to.
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [connectedGmail],
+      grantedConnectionIds: [connectedGmail.id],
+      mode: "full",
+    });
     expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
   });
 

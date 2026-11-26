@@ -17,6 +17,9 @@ import type { AuthContextValue } from "@/lib/auth/types";
  */
 
 const auth: Partial<AuthContextValue> = {};
+// What the post-auth sync reports: null while it runs, a sentence when it
+// cannot finish.
+const sync = vi.hoisted((): { error: string | null } => ({ error: null }));
 
 vi.mock("@/providers/auth-provider", () => ({
   useAuth: () => auth,
@@ -25,13 +28,14 @@ vi.mock("@/providers/auth-provider", () => ({
 // The post-auth redirect drives the router and the API; neither is under test
 // here, and both need a Next runtime this environment does not have.
 vi.mock("@/lib/auth/use-post-auth-redirect", () => ({
-  usePostAuthRedirect: () => {},
+  usePostAuthRedirect: () => sync.error,
 }));
 
 const searchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
   useSearchParams: () => searchParams,
 }));
+vi.mock("next/image", () => ({ default: () => null }));
 
 import { OnpremSignupContent } from "./signup-content-onprem";
 
@@ -48,6 +52,7 @@ beforeEach(() => {
     signUpWithPassword: signUp,
   });
   searchParams.forEach((_v, k) => searchParams.delete(k));
+  sync.error = null;
 });
 
 afterEach(cleanup);
@@ -222,5 +227,32 @@ describe("self-hosted sign-up screen", () => {
     } finally {
       window.history.replaceState(null, "", "/");
     }
+  });
+
+  it("keeps the form up while the session is still being checked", () => {
+    Object.assign(auth, { isLoading: true });
+    const { container } = renderScreen();
+    expect(screen.getByPlaceholderText("Password")).toBeTruthy();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("gives way to the dashboard's skeleton once signed up", () => {
+    Object.assign(auth, { isAuthenticated: true });
+    const { container } = renderScreen();
+    expect(container.querySelector("[data-agent-nav-skeleton]")).not.toBeNull();
+    expect(screen.queryByPlaceholderText("Password")).toBeNull();
+    expect(container.textContent).not.toMatch(
+      /Setting things up|Loading\.\.\./,
+    );
+  });
+
+  it("replaces the skeleton with the reason the account could not be set up", () => {
+    Object.assign(auth, { isAuthenticated: true });
+    const reason =
+      "You are signed in, but setting up your account did not finish. Reload to try again.";
+    sync.error = reason;
+    const { container } = renderScreen();
+    expect(screen.getByRole("alert").textContent).toBe(reason);
+    expect(container.querySelector("[data-agent-nav-skeleton]")).toBeNull();
   });
 });

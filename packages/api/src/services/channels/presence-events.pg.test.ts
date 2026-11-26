@@ -274,6 +274,28 @@ describe.skipIf(!PROOF_URL)(
       expect((await syncRow(app.id)).syncedEvents).toBe(BOT_EVENTS.join(","));
     });
 
+    it("never subscribes an app to reaction_added without reactions:read, and still records it as synced", async () => {
+      // The fixture's apps declare no reactions:read (made before reactions):
+      // every other missing event lands, the scope list is untouched, and the
+      // app leaves the candidate set instead of failing each pass.
+      const integrationId = await seedIntegration(ORG, true);
+      const app = await seedApp(WORKSPACE, integrationId);
+
+      expect(await syncPresenceEvents()).toEqual({ synced: 1, deferred: 0 });
+
+      const written = remote.get(app.externalId)!;
+      expect(written.settings.event_subscriptions.bot_events).toEqual([
+        ...OLD_EVENTS,
+        ...BOT_EVENTS.filter(
+          (e) => !OLD_EVENTS.includes(e) && e !== "reaction_added",
+        ),
+      ]);
+      expect(written.oauth_config).toEqual(
+        exportedManifest(app.externalId, []).oauth_config,
+      );
+      expect((await syncRow(app.id)).syncedEvents).toBe(BOT_EVENTS.join(","));
+    });
+
     it("only live agent-flavor apps are eligible: regular, pending and disabled apps are never touched", async () => {
       const integrationId = await seedIntegration(ORG, true);
       const regular = await seedApp(WORKSPACE, integrationId, {

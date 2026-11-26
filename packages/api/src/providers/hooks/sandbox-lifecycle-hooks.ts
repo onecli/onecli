@@ -68,6 +68,30 @@ export interface SandboxLifecycleHooks {
     sandboxId: string;
     runnerId: string;
   }): Promise<void>;
+  /**
+   * A running sandbox stopped because its home went read-only (the
+   * supervisor's `home_read_only`, forwarded by the runner with the
+   * substrate's node). Inside the stop's transaction, after the status
+   * landed: the extension records the event and decides whether the
+   * automatic restart may happen, and when (`startHold` and
+   * `resolveStartResources` enforce it). `node` is absent from a runner
+   * that predates it. Without a hook the restart is today's: the next
+   * message (or the waiting turn) wakes a fresh boot.
+   */
+  onHomeReadOnly?(
+    tx: Prisma.TransactionClient,
+    input: { sandboxId: string; runnerId: string; node?: string },
+  ): Promise<void>;
+  /**
+   * A PERSON restarted the agent ("Restart agent"), inside the restart's
+   * transaction. A deliberate restart is the documented way out of a held
+   * self-heal, so an extension that budgets automatic restarts clears this
+   * sandbox's budget here; it must never touch any other sandbox's state.
+   */
+  onAgentRestart?(
+    tx: Prisma.TransactionClient,
+    input: { agentId: string; workspaceId: string },
+  ): Promise<void>;
 }
 
 export type StartResourcesDecision =

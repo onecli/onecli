@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Check, Plus } from "lucide-react";
 import {
   DropdownMenuItem,
@@ -10,13 +9,14 @@ import {
 } from "@onecli/ui/components/dropdown-menu";
 import { OrgIcon } from "@/lib/dashboard/org-icon";
 import type { UseActiveOrgResult } from "@/lib/dashboard/use-active-org";
+import { useGoToLanding } from "@/lib/dashboard/use-go-to-landing";
 
 export const OrgSwitcherItems = ({
   orgs,
   activeOrgId,
   setActiveOrgId,
 }: Pick<UseActiveOrgResult, "orgs" | "activeOrgId" | "setActiveOrgId">) => {
-  const router = useRouter();
+  const { goToOrg } = useGoToLanding();
   return (
     <>
       <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">
@@ -29,7 +29,7 @@ export const OrgSwitcherItems = ({
           onSelect={() => {
             if (org.id === activeOrgId) return;
             setActiveOrgId(org.id);
-            router.push(`/org/${org.id}/workspaces`);
+            goToOrg(org.id);
           }}
           className="gap-2.5 p-2"
         >

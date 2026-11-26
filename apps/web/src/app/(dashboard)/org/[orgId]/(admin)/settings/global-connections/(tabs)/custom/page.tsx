@@ -1,10 +1,18 @@
-import { Suspense } from "react";
-import { GlobalCustomSecretsPage } from "../../_components/global-secrets-page";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function OrgCustomSecretsPage() {
-  return (
-    <Suspense>
-      <GlobalCustomSecretsPage />
-    </Suspense>
-  );
+interface Props {
+  params: Promise<{ orgId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/** An old URL: Settings > Shared apps, Custom tab. */
+export default async function OrgCustomSecretsPage({
+  params,
+  searchParams,
+}: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "shared-apps", {
+    ...(await searchParams),
+    tab: "custom",
+  });
 }

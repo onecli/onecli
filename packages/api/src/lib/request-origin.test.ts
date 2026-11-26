@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Force the self-hosted branch (IS_CLOUD false) regardless of the ambient edition.
 vi.mock("./env", () => ({
   IS_CLOUD: false,
-  APP_URL: "http://localhost:10254",
 }));
 
 // Pin the boot-time self URL so the last-resort fallback is distinguishable

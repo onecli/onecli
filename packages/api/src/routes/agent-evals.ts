@@ -5,6 +5,7 @@ import { ServiceError } from "../services/errors";
 import {
   archiveQuestion,
   getRun,
+  stopRun,
   listQuestions,
   listRuns,
   saveQuestion,
@@ -24,9 +25,10 @@ import {
 import {
   deleteEvalSchedule,
   getEvalSchedule,
-  runEvalScheduleNow,
+  listEvalReportChannels,
   saveEvalSchedule,
 } from "../services/eval-schedule-service";
+import { runEvalScheduleNow } from "../services/eval-schedule-fire-service";
 
 /**
  * The agent's EVALS surface, composed onto /agents like memories and crons:
@@ -34,12 +36,14 @@ import {
  *   GET    /agents/:agentId/evals                       questions + run history + schedule
  *   PUT    /agents/:agentId/evals/schedule              create or replace the schedule
  *   DELETE /agents/:agentId/evals/schedule              remove the schedule
- *   POST   /agents/:agentId/evals/schedule/run          fire the schedule now (202)
+ *   GET    /agents/:agentId/evals/schedule/channels     channels results can go to
+ *   POST   /agents/:agentId/evals/schedule/run          start a scheduled run now (202)
  *   POST   /agents/:agentId/evals/questions             add a question
  *   PUT    /agents/:agentId/evals/questions/:questionId edit an active question
  *   DELETE /agents/:agentId/evals/questions/:questionId archive a question
  *   POST   /agents/:agentId/evals/runs                  start a run (202)
  *   GET    /agents/:agentId/evals/runs/:runId           one run in full
+ *   POST   /agents/:agentId/evals/runs/:runId/stop      stop that run
  *
  * `recordAuditEvent`, never `withAudit`: the gateway reads no eval table, so
  * a cache flush would be noise (the cron-surface rule).
@@ -66,12 +70,13 @@ export const agentEvalRoutes = () => {
   app.use("*", authMiddleware);
 
   app.get("/:agentId/evals", async (c) => {
-    const workspaceId = requireWorkspaceId(c.get("auth"));
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
     const agentId = c.req.param("agentId");
     const [questions, runs, schedule] = await Promise.all([
       listQuestions(workspaceId, agentId),
       listRuns(workspaceId, agentId),
-      getEvalSchedule(workspaceId, agentId),
+      getEvalSchedule(workspaceId, agentId, a.userId),
     ]);
     return c.json({
       questions,
@@ -110,9 +115,24 @@ export const agentEvalRoutes = () => {
         schedule: body.data.schedule,
         timezone: body.data.timezone,
         enabled: body.data.enabled,
+        ...(body.data.report !== undefined && {
+          reportTo: schedule.report?.to ?? null,
+          reportChannel:
+            schedule.report?.to === "channel"
+              ? schedule.report.channelLabel
+              : null,
+          reportWhen: schedule.report?.when ?? null,
+        }),
       },
     });
     return c.json(schedule);
+  });
+
+  app.get("/:agentId/evals/schedule/channels", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.param("agentId");
+    return c.json(await listEvalReportChannels(workspaceId, agentId));
   });
 
   app.delete("/:agentId/evals/schedule", async (c) => {
@@ -132,12 +152,12 @@ export const agentEvalRoutes = () => {
     return c.body(null, 204);
   });
 
-  // Fire on the next poll, through the same path a timed fire takes.
+  // Start a scheduled run now (results go where the schedule sends them).
   app.post("/:agentId/evals/schedule/run", async (c) => {
     const a = c.get("auth");
     const workspaceId = requireWorkspaceId(a);
     const agentId = c.req.param("agentId");
-    const schedule = await runEvalScheduleNow(workspaceId, agentId);
+    const run = await runEvalScheduleNow(workspaceId, agentId);
     await recordAuditEvent({
       workspaceId,
       userId: a.userId,
@@ -145,9 +165,9 @@ export const agentEvalRoutes = () => {
       action: AUDIT_ACTIONS.RUN,
       service: AUDIT_SERVICES.EVAL,
       source: AUDIT_SOURCE.API,
-      metadata: { agentId, via: "schedule" },
+      metadata: { agentId, runId: run.id, via: "schedule" },
     });
-    return c.json(schedule, 202);
+    return c.json(run, 202);
   });
 
   app.post("/:agentId/evals/questions", async (c) => {
@@ -233,6 +253,26 @@ export const agentEvalRoutes = () => {
       metadata: { agentId, runId: run.id, questions: run.total },
     });
     return c.json(run, 202);
+  });
+
+  // Stop one run: the one on screen, so a press that lands after it ended
+  // never stops the next.
+  app.post("/:agentId/evals/runs/:runId/stop", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const agentId = c.req.param("agentId");
+    const runId = c.req.param("runId");
+    await stopRun(workspaceId, agentId, runId, a.userId);
+    await recordAuditEvent({
+      workspaceId,
+      userId: a.userId,
+      userEmail: a.userEmail,
+      action: AUDIT_ACTIONS.UPDATE,
+      service: AUDIT_SERVICES.EVAL,
+      source: AUDIT_SOURCE.API,
+      metadata: { agentId, runId, stopped: true },
+    });
+    return c.json({ id: runId });
   });
 
   app.get("/:agentId/evals/runs/:runId", async (c) => {

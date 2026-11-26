@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { proofDatabaseUrl } from "../../testing/pg-proof";
+import { CUSTOM_CONNECTION_ACTION } from "../../validations/custom-connection";
 
 /**
  * The bell's channel-arm listing (4d): pending action approvals + reach
@@ -176,7 +177,8 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
       summary: 'send @Tomer: "hello"',
       agentName: "wab agent main",
       standingChoice: false,
-      // No asking conversation on this hold: the bell only, never inline.
+      // No asking conversation on this hold: every member's chat with the
+      // agent shows it, besides the bell.
       conversationId: null,
     });
     expect(items[1]).toMatchObject({
@@ -196,4 +198,168 @@ describe.skipIf(!PROOF_URL)("workspace pending channel approvals (4d)", () => {
     expect(foreign).toHaveLength(1);
     expect(foreign[0]).toMatchObject({ summary: "foreign approval" });
   });
+
+  it("hands the custom-connection card only the name and where the key goes", async () => {
+    const agentId = await seedAgent("custom");
+    await db.actionApproval.create({
+      data: {
+        agentId,
+        action: CUSTOM_CONNECTION_ACTION,
+        payload: {
+          name: "AcmeCRM",
+          hostPattern: "api.acmecrm.io",
+          pathPattern: "/v1/*",
+          headerName: "X-Api-Key",
+          valueFormat: "{value}",
+          docsUrl: "https://docs.acmecrm.io/auth",
+          reason: "You asked for your AcmeCRM campaigns.",
+        },
+        summary: 'connect "AcmeCRM"',
+        status: "pending",
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        cardRefs: [],
+      },
+    });
+
+    const items = await svc.listWorkspacePendingChannelApprovals(WORKSPACE);
+    const custom = items.find(
+      (i) => i.kind === "action" && i.customConnection !== null,
+    );
+    // Exactly these three: the agent's docs link and reason never reach the
+    // browser, so the card cannot render (or link) anything else it wrote.
+    expect(custom?.kind === "action" && custom.customConnection).toEqual({
+      name: "AcmeCRM",
+      hostPattern: "api.acmecrm.io",
+      registrableDomain: "acmecrm.io",
+    });
+  });
+
+  it("a scheduled run's approval shows in the chat the schedule reports to", async () => {
+    await reset();
+    const agentId = await seedAgent("cron");
+    const dayAhead = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    // The person's chat, where they asked for the schedule.
+    const chat = await db.conversation.create({
+      data: { agentId, direct: true, source: "web", userId: OWNER },
+      select: { id: true },
+    });
+    const cron = await db.agentCron.create({
+      data: {
+        agentId,
+        name: "morning digest",
+        prompt: "summarize my inbox",
+        schedule: "0 9 * * *",
+        timezone: "UTC",
+        originConversationId: chat.id,
+        createdByUserId: OWNER,
+        nextFireAt: dayAhead,
+      },
+      select: { id: true },
+    });
+    // The schedule's own run conversation, which no chat renders.
+    const run = await db.conversation.create({
+      data: { agentId, source: "cron", externalRef: cron.id },
+      select: { id: true },
+    });
+    // A schedule created with no chat (origin lost): stays on its run.
+    const orphanCron = await db.agentCron.create({
+      data: {
+        agentId,
+        name: "no origin",
+        prompt: "p",
+        schedule: "0 9 * * *",
+        timezone: "UTC",
+        nextFireAt: dayAhead,
+      },
+      select: { id: true },
+    });
+    const orphanRun = await db.conversation.create({
+      data: { agentId, source: "cron", externalRef: orphanCron.id },
+      select: { id: true },
+    });
+    // A webhook's run reports to the chat it was created from, too.
+    const webhook = await db.agentWebhook.create({
+      data: {
+        agentId,
+        name: "deploys",
+        instructions: "tell me when a deploy fails",
+        token: `whk_${P}token`,
+        originConversationId: chat.id,
+      },
+      select: { id: true },
+    });
+    const webhookRun = await db.conversation.create({
+      data: { agentId, source: "webhook", externalRef: webhook.id },
+      select: { id: true },
+    });
+    for (const [summary, conversationId] of [
+      ["from the run", run.id],
+      ["from the chat", chat.id],
+      ["from an orphan run", orphanRun.id],
+      ["from a webhook run", webhookRun.id],
+    ] as const) {
+      await seedHold(agentId, summary, conversationId);
+    }
+
+    expect(await placements()).toEqual({
+      "from the run": chat.id,
+      "from the chat": chat.id,
+      "from an orphan run": orphanRun.id,
+      "from a webhook run": chat.id,
+    });
+  });
+
+  it("never re-points a hold into another agent's chat", async () => {
+    await reset();
+    const agentId = await seedAgent("victim");
+    const otherAgentId = await seedAgent("forger");
+    const dayAhead = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const victimChat = await db.conversation.create({
+      data: { agentId, direct: true, source: "web", userId: OWNER },
+      select: { id: true },
+    });
+    const cron = await db.agentCron.create({
+      data: {
+        agentId,
+        name: "victim schedule",
+        prompt: "p",
+        schedule: "0 9 * * *",
+        timezone: "UTC",
+        originConversationId: victimChat.id,
+        nextFireAt: dayAhead,
+      },
+      select: { id: true },
+    });
+    // Any member can mint a conversation with any source and ref: here one
+    // on ANOTHER agent that claims to be the victim schedule's run.
+    const forged = await db.conversation.create({
+      data: { agentId: otherAgentId, source: "cron", externalRef: cron.id },
+      select: { id: true },
+    });
+    await seedHold(otherAgentId, "forged run", forged.id);
+
+    expect(await placements()).toEqual({ "forged run": forged.id });
+  });
 });
+
+const seedHold = (agentId: string, summary: string, conversationId: string) =>
+  db.actionApproval.create({
+    data: {
+      agentId,
+      conversationId,
+      action: "test.wab",
+      payload: {},
+      summary,
+      status: "pending",
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      cardRefs: [],
+    },
+  });
+
+/** Each listed action's summary → the conversation its card renders in. */
+const placements = async () =>
+  Object.fromEntries(
+    (await svc.listWorkspacePendingChannelApprovals(WORKSPACE)).flatMap((i) =>
+      i.kind === "action" ? [[i.summary, i.conversationId]] : [],
+    ),
+  );

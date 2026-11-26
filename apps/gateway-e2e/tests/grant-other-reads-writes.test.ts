@@ -1,6 +1,9 @@
 import { describe, expect } from "vitest";
 
-import { defaultConnectionGrant } from "@onecli/api/services/grants-compile";
+import {
+  compileConnectionStack,
+  defaultConnectionGrant,
+} from "@onecli/api/services/grants-compile";
 
 import { decideApproval, waitForApproval } from "../src/control.js";
 import { compiledGrantStack, type WorldSpec } from "../src/fixtures.js";
@@ -189,4 +192,112 @@ describe("the default grant's Other reads (wire-level)", () => {
       expect((await held.response).status).toBe(403);
     },
   );
+});
+
+describe("a read that returns a secret always asks (wire-level)", () => {
+  // GitHub's secret scanning alerts carry the leaked secret in clear text.
+  // `get_repo` (`/repos/*/*`) and "All other reads" both reach them, so the
+  // gateway holds them whatever the grant allows.
+  const ALERTS = `${GH}/repos/acme/web/secret-scanning/alerts`;
+  const WHY = "Secret scanning alerts include the leaked secret in clear text";
+
+  scenario(
+    "the default GitHub grant holds it, and the card says why",
+    async (cx) => {
+      await cx.seed({ ...defaultWorld("github"), withApiKey: true });
+      const gw = await cx.startGateway();
+
+      const held = await startHeldRequest(
+        gw.origin,
+        { url: ALERTS, token: cx.ids.agentToken },
+        HOLD_MS,
+      );
+      const approval = await waitForApproval(gw, cx.ids.apiKey);
+      expect(approval.url).toContain("/secret-scanning/alerts");
+      expect(approval.summary?.details).toContainEqual({
+        label: "Why it asks",
+        value: WHY,
+      });
+      await decideApproval(gw, cx.ids.apiKey, approval.id, "deny");
+      expect((await held.response).status).toBe(403);
+    },
+  );
+
+  scenario(
+    "a full-access grant asks too, and an approval forwards it",
+    async (cx) => {
+      const [full] = compileConnectionStack("Grant: e2e", "github-app", {
+        access: "full",
+      });
+      if (!full) throw new Error("expected the full-access grant row");
+      await cx.seed({
+        appConnections: [{ provider: "github-app", label: "acme" }],
+        rules: [
+          {
+            name: full.name,
+            action: full.action,
+            source: "grant",
+            identities: ["agent"],
+            targets: [
+              { kind: "connection", connectionIndex: 0, tools: full.tools },
+            ],
+          },
+        ],
+        withApiKey: true,
+      });
+      const proxy = await startForwardProxy();
+      try {
+        const gw = await cx.startGateway({
+          env: {
+            HTTP_PROXY: proxy.url,
+            HTTPS_PROXY: proxy.url,
+            NO_PROXY: "127.0.0.1",
+          },
+        });
+        const held = await startHeldRequest(
+          gw.origin,
+          { url: ALERTS, token: cx.ids.agentToken },
+          HOLD_MS,
+        );
+        expect(proxy.requests()).toEqual([]);
+        const approval = await waitForApproval(gw, cx.ids.apiKey);
+        await decideApproval(gw, cx.ids.apiKey, approval.id, "approve");
+        expect((await held.response).status).toBe(200);
+        expect(proxy.requests().map((r) => r.url)).toEqual([ALERTS]);
+      } finally {
+        await proxy.close();
+      }
+    },
+  );
+
+  scenario("a rule that blocks it still blocks it", async (cx) => {
+    await cx.seed({
+      appConnections: [{ provider: "github-app", label: "acme" }],
+      rules: [
+        {
+          name: "no secret scanning",
+          action: "block",
+          identities: ["agent"],
+          targets: [
+            {
+              hostPattern: "api.github.com",
+              pathPattern: "/repos/*/*/secret-scanning/*",
+            },
+          ],
+        },
+        ...compiledGrantStack("github-app", ["get_repo"]),
+      ],
+    });
+    const gw = await cx.startGateway();
+
+    const res = await throughProxy(gw.origin, {
+      url: ALERTS,
+      token: cx.ids.agentToken,
+    });
+    expect(res.status).toBe(403);
+    expect(res.json()).toMatchObject({
+      error: "blocked_by_policy",
+      rule_name: "no secret scanning",
+    });
+  });
 });

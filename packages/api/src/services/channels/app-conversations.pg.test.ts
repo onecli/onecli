@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+import { grantModelKey } from "../../testing/model-key-grant.js";
 
 /**
  * App conversations, inbound (PR 5a) — proofs against a real DB and a fake
@@ -161,39 +162,6 @@ const scriptDirectory = () => {
 
 // ── Seeds ───────────────────────────────────────────────────────────────────
 
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
-
 const seedIntegration = async () =>
   (await db.channelIntegration.findFirst({
     where: { organizationId: ORG, provider: "slack" },
@@ -227,7 +195,11 @@ const seedStage = async (
     },
     select: { id: true },
   });
-  await grantLlmKey(agent.id, suffix);
+  await grantModelKey(db, {
+    workspaceId: WORKSPACE,
+    agentId: agent.id,
+    name: `${P}${suffix}`,
+  });
   const integration = await seedIntegration();
   const presence = await db.agentChannel.create({
     data: {

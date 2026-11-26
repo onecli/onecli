@@ -1,4 +1,8 @@
 import type { RunnerEvent } from "@onecli/agent-protocol";
+import {
+  AGENT_RESUMING_NOTICE,
+  RESUMED_TURN_CONTEXT,
+} from "@onecli/api/validations/conversation";
 import { expect } from "vitest";
 import { scenario } from "../src/scenario.js";
 import { containerNameFor, dockerKill, isRunning } from "../src/docker.js";
@@ -7,7 +11,7 @@ import {
   seedHostedAgent,
   seedTenant,
 } from "../src/fixtures.js";
-import { fakeDirective, sleep, text } from "../src/fake-dsl.js";
+import { fakeDirective, prompt, sleep, state, text } from "../src/fake-dsl.js";
 import { startTestRunner } from "../src/runner.js";
 import {
   fetchTranscript,
@@ -20,9 +24,10 @@ import {
 /**
  * Abuse & multi-tenant hardening — the legs the deleted `run-hardening.sh`
  * held: two tenants sharing one runner never bleed; a container killed
- * mid-turn surfaces the honest #834 copy and the NEXT message recovers; a
- * runner restart (new process, same token → same Runner row) reconciles the
- * stranded box back into the wake path.
+ * mid-turn resumes the turn on a fresh container in its own session (and a
+ * second kill surfaces the honest restart copy, after which the NEXT message
+ * recovers); a runner restart (new process, same token → same Runner row)
+ * reconciles the stranded box back into the wake path.
  */
 
 scenario("two tenants, one runner: transcripts never bleed", async (cx) => {
@@ -78,7 +83,88 @@ scenario("two tenants, one runner: transcripts never bleed", async (cx) => {
 });
 
 scenario(
-  "a container killed mid-turn: honest copy, then recovery",
+  "a container killed mid-turn: the turn resumes on a fresh container, in its own session, framed as a resume",
+  async (cx) => {
+    const stack = await cx.startStack();
+    if (stack.runner === null) throw new Error("runner expected");
+    await seedTenant(cx.prisma, cx.ids);
+    await seedHostedAgent(cx.prisma, cx.ids, {
+      runnerId: stack.runner.runnerId,
+    });
+    await seedAnthropicGrant(cx.prisma, cx.ids);
+    stack.runner.pump();
+
+    const conversation = await stack.v1.json<{ id: string }>(
+      await stack.v1.put(`/v1/agents/${cx.ids.agent}/conversations/direct`),
+    );
+    // The conversation's FIRST turn: no terminal report has ever persisted a
+    // session ref, so only the running turn's heartbeat can leave one behind.
+    const created = await stack.v1.json<{ id: string }>(
+      await stack.v1.post(`/v1/conversations/${conversation.id}/turns`, {
+        message: fakeDirective([state(), prompt(), sleep(8_000), text("done")]),
+      }),
+    );
+    await waitFor(
+      () => readTurn(stack.v1, conversation.id, created.id),
+      (turn) => turn?.status === "running",
+      "the turn to start",
+    );
+    // The first beat (right behind turn.started) carried the session.
+    const before = await waitFor(
+      () =>
+        cx.prisma.conversation.findUniqueOrThrow({
+          where: { id: conversation.id },
+          select: { harnessSessionRef: true },
+        }),
+      (row) => row.harnessSessionRef !== null,
+      "the heartbeat to persist the running session",
+    );
+
+    await dockerKill(containerNameFor(cx.ids.sandbox));
+
+    // A SIGKILL'd container reports nothing: RECONCILE is the detection path
+    // (60s cadence in production, driven by hand here). The turn goes back
+    // to the queue instead of failing, and a fresh container runs it again.
+    const finished = await waitFor(
+      async () => {
+        await stack.runner?.reconcile();
+        return readTurn(stack.v1, conversation.id, created.id);
+      },
+      (turn) => turn?.status === "done" || turn?.status === "failed",
+      "the resumed turn to finish",
+      120_000,
+    );
+    expect(finished?.status).toBe("done");
+    expect(finished?.errorCode ?? null).toBeNull();
+
+    const events = await fetchTranscript(stack.v1, conversation.id);
+    const transcript = transcriptText(events);
+    // The answer the transcript keeps is the run that finished: the resumed
+    // one. It ran in the same session as before the kill, on its second run
+    // in it, and its prompt opened with the resume frame (the fake echoes
+    // the prompt's first line), never the caller's message as a new one.
+    expect(transcript).toContain(
+      `[state sessionRef=${before.harnessSessionRef} turnsRun=2]`,
+    );
+    expect(transcript).toContain(
+      `[prompt ${RESUMED_TURN_CONTEXT.slice(0, 60)}`,
+    );
+    // The person sees the one resume line, under the turn.
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "notice" &&
+          event.turnId === created.id &&
+          event.payload["text"] === AGENT_RESUMING_NOTICE,
+      ),
+    ).toHaveLength(1);
+
+    await stack.runner.pausePump();
+  },
+);
+
+scenario(
+  "a container killed twice mid-turn: one resume, then the honest restart copy, then recovery",
   async (cx) => {
     const stack = await cx.startStack();
     if (stack.runner === null) throw new Error("runner expected");
@@ -97,25 +183,31 @@ scenario(
         message: fakeDirective([sleep(25_000), text("never delivered")]),
       }),
     );
-    await waitFor(
-      () => readTurn(stack.v1, conversation.id, created.id),
-      (turn) => turn?.status === "running",
-      "the doomed turn to start",
-    );
+    // Each wait drives reconcile: a SIGKILL'd container reports nothing, and
+    // reconcile is what reports it (and so what re-queues the turn and boots
+    // the fresh container its resumed run lands on).
+    const killWhileRunning = async (label: string) => {
+      await waitFor(
+        async () => {
+          await stack.runner?.reconcile();
+          return readTurn(stack.v1, conversation.id, created.id);
+        },
+        (turn) => turn?.status === "running",
+        label,
+        90_000,
+      );
+      await dockerKill(containerNameFor(cx.ids.sandbox));
+    };
 
-    await dockerKill(containerNameFor(cx.ids.sandbox));
-
-    // A SIGKILL'd container reports nothing — RECONCILE is the detection path
-    // (the #834 dead-but-expected arm; 60s cadence in production, driven by
-    // hand here). The strand law then fails the running turn with the honest
-    // restart copy, never a silent hang to the ceiling.
+    await killWhileRunning("the first run to start");
+    await killWhileRunning("the resumed run to start");
     const failed = await waitFor(
       async () => {
         await stack.runner?.reconcile();
         return readTurn(stack.v1, conversation.id, created.id);
       },
       (turn) => turn?.status === "failed",
-      "the killed turn to fail honestly",
+      "the second death to fail the turn honestly",
       90_000,
     );
     expect(failed?.errorCode).toBe("agent_restarted");
@@ -126,6 +218,7 @@ scenario(
 
     await stack.runner.pausePump();
   },
+  300_000,
 );
 
 scenario(
@@ -167,6 +260,63 @@ scenario(
 
     const after = await runTurn(stack.v1, conversation.id, "after the restart");
     expect(after.status).toBe("done");
+
+    await revived.stop();
+    await revived.reap();
+  },
+);
+
+scenario(
+  "a runner restart in the MIDDLE of a turn resumes that turn on the recreated box",
+  async (cx) => {
+    const stack = await cx.startStack();
+    if (stack.runner === null) throw new Error("runner expected");
+    await seedTenant(cx.prisma, cx.ids);
+    await seedHostedAgent(cx.prisma, cx.ids, {
+      runnerId: stack.runner.runnerId,
+    });
+    await seedAnthropicGrant(cx.prisma, cx.ids);
+    stack.runner.pump();
+
+    const conversation = await stack.v1.json<{ id: string }>(
+      await stack.v1.put(`/v1/agents/${cx.ids.agent}/conversations/direct`),
+    );
+    const created = await stack.v1.json<{ id: string }>(
+      await stack.v1.post(`/v1/conversations/${conversation.id}/turns`, {
+        message: fakeDirective([state(), sleep(8_000), text("done")]),
+      }),
+    );
+    await waitFor(
+      () => readTurn(stack.v1, conversation.id, created.id),
+      (turn) => turn?.status === "running",
+      "the turn to start",
+    );
+
+    // A runner deploy: the new process cannot reach the old box (its
+    // bootstrap token was spent), reconcile reports it stopped, and the
+    // in-flight turn rides that death report back into the queue.
+    await stack.runner.stop();
+    const revived = await startTestRunner({
+      controlPlaneUrl: stack.api.origin,
+      ids: cx.ids,
+      config: cx.config,
+    });
+    await revived.reconcile();
+    revived.pump();
+
+    const finished = await waitFor(
+      async () => {
+        await revived.reconcile();
+        return readTurn(stack.v1, conversation.id, created.id);
+      },
+      (turn) => turn?.status === "done" || turn?.status === "failed",
+      "the resumed turn to finish",
+      90_000,
+    );
+    expect(finished?.status).toBe("done");
+    expect(
+      transcriptText(await fetchTranscript(stack.v1, conversation.id)),
+    ).toMatch(/\[state sessionRef=\S+ turnsRun=2\]/);
 
     await revived.stop();
     await revived.reap();

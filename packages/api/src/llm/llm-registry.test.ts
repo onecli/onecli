@@ -1,21 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { anthropic } from "./anthropic";
 import { openai } from "./openai";
-import { LLM_PROVIDERS, isLlmProviderId } from "./registry";
+import { LLM_PROVIDERS, forAuthMode, isLlmProviderId } from "./registry";
 import { getModelCatalog, resetModelCatalogCache } from "./catalog-cache";
 import { resolveAgentModel } from "./resolve";
+import type { LlmAuthMode } from "./types";
+
+const AUTH_MODES: readonly LlmAuthMode[] = ["api-key", "oauth"];
 
 describe("the provider definitions", () => {
   it("never offers an empty fallback — an empty picker is not a legal state", () => {
     for (const provider of Object.values(LLM_PROVIDERS))
-      expect(provider.fallback.length).toBeGreaterThan(0);
+      for (const authMode of AUTH_MODES)
+        expect(forAuthMode(provider, authMode).fallback.length).toBeGreaterThan(
+          0,
+        );
   });
 
   it("can resolve its own default with no network", () => {
-    for (const provider of Object.values(LLM_PROVIDERS)) {
-      expect(provider.defaultModel).not.toBe("");
-      expect(provider.isSelectable(provider.defaultModel)).toBe(true);
-    }
+    for (const provider of Object.values(LLM_PROVIDERS))
+      for (const authMode of AUTH_MODES) {
+        const { defaultModel, fallback } = forAuthMode(provider, authMode);
+        expect(provider.isSelectable(defaultModel)).toBe(true);
+        // The offline picker always offers the default it would run.
+        expect(fallback).toContain(defaultModel);
+      }
   });
 
   it("keys every provider by the secret type that names it", () => {
@@ -27,22 +36,60 @@ describe("the provider definitions", () => {
 
   it("hardcodes each catalog URL — never derived from a stored host", () => {
     for (const provider of Object.values(LLM_PROVIDERS))
-      expect(provider.catalogUrl).toMatch(/^https:\/\//);
+      for (const authMode of AUTH_MODES)
+        expect(forAuthMode(provider, authMode).catalogUrl).toMatch(
+          /^https:\/\//,
+        );
   });
 
-  it("lists with every API key", () => {
-    for (const provider of Object.values(LLM_PROVIDERS))
-      expect(provider.canList("api-key")).toBe(true);
+  it("answers an OpenAI ChatGPT login as its own product, on chatgpt.com", () => {
+    // gpt-5.4 retired from Codex with ChatGPT sign-in, and the login lists
+    // its models on chatgpt.com, not api.openai.com.
+    const login = forAuthMode(openai, "oauth");
+    expect(login.defaultModel).toBe("gpt-6.1-sol");
+    expect(login.catalogUrl).toBe(
+      "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
+    );
+    expect(login.fallback).not.toContain("gpt-5.4");
+    // An API key keeps every API answer.
+    expect(forAuthMode(openai, "api-key")).toEqual({
+      defaultModel: openai.defaultModel,
+      catalogUrl: openai.catalogUrl,
+      parseCatalog: openai.parseCatalog,
+      fallback: openai.fallback,
+    });
   });
 
-  it("refuses to list with an OpenAI OAuth blob, whose refresh the gateway owns", () => {
-    expect(openai.canList("oauth")).toBe(false);
+  it("sends a ChatGPT login's current token as the gateway sends it", () => {
+    // The gateway refreshes the blob and writes it back, so the control plane
+    // reads the current token and never refreshes anything itself.
+    const blob = (tokens: Record<string, unknown>) =>
+      JSON.stringify({ tokens: { refresh_token: "rt-1", ...tokens } });
+    expect(
+      openai.catalogHeaders(
+        blob({ access_token: "at-1", account_id: "acct-1" }),
+        "oauth",
+      ),
+    ).toEqual({
+      authorization: "Bearer at-1",
+      "chatgpt-account-id": "acct-1",
+    });
+    // No account id: the bearer alone, like the gateway.
+    expect(
+      openai.catalogHeaders(blob({ access_token: "at-1" }), "oauth"),
+    ).toEqual({ authorization: "Bearer at-1" });
+    // A blob with no usable token sends nothing: the listing fails and
+    // degrades to the pinned list.
+    for (const value of ["not-json", blob({ access_token: "" }), "{}"])
+      expect(openai.catalogHeaders(value, "oauth")).toEqual({});
+    expect(openai.catalogHeaders("sk-x", "api-key")).toEqual({
+      authorization: "Bearer sk-x",
+    });
   });
 
   it("lists with an Anthropic subscription token, sent as the gateway sends it", () => {
     // A subscription agent must see its subscription's models, not the pinned
     // list: the `sk-ant-oat` setup token is long-lived and needs no refresh.
-    expect(anthropic.canList("oauth")).toBe(true);
     expect(anthropic.catalogHeaders("sk-ant-oat-x", "oauth")).toEqual({
       authorization: "Bearer sk-ant-oat-x",
       "anthropic-version": "2023-06-01",
@@ -73,10 +120,54 @@ describe("parsing a provider catalog", () => {
   });
 
   it("survives a body that is not the shape we expect", () => {
-    for (const body of [null, undefined, 42, "nope", {}, { data: "no" }]) {
-      expect(anthropic.parseCatalog(body)).toEqual([]);
-      expect(openai.parseCatalog(body)).toEqual([]);
-    }
+    const parsers = [
+      anthropic.parseCatalog,
+      openai.parseCatalog,
+      forAuthMode(openai, "oauth").parseCatalog,
+    ];
+    for (const body of [
+      null,
+      undefined,
+      42,
+      "nope",
+      {},
+      { data: "no" },
+      { models: "no" },
+    ])
+      for (const parse of parsers) expect(parse(body)).toEqual([]);
+  });
+
+  it("keeps only the models a ChatGPT login may pick, in the server's order", () => {
+    // `visibility` is the Codex client's own picker rule: `hide` and `none`
+    // are internal models (reviewers, reserves) the login must not offer.
+    const parse = forAuthMode(openai, "oauth").parseCatalog;
+    expect(
+      parse({
+        models: [
+          {
+            slug: "gpt-6.1-sol",
+            display_name: "GPT-6.1 Sol",
+            visibility: "list",
+          },
+          { slug: "gpt-reserve", display_name: "Reserve", visibility: "hide" },
+          { slug: "gpt-6-luna", visibility: "list" },
+          { slug: "codex-auto-review", visibility: "none" },
+          { slug: "", visibility: "list" },
+          { display_name: "no slug", visibility: "list" },
+          null,
+        ],
+      }),
+    ).toEqual([
+      { id: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { id: "gpt-6-luna" },
+    ]);
+    // The API's shape is not a ChatGPT list, and vice versa.
+    expect(parse({ data: [{ id: "gpt-5.4" }] })).toEqual([]);
+    expect(
+      openai.parseCatalog({
+        models: [{ slug: "gpt-6-luna", visibility: "list" }],
+      }),
+    ).toEqual([]);
   });
 
   it("filters OpenAI's inventory down to models an agent could run", () => {
@@ -285,18 +376,128 @@ describe("the catalog cache", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  it("never asks for a credential it has already decided it cannot use", async () => {
-    // An OAuth secret DOES have a decryptable blob, so deciding after the
-    // decrypt would burn a KMS call on every request for such an agent.
-    const spy = vi.fn().mockResolvedValue(ok());
+  it("serves a ChatGPT login its own live list from chatgpt.com", async () => {
+    const chatgpt = {
+      models: [
+        {
+          slug: "gpt-6.1-sol",
+          display_name: "GPT-6.1-Sol",
+          visibility: "list",
+        },
+        {
+          slug: "gpt-reserve",
+          display_name: "GPT-Reserve",
+          visibility: "hide",
+        },
+        {
+          slug: "gpt-5.6-luna",
+          display_name: "GPT-5.6-Luna",
+          visibility: "list",
+        },
+        { slug: "codex-auto-review", visibility: "hide" },
+      ],
+    };
+    const spy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(chatgpt), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
     vi.stubGlobal("fetch", spy);
-    const credential = vi.fn().mockResolvedValue("oauth-blob");
+    // The stored shape: an uploaded auth.json is only accepted with both
+    // tokens (`parseOpenaiOAuthJson`), the same parser the listing reads it
+    // with.
+    const blob = JSON.stringify({
+      tokens: {
+        access_token: "at-1",
+        refresh_token: "rt-1",
+        account_id: "acct-1",
+      },
+    });
 
-    const result = await getModelCatalog(openai, "sec-1", credential, "oauth");
-    expect(credential).not.toHaveBeenCalled();
-    expect(spy).not.toHaveBeenCalled();
+    const result = await getModelCatalog(
+      openai,
+      "sec-1",
+      async () => blob,
+      "oauth",
+    );
+    expect(result.degraded).toBe(false);
+    // Only pickable (`visibility: "list"`) models, with ChatGPT's own names.
+    expect(result.models.map((m) => [m.id, m.label])).toEqual([
+      ["gpt-6.1-sol", "GPT-6.1-Sol"],
+      ["gpt-5.6-luna", "GPT-5.6-Luna"],
+    ]);
+    expect(spy).toHaveBeenCalledWith(
+      "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
+      expect.objectContaining({
+        headers: {
+          authorization: "Bearer at-1",
+          "chatgpt-account-id": "acct-1",
+        },
+      }),
+    );
+  });
+
+  it("falls back to the pinned list when a ChatGPT token is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("{}", { status: 401 })),
+    );
+    const blob = JSON.stringify({
+      tokens: { access_token: "expired", refresh_token: "rt-1" },
+    });
+    const result = await getModelCatalog(
+      openai,
+      "sec-1",
+      async () => blob,
+      "oauth",
+    );
     expect(result.degraded).toBe(true);
-    expect(result.models.length).toBeGreaterThan(0);
+    expect(result.models.map((m) => m.id)).toEqual([
+      ...forAuthMode(openai, "oauth").fallback,
+    ]);
+    expect(result.models[0]?.id).toBe("gpt-6.1-sol");
+  });
+
+  it("never answers a ChatGPT login from the same secret's API-key list", async () => {
+    // One secret's value can be replaced by the other kind of credential, and
+    // the two list different products: the API list offers models a ChatGPT
+    // login refuses outright.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: "gpt-5.4" }] }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            models: [{ slug: "gpt-6.1-sol", visibility: "list" }],
+          }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", spy);
+
+    const asKey = await getModelCatalog(
+      openai,
+      "sec-1",
+      async () => "sk-x",
+      "api-key",
+    );
+    const asLogin = await getModelCatalog(
+      openai,
+      "sec-1",
+      async () =>
+        JSON.stringify({
+          tokens: { access_token: "at-1", refresh_token: "rt-1" },
+        }),
+      "oauth",
+    );
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(asKey.models.map((m) => m.id)).toEqual(["gpt-5.4"]);
+    expect(asLogin.models.map((m) => m.id)).toEqual(["gpt-6.1-sol"]);
   });
 
   it("keeps serving a stale list forever rather than emptying the picker", async () => {
@@ -388,15 +589,9 @@ describe("the catalog cache", () => {
     expect(unauthorized.models.length).toBeGreaterThan(0);
   });
 
-  it("never calls out for a credential that cannot list", async () => {
+  it("never calls out without a credential", async () => {
     const spy = vi.fn().mockResolvedValue(ok());
     vi.stubGlobal("fetch", spy);
-    const oauth = await getModelCatalog(
-      openai,
-      "sec-1",
-      async () => "oauth-blob",
-      "oauth",
-    );
     const none = await getModelCatalog(
       provider,
       "sec-1",
@@ -404,10 +599,8 @@ describe("the catalog cache", () => {
       "api-key",
     );
     expect(spy).not.toHaveBeenCalled();
-    for (const result of [oauth, none]) {
-      expect(result.degraded).toBe(true);
-      expect(result.models.length).toBeGreaterThan(0);
-    }
+    expect(none.degraded).toBe(true);
+    expect(none.models.length).toBeGreaterThan(0);
   });
 
   it("serves an Anthropic subscription its own live list, fetched with a bearer", async () => {
@@ -457,11 +650,27 @@ describe("the catalog cache", () => {
 describe("resolving what an agent runs", () => {
   const none = { model: null, effort: null, modelProvider: null };
 
-  it("falls back to the provider's default when nothing is overridden", () => {
-    expect(resolveAgentModel(none, "anthropic")).toEqual({
+  it("runs the provider's default at its default level when nothing is overridden", () => {
+    expect(resolveAgentModel(none, "anthropic", "api-key")).toEqual({
       model: anthropic.defaultModel,
+      effort: "low",
+      chosenEffort: null,
       overridden: false,
     });
+  });
+
+  it("defaults a ChatGPT login to a model the login can run, at Low", () => {
+    // gpt-5.4 retired from Codex with ChatGPT sign-in, so the login gets its
+    // own default; an API key keeps the API one.
+    expect(resolveAgentModel(none, "openai", "oauth")).toEqual({
+      model: "gpt-6.1-sol",
+      effort: "low",
+      chosenEffort: null,
+      overridden: false,
+    });
+    expect(resolveAgentModel(none, "openai", "api-key").model).toBe(
+      openai.defaultModel,
+    );
   });
 
   it("uses the override when it belongs to this provider", () => {
@@ -473,8 +682,50 @@ describe("resolving what an agent runs", () => {
           modelProvider: "anthropic",
         },
         "anthropic",
+        "api-key",
       ),
-    ).toEqual({ model: "claude-opus-4-6", effort: "high", overridden: true });
+    ).toEqual({
+      model: "claude-opus-4-6",
+      effort: "high",
+      chosenEffort: "high",
+      overridden: true,
+    });
+  });
+
+  it("runs a chosen model at its own default level unless a level is chosen too", () => {
+    // The default level is only known-good for the default model: a model
+    // with no reasoning control (GPT-4.1, Claude Haiku 4.5) refuses one.
+    for (const [provider, model] of [
+      ["anthropic", "claude-haiku-4-5"],
+      ["openai", "gpt-4.1"],
+    ] as const) {
+      const resolved = resolveAgentModel(
+        { model, effort: null, modelProvider: provider },
+        provider,
+        "api-key",
+      );
+      expect(resolved).toEqual({ model, chosenEffort: null, overridden: true });
+      expect(resolved).not.toHaveProperty("effort");
+    }
+  });
+
+  it("keeps the default level when the chosen model IS the default", () => {
+    expect(
+      resolveAgentModel(
+        {
+          model: anthropic.defaultModel,
+          effort: null,
+          modelProvider: "anthropic",
+        },
+        "anthropic",
+        "api-key",
+      ),
+    ).toEqual({
+      model: anthropic.defaultModel,
+      effort: "low",
+      chosenEffort: null,
+      overridden: false,
+    });
   });
 
   it("IGNORES an override stamped for a different provider", () => {
@@ -488,8 +739,14 @@ describe("resolving what an agent runs", () => {
           modelProvider: "anthropic",
         },
         "openai",
+        "api-key",
       ),
-    ).toEqual({ model: openai.defaultModel, overridden: false });
+    ).toEqual({
+      model: openai.defaultModel,
+      effort: "low",
+      chosenEffort: null,
+      overridden: false,
+    });
   });
 
   it("allows effort alone, keeping the default model", () => {
@@ -497,21 +754,25 @@ describe("resolving what an agent runs", () => {
       resolveAgentModel(
         { model: null, effort: "max", modelProvider: "anthropic" },
         "anthropic",
+        "api-key",
       ),
     ).toEqual({
       model: anthropic.defaultModel,
       effort: "max",
+      chosenEffort: "max",
       overridden: true,
     });
   });
 
-  it("drops an effort level this provider cannot express", () => {
-    expect(
-      resolveAgentModel(
-        // "xhigh" is a level some harnesses have and our scale does not.
-        { model: null, effort: "xhigh", modelProvider: "anthropic" },
-        "anthropic",
-      ).effort,
-    ).toBeUndefined();
+  it("drops an effort level this provider cannot express, back to the default", () => {
+    const resolved = resolveAgentModel(
+      // "xhigh" is a level some harnesses have and our scale does not.
+      { model: null, effort: "xhigh", modelProvider: "anthropic" },
+      "anthropic",
+      "api-key",
+    );
+    expect(resolved.effort).toBe("low");
+    expect(resolved.chosenEffort).toBeNull();
+    expect(resolved.overridden).toBe(false);
   });
 });

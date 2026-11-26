@@ -15,7 +15,7 @@ const detail = (patch: Partial<RunDetail> = {}): RunDetail => ({
   conversationId: "conversation",
   agent: { id: "agent", name: "Donna" },
   source: "eval",
-  direct: false,
+  privateThread: false,
   status: "failed",
   question: "Real question",
   answer: null,

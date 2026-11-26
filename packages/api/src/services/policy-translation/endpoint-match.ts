@@ -6,7 +6,8 @@ import type { OldCondition, PolicyRequest } from "./types";
 // corpus tests the TRANSLATION, not the matcher — the matcher's fidelity to the
 // gateway is proven separately in path-match.test.ts. Host matching is done by
 // the caller (hostMatches); this covers path + method + conditions + the git
-// discovery bridge, exactly as policy.rs::matches_request does.
+// discovery bridge, exactly as the gateway's `policy/src/lib.rs::matches_request`
+// does.
 
 /**
  * Port of `apps/gateway/crates/policy/src/condition_match.rs::matches`. Absent/empty
@@ -42,7 +43,7 @@ const conditionMatches = (
   return true;
 };
 
-// Port of `policy.rs::is_git_discovery` - `/info/refs?service=<pack-service>`.
+// Port of `policy/src/lib.rs::is_git_discovery` - `/info/refs?service=<pack-service>`.
 const isGitDiscovery = (path: string, service: string): boolean => {
   const qIdx = path.indexOf("?");
   const base = qIdx === -1 ? path : path.slice(0, qIdx);
@@ -55,7 +56,7 @@ const isGitDiscovery = (path: string, service: string): boolean => {
 
 // The two git-over-HTTPS pack services whose POST rules bridge to their GET
 // discovery request (mirrors the `["git-receive-pack", "git-upload-pack"]`
-// array in `policy.rs::matches_request`).
+// array in `policy/src/lib.rs::matches_request`).
 const GIT_PACK_SERVICES = ["git-receive-pack", "git-upload-pack"] as const;
 
 export interface EndpointPattern {
@@ -65,7 +66,7 @@ export interface EndpointPattern {
 }
 
 /**
- * Port of `policy.rs::matches_request` (host excluded — matched by the caller).
+ * Port of `policy/src/lib.rs::matches_request` (host excluded — matched by the caller).
  * A rule on a git pack service (`POST …/git-receive-pack` or
  * `…/git-upload-pack`) also matches its preceding
  * `GET …/info/refs?service=<service>` discovery request - so a push BLOCK

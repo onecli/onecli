@@ -21,6 +21,12 @@ import type { NewRule } from "../../services/policy-translation/types";
 // This catches both ways a default attach could leak: an opted-in catalog
 // whose API has such a GET, and a read TOOL broad enough to swallow one (a
 // raw `/projects/*` prefix covering `/projects/{id}/variables`).
+//
+// GitHub is the one opted-in catalog with such a GET: its secret scanning
+// alerts return the leaked secret, under `get_repo`'s `/repos/*/*` itself.
+// The gateway holds them whatever the grant allows, so they are pinned there
+// (`apps/gateway/crates/policy-engine/src/secret_reads.rs` and the
+// `grant-other-reads-writes` gateway e2e), not by this evaluator.
 
 /** A GET the default grant must hold, and the doc that says why. */
 interface SensitiveRead {
@@ -85,6 +91,33 @@ const SENSITIVE_READS: Record<string, SensitiveRead[]> = {
       host: "gitlab.com",
       path: "/api/v4/groups/1/variables",
       why: "returns group CI/CD variable values",
+    },
+  ],
+  bitbucket: [
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/pipelines_config/variables",
+      why: "returns repository Pipelines variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/deployments_config/environments/%7Be1%7D/variables",
+      why: "returns deployment environment variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/workspaces/acme/pipelines-config/variables",
+      why: "returns workspace Pipelines variables (unsecured values in clear)",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/deploy-keys",
+      why: "lists the repository's deploy keys",
+    },
+    {
+      host: "api.bitbucket.org",
+      path: "/2.0/repositories/acme/web/hooks",
+      why: "lists webhooks, whose target URLs can embed credentials",
     },
   ],
   supabase: [

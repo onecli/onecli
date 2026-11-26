@@ -4,6 +4,7 @@ import {
   ResolverUnreachableError,
   type Resolver,
 } from "./backend/types";
+import { boundedWait } from "./bounded-wait";
 import {
   ControlPlaneUnreachableError,
   type ControlPlaneClient,
@@ -61,26 +62,6 @@ const PROGRESS_THROTTLE_MS = 10_000;
  */
 const BANNER_DRAIN_TIMEOUT_MS = 2_000;
 
-/** Resolves when `settle` reports done, or when the drain bound elapses —
- * never rejects, so a wedged peer cannot pin a closing session's socket. */
-const drainBounded = (settle: (done: () => void) => void): Promise<void> =>
-  new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, BANNER_DRAIN_TIMEOUT_MS);
-    timer.unref();
-    try {
-      settle(finish);
-    } catch {
-      finish();
-    }
-  });
-
 /**
  * Resolves when the channel reports closed, or when the bound elapses.
  *
@@ -98,7 +79,7 @@ const drainBounded = (settle: (done: () => void) => void): Promise<void> =>
 const closeAcked = (channel: NotifiableChannel): Promise<void> => {
   const once = channel.once?.bind(channel);
   if (!once) return Promise.resolve();
-  return drainBounded((done) => once("close", done));
+  return boundedWait((done) => once("close", done), BANNER_DRAIN_TIMEOUT_MS);
 };
 
 export class WakeTimeoutError extends Error {
@@ -291,7 +272,10 @@ export const createConnectionSession = <T>(
             const acked = closeAcked(channel);
             flushes.push(
               // The write flush: the banner bytes reached our socket.
-              drainBounded((done) => channel.write(`\r\n${banner}\r\n`, done)),
+              boundedWait(
+                (done) => channel.write(`\r\n${banner}\r\n`, done),
+                BANNER_DRAIN_TIMEOUT_MS,
+              ),
               acked,
             );
           }

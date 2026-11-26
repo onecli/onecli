@@ -88,32 +88,126 @@ const mount = (editable: string[] = ["q-pass", "q-broke"]) => {
   return { onInspect, onEdit };
 };
 
+/** Open every result (they start closed), once the run has loaded. */
+const openAll = async () => {
+  const list = await screen.findByRole("list", { name: "Results" });
+  const user = userEvent.setup();
+  for (const trigger of within(list).queryAllByRole("button", {
+    name: /^Show result/,
+  }))
+    await user.click(trigger);
+  return list;
+};
+
 beforeEach(() => api.getRun.mockReset());
 afterEach(() => cleanup());
 
 describe("RunResults", () => {
-  it("lists what broke first, with the expected answer beside the agent's", async () => {
+  it("lists questions in run order, all closed until opened", async () => {
     api.getRun.mockResolvedValue(run());
     mount();
     const list = await screen.findByRole("list", { name: "Results" });
+    const user = userEvent.setup();
     const [first, second] = [...list.children].map((item) =>
       item instanceof HTMLElement ? item : null,
     );
+    expect(first).toHaveTextContent("1.How many customers?");
+    expect(second).toHaveTextContent("2.Who renewed?");
+    // Every result starts closed, whatever its outcome.
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+    expect(screen.queryByText("We have 42 customers.")).toBeNull();
 
-    expect(first).toHaveTextContent("Who renewed?");
-    expect(first).toHaveTextContent("Broke since last run");
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show result 2, Mismatch: Who renewed?",
+      }),
+    );
+    expect(screen.getByText("Nobody renewed.")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Hide result 2, Mismatch: Who renewed?",
+      }),
+    );
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(screen.getByText("We have 42 customers.")).toBeInTheDocument();
+    expect(screen.getByText("Nobody renewed.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByText("Nobody renewed.")).toBeNull();
+  });
+
+  it("filters to an outcome by clicking its count, and back", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    const list = await screen.findByRole("list", { name: "Results" });
+    const user = userEvent.setup();
+    const mismatches = screen.getByRole("button", {
+      name: "Show only 1 mismatch",
+    });
+    await user.click(mismatches);
+    expect(mismatches).toHaveAttribute("aria-pressed", "true");
+    expect(list.children).toHaveLength(1);
+    expect(list).toHaveTextContent("2.Who renewed?");
+    await user.click(mismatches);
+    expect(list.children).toHaveLength(2);
+  });
+
+  it("drops a filter whose count went to 0, instead of an empty list nobody can clear", async () => {
+    vi.useFakeTimers();
+    try {
+      api.getRun
+        .mockResolvedValueOnce(
+          run({
+            status: "running",
+            counts: {
+              pending: 1,
+              passed: 1,
+              mismatch: 0,
+              error: 0,
+              inconclusive: 0,
+            },
+            results: [result()],
+          }),
+        )
+        .mockResolvedValue(run());
+      mount();
+      await act(() => vi.advanceTimersByTimeAsync(10));
+      act(() =>
+        screen.getByRole("button", { name: "Show only 1 waiting" }).click(),
+      );
+      // The run finishes: nothing is waiting, and the Waiting chip is gone.
+      await act(() => vi.advanceTimersByTimeAsync(2_010));
+      expect(
+        screen.queryByRole("button", { name: /Show only \d+ waiting/ }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("list", { name: "Results" }).children,
+      ).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the expected answer beside the agent's, and how it moved", async () => {
+    api.getRun.mockResolvedValue(run());
+    mount();
+    const list = await openAll();
+    const second = list.children[1];
+    expect(second).toHaveTextContent("Who renewed?");
+    expect(second).toHaveTextContent("Broke since last run");
     expect(
-      within(first ?? list).getByRole("img", { name: "Mismatch" }),
+      within(second as HTMLElement).getByRole("img", { name: "Mismatch" }),
     ).toBeInTheDocument();
-    expect(first).toHaveTextContent("Nobody renewed.");
-    expect(second).toHaveTextContent("How many customers?");
+    expect(second).toHaveTextContent("Acme");
+    expect(second).toHaveTextContent("Nobody renewed.");
     expect(api.getRun).toHaveBeenCalledWith("ag-1", "run-1");
   });
 
   it("says which required apps were reached, in words, not color alone", async () => {
     api.getRun.mockResolvedValue(run());
     mount();
-    await screen.findByRole("list", { name: "Results" });
+    await openAll();
     expect(screen.getByText("Gmail").parentElement).toHaveTextContent(
       "Gmailreached",
     );
@@ -126,7 +220,7 @@ describe("RunResults", () => {
     api.getRun.mockResolvedValue(run());
     const { onInspect, onEdit } = mount(["q-pass"]);
     const user = userEvent.setup();
-    await screen.findByRole("list", { name: "Results" });
+    await openAll();
 
     expect(
       screen.queryByRole("button", {
@@ -220,6 +314,7 @@ describe("RunResults", () => {
       }),
     );
     mount();
+    await openAll();
     expect(
       await screen.findByText('<img src=x onerror="alert(1)">'),
     ).toBeInTheDocument();
@@ -248,7 +343,7 @@ describe("RunResults", () => {
       }),
     );
     mount();
-    const list = await screen.findByRole("list", { name: "Results" });
+    const list = await openAll();
     expect(
       within(list).getByRole("img", { name: "Did not finish" }),
     ).toBeInTheDocument();
@@ -280,7 +375,7 @@ describe("RunResults", () => {
       }),
     );
     mount();
-    await screen.findByRole("list", { name: "Results" });
+    await openAll();
     expect(screen.getByText("(could not be checked)")).toBeInTheDocument();
     expect(screen.getByText("Gmail").parentElement).toHaveTextContent(
       "Gmailnot checked",
@@ -303,6 +398,7 @@ describe("RunResults", () => {
       }),
     );
     mount();
+    await openAll();
     const user = userEvent.setup();
     const more = await screen.findByRole("button", { name: "Show more" });
     expect(screen.queryByText(/THE END/)).toBeNull();
@@ -347,10 +443,11 @@ describe("RunResults", () => {
       }),
     );
     mount();
-    await screen.findByRole("list", { name: "Results" });
+    await openAll();
     expect(screen.getByText("Success criteria")).toBeInTheDocument();
     expect(screen.getByText("failed it")).toBeInTheDocument();
-    expect(screen.getByText(/1 of 2 criteria met/)).toBeInTheDocument();
+    // In the row header and in the judge's verdict.
+    expect(screen.getAllByText(/1 of 2 criteria met/)).toHaveLength(2);
     const criteria = screen.getByRole("list", { name: "Criteria" });
     expect(criteria).toHaveTextContent("Met: Currency moved to USD");
     expect(criteria).toHaveTextContent("Not met: Moved in late 2025");
@@ -365,7 +462,7 @@ describe("RunResults", () => {
       }),
     );
     mount();
-    await screen.findByRole("list", { name: "Results" });
+    await openAll();
     expect(
       screen.getByText("The answer could not be judged: The judge timed out"),
     ).toBeInTheDocument();

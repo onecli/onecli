@@ -94,11 +94,10 @@ export interface AgentChannelsView {
   /** What an attach would use right now — and, on servers that offer a
    * choice, what it could use instead (absent on older servers). */
   posture: { transport: ChannelTransport; available?: ChannelTransport[] };
-  /** The org the agent's workspace belongs to — the "set up Slack at the
-   * org level" deep-link target. */
+  /** The org the agent's workspace belongs to. */
   organizationId: string;
-  /** Whether the CALLER may open that target (it sits behind the org admin
-   * layout, which silently bounces non-admins). Absent on older servers —
+  /** Whether the CALLER may open Settings > Slack (it is admin-only, and
+   * the modal opens nothing for a member). Absent on older servers:
    * treat as true (the pre-existing behavior: show the link). */
   viewerIsOrgAdmin?: boolean;
   orgIntegrations: {

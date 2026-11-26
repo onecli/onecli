@@ -82,84 +82,158 @@
   }
 }
 
-/* Light mode (exists for completeness, dark is default) */
-:root {
-  --background: oklch(0.985 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.97 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.93 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  /* OneCLI brand: green #14994c */
-  --brand: #14994c;
-  --brand-foreground: #ffffff;
+/*
+ * The chat's streaming reveal. The markdown renderer (streamdown) wraps each
+ * word of a reply still being written in `[data-sd-animate]` and names the
+ * keyframes per word through `--sd-animation` (`sd-fadeIn`), with its own
+ * duration, easing and stagger delay. Ours, not the library's stylesheet:
+ * importing it would ship its other animations and selectors to every page.
+ * Plain CSS (not a theme token) because nothing here goes through a Tailwind
+ * variant; the reduced-motion rule below is what turns it off.
+ *
+ * `both` fill: a word is invisible until its delay elapses, then fades in,
+ * so a batch of words that mounts at once still reads as one soft motion.
+ */
+@keyframes sd-fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
-/* Dark mode — OneCLI terminal aesthetic */
+/* A list's marker is painted by `::marker`, which the per-word spans cannot
+ * wrap; it fades in by color (the one property `::marker` animates). */
+@keyframes sd-markerIn {
+  from {
+    color: transparent;
+  }
+}
+
+[data-sd-animate] {
+  animation: var(--sd-animation, sd-fadeIn) var(--sd-duration, 150ms)
+    var(--sd-easing, ease) var(--sd-delay, 0ms) both;
+}
+
+[data-sd-animate-marker]::marker {
+  animation: sd-markerIn var(--sd-marker-duration, 150ms)
+    var(--sd-marker-easing, ease) var(--sd-marker-delay, 0ms) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-sd-animate],
+  [data-sd-animate-marker]::marker {
+    animation: none;
+  }
+}
+
+/*
+ * "Still writing": a small dot after the last word of a reply that is still
+ * a draft (`data-draft` on the chat markdown root). It goes the moment the
+ * final answer lands, which is how a reader tells a draft from the record.
+ * After prose only: a code block or table ends the block visibly already,
+ * and a dot after one would float on a line of its own.
+ */
+[data-draft] > div > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+[data-draft] > div > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin-inline-start: 0.35em;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.4;
+  vertical-align: 0.05em;
+  animation: draft-caret 1.1s ease-in-out infinite;
+}
+
+@keyframes draft-caret {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-draft] > div > :is(p, h1, h2, h3, h4, blockquote):last-child::after,
+  [data-draft] > div > :is(ul, ol):last-child > li:last-child::after {
+    animation: none;
+  }
+}
+
+/* Light mode — the default. Warm paper and ink, matching onecli.sh; flat
+ * white panels on a cream canvas, like Alta. */
+:root {
+  --canvas: #f4f1ea;
+  --background: #fdfbf7;
+  --foreground: #151b27;
+  --card: #ffffff;
+  --card-foreground: #151b27;
+  --popover: #ffffff;
+  --popover-foreground: #151b27;
+  --primary: #0e1726;
+  --primary-foreground: #ffffff;
+  --secondary: #f3efe8;
+  --secondary-foreground: #151b27;
+  --muted: #f3efe8;
+  --muted-foreground: #5d6370;
+  --accent: #f1ece4;
+  --accent-foreground: #151b27;
+  --destructive: #c4321c;
+  --destructive-foreground: #b02a16;
+  --border: #e9e3d9;
+  --input: #ddd6ca;
+  --ring: #19ba5d;
+  --chart-1: #12904a;
+  --chart-2: #2f8f9d;
+  --chart-3: #19ba5d;
+  --chart-4: #e8a33d;
+  --chart-5: #ff7d14;
+  --radius: 0.5rem;
+  /* OneCLI brand green, as on onecli.sh */
+  --brand: #12904a;
+  --brand-foreground: #ffffff;
+  --brand-wash: #e8f5ed;
+  /* Green text on the brand wash (4.5:1); --brand itself is for fills. */
+  --brand-ink: #0e7a3d;
+}
+
+/* Dark mode — the same warm palette, at night */
 .dark {
-  --background: #1f1e1d;
-  --foreground: oklch(0.985 0 0);
-  --card: #272625;
-  --card-foreground: oklch(0.985 0 0);
-  --popover: #272625;
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.1 0 0);
-  --secondary: oklch(0.22 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.22 0 0);
-  --muted-foreground: oklch(0.6 0 0);
-  --accent: oklch(0.22 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.55 0.2 27.325);
-  --destructive-foreground: oklch(0.75 0.18 25.331);
-  --border: oklch(0.4 0 0);
-  --input: oklch(0.4 0 0);
-  --ring: oklch(0.4 0 0);
-  --chart-1: #14994c;
-  --chart-2: oklch(0.75 0.15 200);
-  --chart-3: #12944a;
-  --chart-4: oklch(0.7 0.12 200);
-  --chart-5: #0d6e37;
-  --sidebar: #1a1918;
-  --sidebar-foreground: oklch(0.985 0 0);
-  /* OneCLI brand green for sidebar active states */
-  --sidebar-primary: #14994c;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.3 0 0);
-  --sidebar-ring: oklch(0.35 0 0);
-  /* OneCLI brand: green #14994c */
+  --canvas: #121110;
+  --background: #1a1917;
+  --foreground: #f4f1eb;
+  --card: #201f1c;
+  --card-foreground: #f4f1eb;
+  --popover: #24221f;
+  --popover-foreground: #f4f1eb;
+  --primary: #f4f1eb;
+  --primary-foreground: #151412;
+  --secondary: #2a2825;
+  --secondary-foreground: #f4f1eb;
+  --muted: #2a2825;
+  --muted-foreground: #a7a299;
+  --accent: #2c2a26;
+  --accent-foreground: #f4f1eb;
+  --destructive: #d9472f;
+  --destructive-foreground: #f08a74;
+  --border: #33302b;
+  --input: #403c36;
+  --ring: #19ba5d;
+  --chart-1: #19ba5d;
+  --chart-2: #4fb3c2;
+  --chart-3: #12904a;
+  --chart-4: #e8a33d;
+  --chart-5: #ff7d14;
   --brand: #14994c;
   --brand-foreground: #ffffff;
+  --brand-wash: rgb(25 186 93 / 0.14);
+  --brand-ink: #4fd88a;
 }
 
 @theme inline {
@@ -191,16 +265,24 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
   --color-brand: var(--brand);
   --color-brand-foreground: var(--brand-foreground);
+  --color-brand-wash: var(--brand-wash);
+  --color-brand-ink: var(--brand-ink);
+  --color-canvas: var(--canvas);
+  --font-sans:
+    var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --font-mono:
+    var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  /* Warm, low shadows (onecli.sh) instead of neutral grey ones */
+  --shadow-xs: 0 1px 2px rgb(40 30 15 / 0.05);
+  --shadow-sm:
+    0 1px 2px rgb(40 30 15 / 0.05), 0 2px 6px -2px rgb(40 30 15 / 0.08);
+  --shadow-md:
+    0 1px 2px rgb(40 30 15 / 0.06), 0 8px 24px -10px rgb(40 30 15 / 0.22);
+  --shadow-lg:
+    0 1px 2px rgb(40 30 15 / 0.06), 0 18px 40px -20px rgb(40 30 15 / 0.32);
 }
 
 @layer base {
@@ -208,7 +290,8 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
   }
 
   button:not([disabled]),

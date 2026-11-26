@@ -11,7 +11,7 @@ const ERROR_DURATION_MS = 8000;
  * timed out / rate limited (408/429). A 4xx refusal (forbidden, invalid, a
  * plan limit) answers the same way every time, so no Retry is offered for it.
  */
-export const isRetryable = (error: unknown): boolean =>
+const isRetryable = (error: unknown): boolean =>
   !(error instanceof ApiError) ||
   error.status >= 500 ||
   error.status === 408 ||

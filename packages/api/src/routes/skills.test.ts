@@ -180,8 +180,7 @@ describe("the workspace door", () => {
       {
         name: "big",
         description: "d",
-        content: "x".repeat(24_000),
-        files: [{ path: "extra.md", content: "y".repeat(10_000) }],
+        content: "x".repeat(120_001),
         agentId: "ag-1",
       },
     ]) {

@@ -22,6 +22,8 @@ export interface FakeSandboxRecord {
   spec: SandboxSpec;
   containerRef: ContainerRef;
   running: boolean;
+  /** The machine a cluster substrate would report (tests set it). */
+  node?: string;
 }
 
 export interface FakeBackend extends SandboxBackend {
@@ -193,6 +195,7 @@ export const createFakeBackend = (): FakeBackend => {
         running: record.running,
         payloadHash: record.spec.payloadHash,
         resumable: record.spec.resumable,
+        ...(record.node && { node: record.node }),
       }));
     },
 

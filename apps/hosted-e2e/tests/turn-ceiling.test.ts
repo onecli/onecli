@@ -19,10 +19,9 @@ import {
  * it, is then failed with the honest `turn_time_limit` copy, and — the part
  * the row alone cannot prove — the orphaned sandbox is actually STOPPED: the
  * sweep's abort flag rides the claim arm's failed leg to the supervisor,
- * whose late terminal report then has its sessionRef salvaged onto the
- * conversation. The salvage is the proof of the whole chain: it only exists
- * if the abort reached the sandbox and the real close came back after the
- * sweep had already won.
+ * whose run then ends and lands its accumulated answer, after the sweep had
+ * already won. That answer (the warning's echo, without the canary) is the
+ * proof of the whole chain: it only exists if the abort reached the sandbox.
  */
 
 scenario(
@@ -91,18 +90,19 @@ scenario(
     expect(settled?.errorCode).toBe("turn_time_limit");
     expect(settled?.error).toContain("reached its time limit");
 
-    // The orphan was genuinely stopped, and its dying report was salvaged:
-    // the abort flag was claimed off the failed row, and the late turn.result
-    // (a fenced no-op for the row itself) still landed its sessionRef — the
-    // resume handle the next turn needs.
-    await waitFor(
-      () =>
-        cx.prisma.conversation.findUnique({
-          where: { id: conversation.id },
-          select: { harnessSessionRef: true },
-        }),
-      (row) => row?.harnessSessionRef != null,
-      "the aborted run's session ref to be salvaged",
+    // The orphan was genuinely stopped: the abort flag was claimed off the
+    // failed row, and the aborted run's accumulated answer landed in the
+    // transcript (the durable text is written when the abort ends the
+    // stream). The answer must carry the warning's echo (steered in mid-run)
+    // and must NOT carry the canary: the post-sleep text never arrived, so
+    // the sandbox really did stop instead of streaming into the failed row.
+    // (The session ref is no witness here: the running turn's heartbeat
+    // already persisted it, long before the run ended.)
+    const transcript = await waitFor(
+      async () =>
+        transcriptText(await fetchTranscript(stack.v1, conversation.id)),
+      (text) => text.includes("approaching its time limit"),
+      "the aborted run's answer to land",
       30_000,
     );
     const row = await cx.prisma.turn.findUniqueOrThrow({
@@ -110,17 +110,6 @@ scenario(
       select: { abortRequested: true },
     });
     expect(row.abortRequested).toBe(false);
-
-    // The transcript is read only NOW: deltas are live-only, and the durable
-    // accumulated text lands when the abort ends the stream — which the
-    // salvage above just proved happened. It must carry the warning's echo
-    // (steered in mid-run) and must NOT carry the canary: the post-sleep
-    // text never arrived, so the sandbox really did stop instead of
-    // streaming into the failed row.
-    const transcript = transcriptText(
-      await fetchTranscript(stack.v1, conversation.id),
-    );
-    expect(transcript).toContain("approaching its time limit");
     expect(transcript).not.toContain("never reached");
 
     await stack.runner.pausePump();

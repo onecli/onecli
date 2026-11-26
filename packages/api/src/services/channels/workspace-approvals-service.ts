@@ -23,18 +23,15 @@ import {
   updateWebhookArgsSchema,
 } from "../../validations/webhooks";
 
-/** An agent-proposed custom connection, as the approve card renders it.
- * Every field is non-secret by construction (the proposal has no value). */
+/** An agent-proposed custom connection, as the approve card renders it:
+ * the name and where the key goes, nothing else. The proposal's docs link,
+ * reason and header shape stay in the frozen payload, so no agent-chosen
+ * link or prose ever reaches the card. */
 export interface CustomConnectionProposalView {
   name: string;
   hostPattern: string;
-  /** The owner the key is sent to: the card highlights it. */
+  /** The owner the key is sent to: the card names it. */
   registrableDomain: string | null;
-  pathPattern: string | null;
-  headerName: string;
-  valueFormat: string;
-  docsUrl: string | null;
-  reason: string;
 }
 
 /** The structured view of a custom-connection payload, or null when the
@@ -52,11 +49,6 @@ const customConnectionView = (
     name: p.name,
     hostPattern: p.hostPattern,
     registrableDomain: registrableDomainOf(p.hostPattern),
-    pathPattern: p.pathPattern ?? null,
-    headerName: p.headerName,
-    valueFormat: p.valueFormat,
-    docsUrl: p.docsUrl ?? null,
-    reason: p.reason,
   };
 };
 
@@ -171,10 +163,11 @@ export interface PendingActionApprovalItem {
    * who the agent wants to reach, never a one-off (the registry's answer,
    * the same one the Slack card asks). */
   standingChoice: boolean;
-  /** The conversation the asking turn ran in, when the hold is anchored on
-   * one: where the agent's chat renders the card inline. Null for holds
-   * with no asking turn (e.g. the receiving side of a cross-workspace
-   * agent message) - those live in the bell only. */
+  /** The conversation the agent's chat renders the card inline in: the
+   * asking turn's, or for a scheduled run, process watch or webhook the
+   * chat it reports to (its own conversation is rendered nowhere). Null
+   * for holds with no asking turn (e.g. the receiving side of a
+   * cross-workspace agent message). */
   conversationId: string | null;
   /** ISO timestamps. */
   createdAt: string;
@@ -219,6 +212,76 @@ export type PendingChannelApprovalItem =
   | PendingActionApprovalItem
   | PendingReachAskItem;
 
+/** A held approval's anchor, as the reporting-chat lookup reads it. */
+interface ApprovalAnchor {
+  /** The agent that asked: the only agent whose chat may show it. */
+  agentId: string;
+  conversation: { id: string; source: string; externalRef: string | null };
+}
+
+const ORIGIN_SELECT = {
+  id: true,
+  originConversation: { select: { id: true, agentId: true } },
+} as const;
+
+/**
+ * Each automation source whose runs get a conversation of their own
+ * (`externalRef` = the automation's id), and how to find the chat that
+ * automation was created from, where its reports land.
+ */
+const AUTOMATION_ORIGINS = {
+  cron: (ids: string[]) =>
+    db.agentCron.findMany({
+      where: { id: { in: ids } },
+      select: ORIGIN_SELECT,
+    }),
+  watch: (ids: string[]) =>
+    db.processWatch.findMany({
+      where: { id: { in: ids } },
+      select: ORIGIN_SELECT,
+    }),
+  webhook: (ids: string[]) =>
+    db.agentWebhook.findMany({
+      where: { id: { in: ids } },
+      select: ORIGIN_SELECT,
+    }),
+};
+
+/**
+ * Where each automation run's conversation reports. A scheduled run, a
+ * process watch or a webhook runs in a conversation no chat renders, and
+ * delivers to the chat it was created from; a hold it raised shows there
+ * too, where its owner will see it. Only a report chat of the agent that
+ * asked counts: a client can mint a conversation with any source and ref,
+ * and it must never borrow another agent's chat. Every other conversation
+ * keeps its own id. One query per automation kind present.
+ */
+const reportingChatsFor = async (
+  anchors: readonly ApprovalAnchor[],
+): Promise<Map<string, string>> => {
+  const found = await Promise.all(
+    Object.entries(AUTOMATION_ORIGINS).map(async ([source, findOrigins]) => {
+      const refs = new Set(
+        anchors.flatMap(({ conversation: c }) =>
+          c.source === source && c.externalRef ? [c.externalRef] : [],
+        ),
+      );
+      if (refs.size === 0) return [];
+      const rows = await findOrigins([...refs]);
+      return rows.map(
+        (row) => [`${source}:${row.id}`, row.originConversation] as const,
+      );
+    }),
+  );
+  const origins = new Map(found.flat());
+  const reportsTo = new Map<string, string>();
+  for (const { agentId, conversation: c } of anchors) {
+    const to = origins.get(`${c.source}:${c.externalRef}`);
+    if (to?.agentId === agentId) reportsTo.set(c.id, to.id);
+  }
+  return reportsTo;
+};
+
 /** Oldest first: the longest-waiting ask is the one to surface. */
 export const listWorkspacePendingChannelApprovals = async (
   workspaceId: string,
@@ -239,7 +302,9 @@ export const listWorkspacePendingChannelApprovals = async (
         action: true,
         payload: true,
         summary: true,
-        conversationId: true,
+        conversation: {
+          select: { id: true, source: true, externalRef: true },
+        },
         createdAt: true,
         expiresAt: true,
         agent: { select: { name: true } },
@@ -264,6 +329,11 @@ export const listWorkspacePendingChannelApprovals = async (
   const visibleActions = actions.filter((a) =>
     isVisibleTo(a.action, a.payload, viewerUserId),
   );
+  const reportsTo = await reportingChatsFor(
+    visibleActions.flatMap(({ agentId, conversation }) =>
+      conversation ? [{ agentId, conversation }] : [],
+    ),
+  );
   const items: PendingChannelApprovalItem[] = [
     ...visibleActions.map(
       (a): PendingActionApprovalItem => ({
@@ -273,7 +343,9 @@ export const listWorkspacePendingChannelApprovals = async (
         agentName: a.agent.name,
         summary: a.summary,
         standingChoice: isStandingChoice(a.action),
-        conversationId: a.conversationId,
+        conversationId: a.conversation
+          ? (reportsTo.get(a.conversation.id) ?? a.conversation.id)
+          : null,
         createdAt: a.createdAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
         customConnection: customConnectionView(a.action, a.payload),

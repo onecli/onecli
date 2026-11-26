@@ -39,16 +39,15 @@ const FREE_ORG_CREDENTIAL_FILES = [
   "packages/api/src/apps/oauth-org.ts",
   "packages/api/src/apps/resolve-org-credentials.ts",
   "packages/api/src/apps/org-app-config.ts",
-  // Web surface (layout.tsx carried the old EnterpriseLockedCard gate)
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/layout.tsx",
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-connections-layout.tsx",
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-connections-tabs.tsx",
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-apps-page.tsx",
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-connected-page.tsx",
-  "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-secrets-page.tsx",
+  // Web surface: Settings > Organization > Shared apps (the modal body that
+  // replaced the global-connections route pages; the old layout.tsx carried
+  // the EnterpriseLockedCard gate). The only lock left on the page is the
+  // App Availability editor, an enterprise control, not the credentials.
+  "apps/web/src/lib/settings-modal/shared-apps-body.tsx",
+  "apps/web/src/lib/settings-modal/workspace-app-detail-body.tsx",
+  "apps/web/src/lib/settings-modal/shared-app-detail-body.tsx",
   "apps/web/src/app/(dashboard)/org/[orgId]/(admin)/settings/global-connections/_components/global-app-detail-page.tsx",
   "apps/web/src/lib/actions/org-secrets.ts",
-  "apps/web/src/lib/actions/org-app-config.ts",
 ];
 
 describe("org credentials are free", () => {

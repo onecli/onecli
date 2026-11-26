@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Service-level tests for the app-availability RULE model: ownership checks
 // (cross-org IDOR rejection), the rule-id-matched replace-set diff, no-op rule
 // dropping, forged-id safety, and the derive. The DB is mocked; the full
-// inheritance derivation is proven against real Postgres by the gateway's
+// inheritance derivation is proven against real Postgres by
+// routes/app-availability-wire.pg.test.ts and by the gateway's
 // find_available_providers verification (this is its TS mirror).
 
 const store = vi.hoisted(() => ({

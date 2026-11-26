@@ -6,6 +6,8 @@ import {
   findOrgLiveSubscription,
   findOrgLiveSubscriptions,
   hasPendingCancellation,
+  isLiveSubscription,
+  isPastDueSubscription,
   previewRenewalDate,
   resolveProrationDate,
   summarizeSwitchPreview,
@@ -295,6 +297,35 @@ describe("hasPendingCancellation", () => {
     expect(
       hasPendingCancellation(subscription([], { cancel_at: 1783000000 })),
     ).toBe(true);
+  });
+});
+
+describe("subscription status classes", () => {
+  // Every Stripe status sits in exactly one bucket: live grants the plan,
+  // past due means a failed payment (free until paid), and the rest grant
+  // nothing. Typed as a `Record` over Stripe's status union, so type-checking
+  // fails when Stripe adds a status and a new one is classified on purpose.
+  const CLASSES: Record<
+    Stripe.Subscription.Status,
+    "live" | "pastDue" | "none"
+  > = {
+    active: "live",
+    trialing: "live",
+    past_due: "pastDue",
+    unpaid: "pastDue",
+    canceled: "none",
+    incomplete: "none",
+    incomplete_expired: "none",
+    paused: "none",
+  };
+  const isStatus = (s: string): s is Stripe.Subscription.Status => s in CLASSES;
+  const cases = Object.keys(CLASSES)
+    .filter(isStatus)
+    .map((status) => ({ status, kind: CLASSES[status] }));
+
+  it.each(cases)("classifies $status as $kind", ({ status, kind }) => {
+    expect(isLiveSubscription({ status })).toBe(kind === "live");
+    expect(isPastDueSubscription({ status })).toBe(kind === "pastDue");
   });
 });
 

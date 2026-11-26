@@ -2,13 +2,14 @@
  * The Slack ADDRESS CODEC — the one place the `<channel>:<threadRootTs>`
  * packing is encoded and decoded.
  *
- * A group thread's platform address packs both halves into one opaque
- * string (`externalThreadId` on links, conversations, and reach rows); a
- * DM's address is the bare IM channel id. Before this file the codec was
- * split across three files in two runtimes — the encoder in the api's
- * interpret.ts, the full decoder in the adapter's targets.ts, and a
- * half-decoder (channel-only) in the api's reach facet — which is exactly
- * how one side changes the format and the other keeps parsing yesterday's.
+ * A THREAD's platform address packs both halves into one opaque string
+ * (`externalThreadId` on links, conversations, and reach rows), whether the
+ * thread sits in a channel or inside a DM; a DM's TOP LEVEL is the bare IM
+ * channel id. Before this file the codec was split across three files in
+ * two runtimes — the encoder in the api's interpret.ts, the full decoder in
+ * the adapter's targets.ts, and a half-decoder (channel-only) in the api's
+ * reach facet — which is exactly how one side changes the format and the
+ * other keeps parsing yesterday's.
  */
 
 /** The group-thread address (the step-6 decision): the THREAD, not the
@@ -17,15 +18,27 @@
 export const groupThreadId = (channel: string, threadRootTs: string): string =>
   `${channel}:${threadRootTs}`;
 
-/** Where a link's posts go: `direct` links address the IM channel itself;
- * `group` links unpack the codec. A group id with no separator degrades to
- * channel-only (top-level post) rather than throwing — a malformed stored
- * address must never take down the completion pass. */
+/**
+ * A thread opened INSIDE a DM: the same packing as a group thread, over the
+ * IM channel. The DM's top level keeps the bare IM id (the person's one
+ * direct conversation, shared with the web); each thread under it is its
+ * own conversation, addressed by this. The link stays `direct` — the reply
+ * still goes to the IM, narrowed to the thread — so the decoder below
+ * reads the packing for both kinds.
+ */
+export const directThreadId = (
+  imChannel: string,
+  threadRootTs: string,
+): string => `${imChannel}:${threadRootTs}`;
+
+/** Where a link's posts go, from its address ALONE: one packing for both
+ * link kinds — a bare channel id (a DM's top level) addresses the channel,
+ * a packed `<channel>:<ts>` addresses that thread. An id with no separator
+ * degrades to channel-only (top-level post) rather than throwing — a
+ * malformed stored address must never take down the completion pass. */
 export const unpackThreadAddress = (
-  kind: "direct" | "group",
   externalThreadId: string,
 ): { channel: string; threadTs: string | null } => {
-  if (kind === "direct") return { channel: externalThreadId, threadTs: null };
   const separator = externalThreadId.indexOf(":");
   if (separator === -1) return { channel: externalThreadId, threadTs: null };
   return {

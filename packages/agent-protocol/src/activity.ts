@@ -166,6 +166,7 @@ const TOOL_PHRASES: Record<string, ToolPhrase> = {
     done: "Checked its schedule",
   },
   cancel_task: { running: "Cancelling a task", done: "Cancelled a task" },
+  update_task: { running: "Updating a task", done: "Updated a task" },
   list_webhooks: {
     running: "Checking its webhooks",
     done: "Checked its webhooks",
@@ -268,6 +269,15 @@ const OWN_REPLY_FAILED: Record<string, string> = {
   delete_my_reply: "Couldn't delete its reply",
 };
 
+/** An own-reply change in a named conversation: its line once done, and
+ * the verb a held or waiting one names (a message sent as the person goes
+ * through their approval, so "Deleted" would claim what has not happened).
+ * Neutral "a message": it may be the agent's post or one sent as you. */
+const OWN_REPLY_ELSEWHERE: Record<string, { done: string; what: string }> = {
+  edit_my_reply: { done: "Edited a message", what: "edit a message" },
+  delete_my_reply: { done: "Deleted a message", what: "delete a message" },
+};
+
 /** One string field of a JSON object, flattened and capped (untrusted). */
 const fieldOf = (raw: string | undefined, key: string): string | null => {
   if (!raw) return null;
@@ -283,6 +293,19 @@ const fieldOf = (raw: string | undefined, key: string): string | null => {
       : flat;
   } catch {
     return null;
+  }
+};
+
+/** How many files a send_message input carries (`files` paths). */
+const filesOf = (raw: string | undefined): number => {
+  if (!raw) return 0;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") return 0;
+    const files: unknown = Reflect.get(value, "files");
+    return Array.isArray(files) ? files.length : 0;
+  } catch {
+    return 0;
   }
 };
 
@@ -337,11 +360,41 @@ export const activityForToolCall = (
   if (ownReplyFailed && !running && result?.isError === true) {
     return ownReplyFailed;
   }
+  const elsewhere = OWN_REPLY_ELSEWHERE[bare];
+  const where = elsewhere ? fieldOf(input, "conversation") : null;
+  if (elsewhere && where && !running && result?.isError !== true) {
+    switch (outcomeOf(result?.output, false)) {
+      case "held":
+        return `Waiting for your approval: ${elsewhere.what} in ${where}`;
+      case "needs_input":
+        return `Needs your input: ${elsewhere.what} in ${where}`;
+      default:
+        return `${elsewhere.done} in ${where}`;
+    }
+  }
   if (!SEND_TOOLS.has(bare)) return base;
   const target = targetOf(bare, input);
   const words = ACTION_WORDS[bare]!;
   const to = (prep: string) => (target ? ` ${prep} ${target}` : "");
   const prep = bare === "send_as_me" || bare === "send_message" ? "to" : "in";
+  // send_message with files: "Sending 2 files to #x", then the outcome.
+  const fileCount = bare === "send_message" ? filesOf(input) : 0;
+  if (fileCount > 0) {
+    const files = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
+    if (running) return `Sending ${files}${to("to")}`;
+    if (result) {
+      switch (outcomeOf(result.output, result.isError === true)) {
+        case "held":
+          return `Waiting for approval: send ${files}${to("to")}`;
+        case "failed":
+          return `Couldn't send ${files}${to("to")}`;
+        case "done":
+          return `Sent ${files}${to("to")}`;
+        default:
+          break;
+      }
+    }
+  }
   if (!running && result) {
     const outcome = outcomeOf(result.output, result.isError === true);
     switch (outcome) {
@@ -356,6 +409,9 @@ export const activityForToolCall = (
       case "done":
         break;
     }
+  }
+  if (bare === "send_message" && !running && target) {
+    if (fieldOf(input, "thread")) return `Posted in a thread in ${target}`;
   }
   if (!AS_YOU_TOOLS.has(bare) || !target) return base;
   return `${base}${to(prep)}`;
@@ -416,4 +472,96 @@ export const activityForReasoning = (raw: string): string | null => {
     .slice(0, cut)
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd()}…`;
+};
+
+/**
+ * How much of a reasoning stream the caption reads: its tail. A model can
+ * think for pages, and the caption only ever wants the latest heading or
+ * sentence, so a bounded tail keeps the per-delta cost flat however long
+ * the block runs.
+ */
+export const REASONING_TAIL_MAX = 4_000;
+
+/** A `**Title**` that closes its line: how reasoning summaries name a step
+ *  (a bold heading, then prose). Models do not always put a newline before
+ *  it (a summary part can follow the previous one directly), so only the
+ *  END of the line is required. Inline emphasis mid-sentence ("this is
+ *  **key** here") is never followed by the line's end, so it never reads
+ *  as a heading. An unclosed `**Checking the con` cannot match at all. */
+const REASONING_TITLE = /\*\*([^*\n]{2,120})\*\*(?=[ \t]*(?:\n|$))/g;
+
+/** A sentence terminator that ENDS a sentence: followed by whitespace or
+ *  the end of the text. Words still being written ("Next I") have none. */
+const TERMINATOR = /[.!?](?=\s|$)/g;
+
+/**
+ * The finished sentences of one line, newest LAST. Linear: it walks the
+ * terminators once and slices between them. (A `[^.!?]+[.!?]` regex
+ * re-scans from every start position on a long line with no terminator,
+ * quadratic in the 4 KB tail, about 10 ms per delta.)
+ */
+const completeSentences = (line: string): string[] => {
+  const out: string[] = [];
+  let start = 0;
+  for (const match of line.matchAll(TERMINATOR)) {
+    const end = match.index + 1;
+    const sentence = line.slice(start, end);
+    if (/[^.!?\s]/.test(sentence)) out.push(sentence);
+    start = end;
+  }
+  return out;
+};
+
+/** The first boundary in a sliced tail: everything before it is the end of
+ *  a sentence whose start was cut away. */
+const FIRST_BOUNDARY = /[.!?](?=\s)|\n/;
+
+/**
+ * The activity line for a reasoning STREAM: everything the model has thought
+ * since the last tool call, accumulated across `thinking.delta` events.
+ *
+ * Why not `activityForReasoning` on each delta: a delta is a slice of the
+ * stream cut wherever a network batch happened to close, so its "first line"
+ * routinely starts mid-word ("ying out the plan…", "ate it."). Reading the
+ * accumulated text instead, and only what the model has FINISHED writing,
+ * the caption is always a whole thought:
+ *
+ * 1. the latest `**Title**` heading (how reasoning summaries name a step), else
+ * 2. the latest finished unit: a complete sentence, or a line the model has
+ *    closed with a newline (a short status line rarely ends in a period), else
+ * 3. nothing yet (null): the previous caption stands rather than flashing a
+ *    fragment.
+ *
+ * Same output contract as `activityForReasoning`: one bounded, inert line.
+ */
+export const activityForReasoningStream = (raw: string): string | null => {
+  let tail = raw;
+  if (raw.length > REASONING_TAIL_MAX) {
+    // The slice starts mid-sentence: skip to the first boundary so the cut
+    // sentence's back half can never be read as a whole one.
+    const sliced = raw.slice(-REASONING_TAIL_MAX);
+    const boundary = sliced.search(FIRST_BOUNDARY);
+    tail = boundary === -1 ? "" : sliced.slice(boundary + 1);
+  }
+
+  const title = [...tail.matchAll(REASONING_TITLE)].at(-1)?.[1];
+  if (title) {
+    const line = activityForReasoning(title);
+    if (line) return line;
+  }
+
+  // Newest first. Every line but the last is closed; the last is still being
+  // written, so only its finished sentences count. A closed line offers its
+  // last sentence, or itself whole when it has none ("Reviewing the diff").
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sentences = completeSentences(lines[i]!);
+    const closed = i < lines.length - 1;
+    const candidates = closed ? [lines[i]!, ...sentences] : sentences;
+    for (let j = candidates.length - 1; j >= 0; j--) {
+      const line = activityForReasoning(candidates[j]!.trim());
+      if (line) return line;
+    }
+  }
+  return null;
 };

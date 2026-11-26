@@ -85,7 +85,7 @@ describe("ApprovalsPopover (4d, the one inbox)", () => {
       // case below, which must render none).
       expect(screen.getByRole("img", { name: "Slack" })).toBeDefined();
       const fix = screen.getByRole("link", { name: "Fix in Slack" });
-      expect(fix.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/channels");
+      expect(fix.getAttribute("href")).toBe("/w/ws-1/agents/ag-1/contacts");
       expect(screen.queryByText("You're all caught up.")).toBeNull();
 
       fireEvent.click(fix);
@@ -186,5 +186,31 @@ describe("ApprovalsPopover (4d, the one inbox)", () => {
     }
     expect(screen.queryByRole("button", { name: "Needs approval" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Teammates only" })).toBeNull();
+  });
+
+  it("a custom connection names the agent that asked: the bell holds every agent's asks", () => {
+    mocks.gateway = [];
+    mocks.channel = [
+      {
+        kind: "action",
+        id: "act-cc",
+        agentId: "ag-2",
+        agentName: "Harvey",
+        summary: 'connect "AcmeCRM"',
+        standingChoice: false,
+        conversationId: "conv-2",
+        createdAt: "2026-09-07T10:00:00Z",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        webhookChange: null,
+        customConnection: {
+          name: "AcmeCRM",
+          hostPattern: "api.acmecrm.io",
+          registrableDomain: "acmecrm.io",
+        },
+      },
+    ];
+    renderPopover();
+    expect(screen.getByText("Connect AcmeCRM?")).toBeDefined();
+    expect(screen.getByText("Harvey")).toBeDefined();
   });
 });

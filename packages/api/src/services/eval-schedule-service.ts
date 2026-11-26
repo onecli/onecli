@@ -4,9 +4,13 @@ import { z } from "zod";
 import { ServiceError } from "./errors";
 import { computeNextFire } from "./agent-cron-service";
 import { requireHostedAgent } from "./agent-eval-service";
+import { listMemberChannels } from "./channels/recipient-search-service";
 import {
+  EVAL_REPORT_WHEN,
   EVAL_SCHEDULE_DISABLED_REASONS,
   EVAL_SCHEDULE_OUTCOMES,
+  type EvalReport,
+  type EvalReportBody,
   type EvalScheduleBody,
 } from "../validations/evals";
 
@@ -19,10 +23,11 @@ import {
  * are validated by the same croner path the agent crons use
  * (`computeNextFire`, jitter included), so a stored row is always
  * advanceable. FIRING is not here: due schedules are claimed on the runner
- * poll (`due-work.ts`) and fired by `eval-schedule-fire-service.ts`.
+ * poll (`due-work.ts`) and fired, like Run now, by
+ * `eval-schedule-fire-service.ts`.
  *
- * Reads, deletes and run-now are fenced on the agent's workspace in the
- * query. The save upserts on the agent's unique id after the same fence
+ * Reads and deletes are fenced on the agent's workspace in the query. The
+ * save upserts on the agent's unique id after the same fence
  * (`requireHostedAgent`): an agent never changes workspace, so the checked
  * agent is the written one.
  */
@@ -35,14 +40,58 @@ const scheduleSelect = {
   nextFireAt: true,
   lastFiredAt: true,
   lastOutcome: true,
+  createdByUserId: true,
+  reportTo: true,
+  reportChannelRef: true,
+  reportChannelLabel: true,
+  reportWhen: true,
 } satisfies Prisma.AgentEvalScheduleSelect;
 type ScheduleRow = Prisma.AgentEvalScheduleGetPayload<{
   select: typeof scheduleSelect;
 }>;
 
-/** Unknown stored values read as null rather than failing the screen. */
-const toView = (row: ScheduleRow) => ({
+/** The stored report columns read back; an unknown or half-written row
+ * reads as "not sent" rather than failing. */
+export const reportOf = (
+  row: Pick<
+    ScheduleRow,
+    "reportTo" | "reportChannelRef" | "reportChannelLabel" | "reportWhen"
+  >,
+): EvalReport | null => {
+  const when = z.enum(EVAL_REPORT_WHEN).catch("always").parse(row.reportWhen);
+  if (row.reportTo === "chat") return { to: "chat", when };
+  if (row.reportTo === "channel" && row.reportChannelRef)
+    return {
+      to: "channel",
+      channelRef: row.reportChannelRef,
+      channelLabel: row.reportChannelLabel ?? row.reportChannelRef,
+      when,
+    };
+  return null;
+};
+
+/** Unknown stored values read as null rather than failing the screen. The
+ * creator's id stays server-side: the viewer learns only whether results
+ * reach THEIR chat (`createdByViewer`). */
+const toView = (
+  {
+    createdByUserId,
+    reportTo,
+    reportChannelRef,
+    reportChannelLabel,
+    reportWhen,
+    ...row
+  }: ScheduleRow,
+  viewerUserId: string,
+) => ({
   ...row,
+  createdByViewer: createdByUserId === viewerUserId,
+  report: reportOf({
+    reportTo,
+    reportChannelRef,
+    reportChannelLabel,
+    reportWhen,
+  }),
   disabledReason: z
     .enum(EVAL_SCHEDULE_DISABLED_REASONS)
     .nullable()
@@ -89,16 +138,63 @@ const assertMinInterval = (schedule: string, timezone: string) => {
   }
 };
 
+/** The stored columns for a report setting. A channel must be one the
+ * agent's bot is in right now: its name is recorded for display, and a
+ * channel the bot cannot post in is refused here, not at the first run. */
+const reportColumns = async (
+  agentId: string,
+  report: EvalReportBody | null,
+) => {
+  if (!report)
+    return {
+      reportTo: null,
+      reportChannelRef: null,
+      reportChannelLabel: null,
+      reportWhen: "always",
+    };
+  if (report.to === "chat")
+    return {
+      reportTo: "chat",
+      reportChannelRef: null,
+      reportChannelLabel: null,
+      reportWhen: report.when,
+    };
+  const channel = (await listMemberChannels(agentId)).find(
+    (c) => c.ref === report.channelRef,
+  );
+  if (!channel)
+    throw new ServiceError(
+      "UNPROCESSABLE",
+      "The agent isn't in that channel. Add it to the channel first.",
+    );
+  return {
+    reportTo: "channel",
+    reportChannelRef: channel.ref,
+    reportChannelLabel: channel.name,
+    reportWhen: report.when,
+  };
+};
+
+/** Channels a scheduled run's results can be sent to (the bot is in them). */
+export const listEvalReportChannels = async (
+  workspaceId: string,
+  agentId: string,
+) => {
+  await requireHostedAgent(workspaceId, agentId);
+  return listMemberChannels(agentId);
+};
+
 export const getEvalSchedule = async (
   workspaceId: string,
   agentId: string,
+  viewerUserId: string,
 ): Promise<EvalScheduleView | null> => {
   await requireHostedAgent(workspaceId, agentId);
   const row = await db.agentEvalSchedule.findFirst({
     where: fenced(workspaceId, agentId),
     select: scheduleSelect,
   });
-  return row ? toView(row) : null;
+  return row ? toView(row, viewerUserId) : null;
 };
 
 /**
@@ -126,6 +222,9 @@ export const saveEvalSchedule = async (
     disabledReason: null,
     createdByUserId: userId,
     nextFireAt,
+    // Absent keeps the stored setting (the pause switch); null clears it.
+    ...(input.report !== undefined &&
+      (await reportColumns(agentId, input.report))),
   };
   const row = await db.agentEvalSchedule.upsert({
     where: { agentId },
@@ -133,7 +232,7 @@ export const saveEvalSchedule = async (
     update: data,
     select: scheduleSelect,
   });
-  return toView(row);
+  return toView(row, userId);
 };
 
 export const deleteEvalSchedule = async (
@@ -145,34 +244,4 @@ export const deleteEvalSchedule = async (
     where: fenced(workspaceId, agentId),
   });
   if (count === 0) throw new ServiceError("NOT_FOUND", "No eval schedule");
-};
-
-/**
- * Fire the schedule on the next poll, through exactly the machinery a timed
- * fire uses (the agent crons' "run now" rule: no direct fire path).
- */
-export const runEvalScheduleNow = async (
-  workspaceId: string,
-  agentId: string,
-): Promise<EvalScheduleView> => {
-  await requireHostedAgent(workspaceId, agentId);
-  const { count } = await db.agentEvalSchedule.updateMany({
-    where: { ...fenced(workspaceId, agentId), enabled: true },
-    data: { nextFireAt: new Date() },
-  });
-  if (count === 0) {
-    const exists = await db.agentEvalSchedule.findFirst({
-      where: fenced(workspaceId, agentId),
-      select: { id: true },
-    });
-    throw exists
-      ? new ServiceError("UNPROCESSABLE", "The eval schedule is paused")
-      : new ServiceError("NOT_FOUND", "No eval schedule");
-  }
-  return toView(
-    await db.agentEvalSchedule.findFirstOrThrow({
-      where: fenced(workspaceId, agentId),
-      select: scheduleSelect,
-    }),
-  );
 };

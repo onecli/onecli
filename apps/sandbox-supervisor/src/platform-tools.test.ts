@@ -56,6 +56,7 @@ interface Rig {
 
 const rig = async (options?: {
   timeoutMs?: number;
+  forwardReserveMs?: number;
   activeTurn?: () => { conversationId: string; turnId: string } | null;
   /** A live tool set — the supervisor's production shape since the
    * capability set can change under a running container. */
@@ -69,6 +70,9 @@ const rig = async (options?: {
     send: (message) => sent.push(message),
     activeTurn: options?.activeTurn ?? (() => null),
     ...(options?.timeoutMs && { timeoutMs: options.timeoutMs }),
+    ...(options?.forwardReserveMs && {
+      forwardReserveMs: options.forwardReserveMs,
+    }),
   });
   cleanup.push(() => tools.close());
 
@@ -167,6 +171,169 @@ describe("platform tools", () => {
     const answer = await pendingAnswer;
     expect(answer.ok).toBe(true);
     expect(answer.result).toEqual({ cronId: "cr-1" });
+  });
+
+  describe("loop guard", () => {
+    const loopRig = async () => {
+      let turnId = "t-loop";
+      const r = await rig({
+        activeTurn: () => ({ conversationId: "c-1", turnId }),
+        tools: () => [...TOOLS, MESSAGE_AGENT],
+      });
+      const call = async (tool: string, ok: boolean) => {
+        const before = r.sent.length;
+        const answer = r.request({ op: "call", tool, args: {} });
+        await expect.poll(() => r.sent.length).toBe(before + 1);
+        const sentCall = r.sent[before] as Extract<
+          SupervisorMessage,
+          { kind: "tool.call" }
+        >;
+        r.tools.handleToolResult(
+          ok
+            ? {
+                kind: "tool.result",
+                callId: sentCall.callId,
+                ok: true,
+                result: { done: true },
+              }
+            : {
+                kind: "tool.result",
+                callId: sentCall.callId,
+                ok: false,
+                error: "nope",
+              },
+        );
+        return answer;
+      };
+      return { call, nextTurn: (id: string) => (turnId = id) };
+    };
+    const stops = (answer: { error?: unknown }) =>
+      String(answer.error).includes("Stop calling it");
+
+    it("from the 2nd failure in a row of one tool in one turn, the refusal says stop (and keeps the tool's own error)", async () => {
+      const { call } = await loopRig();
+      const first = await call("schedule_task", false);
+      expect(first.error).toBe("nope");
+      const second = await call("schedule_task", false);
+      expect(second.ok).toBe(false);
+      expect(String(second.error)).toContain("nope");
+      expect(String(second.error)).toContain("2 times in a row");
+      expect(stops(second)).toBe(true);
+    });
+
+    it("a success in between resets it: work spread over many calls is never cut off", async () => {
+      const { call } = await loopRig();
+      for (let i = 0; i < 3; i += 1) {
+        expect(stops(await call("schedule_task", false))).toBe(false);
+        expect((await call("schedule_task", true)).ok).toBe(true);
+      }
+    });
+
+    it("counts per tool and per turn: another tool's failures, or the last turn's, don't add up", async () => {
+      const { call, nextTurn } = await loopRig();
+      expect(stops(await call("schedule_task", false))).toBe(false);
+      expect(stops(await call("message_agent", false))).toBe(false);
+      nextTurn("t-next");
+      expect(stops(await call("schedule_task", false))).toBe(false);
+    });
+
+    it("a local prepare refusal counts too: the 2nd in a row says stop, nothing forwarded", async () => {
+      const r = await rig({
+        activeTurn: () => ({ conversationId: "c-1", turnId: "t-prep" }),
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async () => ({ ok: false, error: "a.csv: No file." }),
+          },
+        ],
+      });
+      const call = () =>
+        r.request({ op: "call", tool: "send_message", args: {} });
+      expect((await call()).error).toBe("a.csv: No file.");
+      const second = await call();
+      expect(String(second.error)).toContain("a.csv: No file.");
+      expect(stops(second)).toBe(true);
+      expect(r.sent).toHaveLength(0);
+    });
+  });
+
+  describe("prepare (a local step before the forward)", () => {
+    it("shares the call's clock: prepare gets a deadline leaving the forward its reserve, and the forward only what is left", async () => {
+      // Relationships, not wall-clock bounds (a loaded CI host stretches
+      // any absolute window): prepare's deadline sits a reserve before the
+      // call's end, and the forward then times out on what is LEFT, so the
+      // whole call ends after prepare's deadline by about the reserve, far
+      // short of a fresh full timeout.
+      const TIMEOUT = 2_000;
+      const RESERVE = 300;
+      let deadlineSeen = 0;
+      let calledAt = 0;
+      const r = await rig({
+        timeoutMs: TIMEOUT,
+        forwardReserveMs: RESERVE,
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async (args, _context, deadline) => {
+              calledAt = Date.now();
+              deadlineSeen = deadline;
+              // Spend the prepare's whole share of the clock.
+              await new Promise((resolve) =>
+                setTimeout(resolve, Math.max(0, deadline - Date.now())),
+              );
+              return { ok: true, args: { ...(args as object), staged: 1 } };
+            },
+          },
+        ],
+      });
+      const answer = await r.request({
+        op: "call",
+        tool: "send_message",
+        args: { to: "#x" },
+      });
+      const endedAt = Date.now();
+      // The forward went out with the rewritten args, then timed out.
+      expect(r.sent[0]).toMatchObject({
+        kind: "tool.call",
+        args: { to: "#x", staged: 1 },
+      });
+      expect(String(answer.error)).toContain("did not answer");
+      // prepare's deadline = the call's deadline minus the reserve.
+      expect(deadlineSeen - calledAt).toBeLessThanOrEqual(TIMEOUT - RESERVE);
+      expect(deadlineSeen - calledAt).toBeGreaterThan(TIMEOUT - RESERVE - 500);
+      // MUTATION-PROOF: give the forward a fresh timeout and the call ends
+      // ~TIMEOUT after prepare's deadline instead of ~RESERVE.
+      expect(endedAt - deadlineSeen).toBeLessThan(TIMEOUT - 500);
+    });
+
+    it("a prepare that overran the whole call forwards nothing", async () => {
+      const r = await rig({
+        timeoutMs: 100,
+        forwardReserveMs: 50,
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async (args) => {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              return { ok: true, args };
+            },
+          },
+        ],
+      });
+      const answer = await r.request({
+        op: "call",
+        tool: "send_message",
+        args: { to: "#x" },
+      });
+      expect(answer).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Nothing was sent"),
+      });
+      expect(r.sent).toHaveLength(0);
+    });
   });
 
   it("times out into a tool error the model can read — the channel cannot retry", async () => {

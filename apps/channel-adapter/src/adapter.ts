@@ -16,6 +16,7 @@ import {
   type GroupApprovalDecision,
   type ProviderTransport,
 } from "./providers";
+import { agentPageUrl } from "./web-links";
 
 /**
  * The orchestrator: reconcile provider connections against the config feed,
@@ -282,6 +283,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
     input: {
       approvalId: string;
       decision: "approve" | "deny";
+      scope?: "similar";
       clickerExternalUserId: string;
     },
   ): Promise<void> => {
@@ -295,6 +297,7 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
         presenceId: runtime.presence.presenceId,
         approvalId: input.approvalId,
         decision: input.decision,
+        ...(input.scope && { scope: input.scope }),
         clickerExternalUserId: input.clickerExternalUserId,
       });
       const text = runtime.provider.decisionSettledText({
@@ -459,10 +462,10 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       item,
       // The agent's Models page — where a key-problem answer's button points.
       ...(config.appUrl && {
-        modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
+        modelsUrl: agentPageUrl(config.appUrl, agent, "models"),
         // The agent's chat — connect-card buttons land the user back in the
         // conversation with the attach dialog open.
-        chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
+        chatUrl: agentPageUrl(config.appUrl, agent, "chat"),
         // The web door for one of this turn's files (the degrade line's
         // link): the workspace's Files page. Same shape the web's
         // navigation.ts builds (workspaceFilePath); every id percent-encoded,
@@ -492,8 +495,8 @@ export const createAdapter = ({ config, controlPlane, log }: AdapterDeps) => {
       item,
       // The same doors the completion pass hands a reply's connect cards.
       ...(config.appUrl && {
-        modelsUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/models`,
-        chatUrl: `${config.appUrl}/w/${encodeURIComponent(agent.workspaceId)}/agents/${encodeURIComponent(agent.id)}/chat`,
+        modelsUrl: agentPageUrl(config.appUrl, agent, "models"),
+        chatUrl: agentPageUrl(config.appUrl, agent, "chat"),
       }),
       onLog: log,
     });

@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   bundledJcodeBinary,
@@ -8,6 +9,8 @@ import {
   type ApiEvent,
   type HistoryMessage,
   type ImageAttachment,
+  type LaunchedInstance,
+  type SessionInfo,
 } from "@1jehuang/jcode-sdk";
 import {
   TURN_FAILURE_CODES,
@@ -38,6 +41,7 @@ import {
 } from "./jcode-steer";
 import { readJcodeToolOutput } from "./jcode-tool-output";
 import { healJcodeTranscripts } from "./jcode-transcript-heal";
+import { readJcodeTurnStopped } from "./jcode-turn-stopped";
 import { createJcodeWakeFeed } from "./jcode-wake";
 
 /**
@@ -48,14 +52,19 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *
  * Every switch below was verified against jcode v0.71.x source and
  * re-verified against v0.78.1 (2026-08-19), v0.81.1 (2026-08-26), v0.90.0
- * (2026-10-01), v0.90.1 (2026-10-05) and v0.94.0 (2026-10-11) at the pin
- * bumps:
+ * (2026-10-01), v0.90.1 (2026-10-05), v0.94.0 (2026-10-11) and
+ * v1.0.0-preview.136 (2026-11-03) at the pin bumps:
  * - `inheritLogins: false` — never import host provider logins (zero-cred).
  * - `JCODE_NO_TELEMETRY=1` — telemetry is on by default upstream.
  * - `JCODE_NO_AUTO_UPDATE=1` — the updater is on by default upstream, checks
  *   on EVERY process start, and on a headless process `exec()`s into the new
  *   binary mid-run, killing our socket. See resolveJcodeBinary /
- *   cleanJcodeUpdaterState for the other two thirds of the pin.
+ *   cleanJcodeUpdaterState for the other two thirds of the pin. The env
+ *   gates the AUTOMATIC update only: an explicit request (`jcode update` from
+ *   a shell, and from v1.0 the `update` runtime command on the daemon socket,
+ *   which this adapter never sends) still downloads. Such a build lands in
+ *   `$JCODE_HOME/builds`, never over the root-owned /opt/jcode binary, and
+ *   the boot purge deletes it, so every boot runs the pinned binary again.
  * - `JCODE_DISABLED_TOOLS` (JCODE_DISABLED_TOOLS_VALUE below) — two laws in
  *   one list. `schedule,skill_manage` is §3.7: platform capabilities never
  *   go through harness-native duplicates. `gmail,integration_tools` is §3.2:
@@ -117,9 +126,11 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  *   is the ONE deliberately-on subsystem: hosted agents always get bounded
  *   sub-agent fan-out, fenced by the JCODE_SWARM_ENV launch pins (worker cap
  *   + headless spawns; env beats the agent-writable config.toml on every
- *   reload) and by the harness's own root-only spawn rule — recursion needs
- *   the "swarm-deep" effort sentinel on the ROOT session, which the platform
- *   never grants (JCODE_EFFORT maps only low|medium|high|max).
+ *   reload) and by the harness's own root-only spawn rule. From v1.0 that
+ *   rule is built in and unconditional ("Recursive swarm spawning is
+ *   disabled"); before it, recursion needed the "swarm-deep" effort sentinel
+ *   on the ROOT session, which the platform never grants (JCODE_EFFORT maps
+ *   only low|medium|high|max).
  *   `check_updates=false` (a v0.76+ key, default TRUE) is the config half of
  *   the update pin: it gates the startup update-check thread alongside
  *   JCODE_NO_AUTO_UPDATE, so the pin no longer rests on the env var alone.
@@ -147,9 +158,10 @@ import { createJcodeWakeFeed } from "./jcode-wake";
  * - `[provider] openai_transport="https"`: the OpenAI route's default
  *   ("auto") opens a WebSocket to the Responses API first, and that client
  *   ignores the proxy env and dials the provider directly (read in the
- *   v0.94.0 source, and still true in v0.99.0). A sandbox has no direct route
- *   out, and where the network drops the dial instead of refusing it, the
- *   call stalls until jcode's 8 s connect timeout, then falls back to HTTPS.
+ *   v0.94.0 source, and still true in v0.99.0 and v1.0.0-preview.136). A
+ *   sandbox has no direct route out, and where the network drops the dial
+ *   instead of refusing it, the call stalls until jcode's 8 s connect
+ *   timeout, then falls back to HTTPS.
  *   A failure pauses the WebSocket for only 30 s, doubling up to 5 min, so
  *   the first call after each pause stalls again. `https` rides the gateway
  *   proxy like every other call and also turns off the WebSocket prewarm.
@@ -200,6 +212,66 @@ export const resolveAnthropicCredential = (
   if (env.ANTHROPIC_API_KEY) return { route: "claude-api", oauthStub: false };
   if (env.CLAUDE_CODE_OAUTH_TOKEN) return { route: "claude", oauthStub: true };
   return { route: undefined, oauthStub: false };
+};
+
+/**
+ * Whether the agent's OpenAI grant is a ChatGPT (Codex) OAuth login.
+ *
+ * The control plane marks that grant with `CODEX_HOME` (and a Codex-format
+ * placeholder `auth.json` there), never `OPENAI_API_KEY`. jcode does NOT read
+ * the Codex file on its own: external logins need a per-path trust decision
+ * on the machine. So without a placeholder in jcode's OWN store
+ * (`openai-auth.json`), an agent granted only a Codex login boots with no
+ * provider at all ("OpenAI: not configured"). An API key wins when both are
+ * present, matching the Anthropic arm; empty values count as unset.
+ */
+export const hasOpenAiOAuthGrant = (env: NodeJS.ProcessEnv): boolean =>
+  !env.OPENAI_API_KEY && Boolean(env.CODEX_HOME);
+
+/** The OAuth sentinel the gateway recognizes: its synthetic refresh answers
+ *  `auth.openai.com/oauth/token` for this refresh token and nothing else
+ *  (default_interceptions::codex_oauth_refresh). */
+const OPENAI_OAUTH_SENTINEL = "onecli-managed";
+
+/** 2100-01-01. A future expiry keeps jcode from ever refreshing early. */
+const PLACEHOLDER_EXPIRY_SECS = 4102444800;
+
+/**
+ * jcode's own OpenAI OAuth store, holding a never-expiring PLACEHOLDER
+ * account (never a credential). jcode reads the expiry and the ChatGPT
+ * account id from the JWT claims, so the tokens are unsigned JWTs carrying
+ * only those claims. On each request the gateway REPLACES `authorization`
+ * with the grant's real access token and sets `chatgpt-account-id`, exactly
+ * as for the Codex placeholder. Probed against the pinned runtime: with this
+ * file `jcode auth status` reports `openai available · OAuth`, without it
+ * `not configured`.
+ */
+export const buildOpenAiOAuthPlaceholder = (): string => {
+  const segment = (value: object) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const token = [
+    segment({ alg: "none", typ: "JWT" }),
+    segment({
+      exp: PLACEHOLDER_EXPIRY_SECS,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: OPENAI_OAUTH_SENTINEL,
+      },
+    }),
+    OPENAI_OAUTH_SENTINEL,
+  ].join(".");
+  return `${JSON.stringify({
+    openai_accounts: [
+      {
+        label: "onecli",
+        access_token: token,
+        refresh_token: OPENAI_OAUTH_SENTINEL,
+        id_token: token,
+        account_id: OPENAI_OAUTH_SENTINEL,
+        expires_at: PLACEHOLDER_EXPIRY_SECS * 1000,
+      },
+    ],
+    active_openai_account: "onecli",
+  })}\n`;
 };
 
 /**
@@ -289,6 +361,38 @@ export const cleanJcodeUpdaterState = (jcodeHome: string): void => {
 };
 
 /**
+ * Clear a planted link out of the path jcode checks before EVERY shell
+ * command, every boot.
+ *
+ * From v1.0 the runtime loads a per-repository environment overlay before
+ * spawning `bash` (`tool/bash.rs` cloud_command_environment →
+ * `cloud_environment.rs` load_environment, verified in v1.0.0-preview.136).
+ * The lookup walks each component from `/` to
+ * `<jcodeHome>/cloud-environment/<sha>.json` with lstat and REFUSES the
+ * command when any of them is a symlink ("could not load saved cloud
+ * environment"). A missing directory or file is fine (no overlay); a link is
+ * not. The agent owns the home volume, so one `ln -s` at either path below,
+ * deliberate or by a tool, would fail every bash call for the life of the
+ * volume, restarts included. The overlay feeds the vendor's cloud-handoff
+ * flow, which hosted agents never use, so deleting whatever sits at these
+ * paths loses nothing.
+ *
+ * `rmSync` unlinks a link as a link, never its target (the purge law above).
+ * The home's own directory is made real first, so the walk passes it too.
+ */
+export const cleanJcodeCloudEnvironment = (jcodeHome: string): void => {
+  const stat = lstatSync(jcodeHome, { throwIfNoEntry: false });
+  if (stat && (stat.isSymbolicLink() || !stat.isDirectory())) {
+    rmSync(jcodeHome, { force: true });
+  }
+  mkdirSync(jcodeHome, { recursive: true });
+  rmSync(join(jcodeHome, "cloud-environment"), {
+    recursive: true,
+    force: true,
+  });
+};
+
+/**
  * Purge the harness's OWN knowledge stores, every boot (§3.7: platform
  * capabilities never go through harness-native equivalents; the memory
  * amendment made this airtight). Two families:
@@ -359,9 +463,9 @@ export const cleanJcodeKnowledgeStores = (
  * it reads that shape as machine-written — while a bare hand-written
  * `enabled = false` is respected. The harness's own config save would
  * round-trip the file into the repaired shape — its saves serialize both
- * keys unconditionally — which is why this file is rewritten at every
- * container boot (once, before the daemon instance launches; ensureInstance
- * memoizes after that) and why the env-level tool disable exists
+ * keys unconditionally — which is why this file is rewritten before every
+ * daemon launch (each container boot, and an in-place relaunch: see
+ * `runtimeDied`) and why the env-level tool disable exists
  * as a second, independent lever that reapplies on every config load.
  */
 export const managedConfigToml = `# Written by the OneCLI supervisor at every container boot — do not edit.
@@ -858,6 +962,78 @@ export const prepareMcpConfig = (
 };
 
 /**
+ * How long after jcode launches a refused model may wait for jcode's model
+ * list to carry it, and how often the list is read meanwhile. Mutable for
+ * tests only.
+ */
+export const MODEL_LIST_WAIT_MS = { value: 10_000 };
+export const MODEL_LIST_POLL_MS = { value: 250 };
+
+/**
+ * `setModel`, asked once more after jcode's model list loads.
+ *
+ * jcode checks a model against the account's model list. Until that list
+ * loads it knows only its built-in names (verified at v1.0.0-preview.136), so
+ * a fresh home refuses a valid model the platform offers, such as
+ * `claude-sonnet-5-5`, with `invalid_request`, and accepts it in the same
+ * session once the list lands. jcode starts that load itself when it
+ * launches, and the load can outlast a short fixed backoff. Asking jcode to
+ * refresh the list does not help: while a load is in flight the refresh
+ * returns at once without fetching (verified live at the same version).
+ *
+ * So on that refusal, wait until the list carries the model, or until
+ * `listDeadline`, then ask once more and let that answer decide: a model the
+ * account lacks is still refused, and the caller shows the notice. The
+ * deadline is anchored to jcode's launch, so only the first sessions of a
+ * container ever wait. Later on the list has loaded, and a refusal is final
+ * at once.
+ *
+ * Only `invalid_request` waits: the daemon reports a refused switch with that
+ * code. Every other error (a timeout, a dead channel, another daemon code) is
+ * final and goes straight to the caller. The effort is deliberately not
+ * retried, because a refused level never becomes an accepted one: Claude
+ * decides it from the model id, and OpenAI accepts every level until its list
+ * loads, which can only narrow the set.
+ */
+const setModelWithRetry = async (
+  jcode: JcodeClient,
+  sessionId: string,
+  model: string,
+  listDeadline: number,
+): Promise<void> => {
+  try {
+    return await jcode.setModel(sessionId, model);
+  } catch (error) {
+    if (errorCode(error) !== "invalid_request" || Date.now() >= listDeadline) {
+      throw error;
+    }
+  }
+  await waitUntilListed(jcode, sessionId, model, listDeadline);
+  return jcode.setModel(sessionId, model);
+};
+
+/**
+ * Read jcode's model list until it carries `model` or `deadline` passes. The
+ * read is answered from the bridge's cache, with no network call. A failed
+ * read ends the wait early: the caller's last ask decides either way.
+ */
+const waitUntilListed = async (
+  jcode: JcodeClient,
+  sessionId: string,
+  model: string,
+  deadline: number,
+): Promise<void> => {
+  while (Date.now() < deadline) {
+    try {
+      if ((await jcode.listModels(sessionId)).models.includes(model)) return;
+    } catch {
+      return;
+    }
+    await sleep(Math.min(MODEL_LIST_POLL_MS.value, deadline - Date.now()));
+  }
+};
+
+/**
  * Apply the agent's model and effort, returning notices for anything the
  * harness would not take.
  *
@@ -875,18 +1051,22 @@ export const prepareMcpConfig = (
  * `close`, which a genuinely dead socket does. That is the intended split:
  * refusals degrade, a dead channel is the failure signal this adapter already
  * owns.
+ *
+ * `modelListDeadline`: until when a refused model may wait for jcode's model
+ * list to load (see setModelWithRetry).
  */
 const applyPreferences = async (
   jcode: JcodeClient,
   sessionId: string,
   options: StartSessionOptions,
+  modelListDeadline: number,
 ): Promise<string[]> => {
   const notices: string[] = [];
 
   if (options.model) {
     const target = toJcodeModel(options.model);
     try {
-      await jcode.setModel(sessionId, target);
+      await setModelWithRetry(jcode, sessionId, target, modelListDeadline);
     } catch (error) {
       // A timeout is not an answer: the daemon defers control ops behind a
       // busy agent lock and replies only when the turn ends. Keep the default
@@ -933,23 +1113,188 @@ const applyPreferences = async (
   return notices;
 };
 
+/**
+ * Hand the session the environment its shells must see on top of the
+ * daemon's own (jcode `set_session_env`: a per-session overlay the bash
+ * tool applies to every command it spawns, background jobs included, and
+ * that swarm workers inherit; verified in the pinned source at
+ * v1.0.0-preview.136, `session_env.rs` + `tool/bash.rs`). The daemon
+ * refuses `JCODE_*` keys and NUL bytes; the supervisor never sends those,
+ * so a refusal is a bug worth a warn, never a failed turn: the shells run
+ * without the overlay, as they did before the overlay existed.
+ */
+const applySessionEnv = async (
+  jcode: JcodeClient,
+  sessionId: string,
+  env: Record<string, string>,
+): Promise<void> => {
+  try {
+    await jcode.setSessionEnv(sessionId, env);
+  } catch (error) {
+    log("warn", "session environment not applied", {
+      keys: Object.keys(env),
+      error: String(error),
+    });
+  }
+};
+
+/**
+ * A conversation's FIRST session: a fork of its parent's when it has one
+ * (a DM thread inheriting the DM's transcript up to now), else fresh.
+ *
+ * jcode's `fork_session` acts on the session THIS connection is attached
+ * to (the daemon's `split` has no session field) and serves the copy from
+ * the parent's persisted snapshot: it takes the parent's agent lock with
+ * `try_lock` and falls back to the last saved step, so it needs no idle
+ * parent and works while the parent is mid-turn (jcode itself appends the
+ * notice that tells the forked agent it is a fork). The reply names the
+ * child but leaves the connection on the parent, so the sequence is attach
+ * parent → fork → detach → attach child, after which the start path
+ * continues exactly as for a created session.
+ *
+ * Attaching here never disturbs the parent's own conversation. A parent
+ * that is LIVE is shared, not seized: the takeover arms need
+ * `allow_session_takeover`, which this bridge's subscribe never sets, so
+ * the attach joins the existing agent and leaves its connection in place
+ * (the "duplicate live attach" refusal is a different arm — a session
+ * claimed by a connection while absent from the daemon's live map). A
+ * parent that is IDLE is loaded from disk for the fork and released when
+ * we attach the child, which closes cleanly because nothing but the split
+ * was ever sent to it. Either way the parent's transcript is only read.
+ *
+ * A parent that cannot be forked (its snapshot is gone after a home reset,
+ * or the daemon predates `split`) degrades to a fresh session: the thread
+ * loses its inherited context, never the turn.
+ */
+const forkOrCreateSession = async (
+  jcode: JcodeClient,
+  options: StartSessionOptions,
+): Promise<SessionInfo> => {
+  const parent = options.forkSessionRef;
+  if (!parent) return jcode.createSession(options.homeDir);
+  try {
+    await jcode.attachSession(parent);
+    const child = await jcode.forkSession(parent);
+    await jcode.detachSession(parent);
+    return await jcode.attachSession(child.session_id);
+  } catch (error) {
+    log("warn", "session fork failed; starting fresh", {
+      forkSessionRef: parent,
+      error: String(error),
+    });
+    // The connection may still be on the parent: let it go before minting,
+    // so the fresh session is the one this connection serves.
+    await jcode.detachSession(parent).catch(() => undefined);
+    return jcode.createSession(options.homeDir);
+  }
+};
+
+/**
+ * How long a context-size change may hold up a turn. The daemon answers a
+ * control request only when the session's agent lock is free, and the SDK's
+ * own wait is 30 s: a turn must never sit that long for a size, so the
+ * adapter stops waiting much sooner and the turn runs at the size it had.
+ * Mutable for tests only.
+ */
+export const CONTEXT_CAP_WAIT_MS = { value: 3_000 };
+
+/**
+ * Set the session's context size (jcode `set_context_cap`, per session,
+ * clamped by jcode to the model's own window and persisted with the
+ * session, so a resumed session keeps it). ALWAYS with the session id: the
+ * id-less form hangs while a session is open (jcode bridge, verified at
+ * v1.0.0-preview.136). Returns whether it took: false on a refusal, an SDK
+ * timeout or our own bound, all logged, none thrown. A late reply after our
+ * bound still lands daemon-side; the next turn simply sets it again.
+ */
+const applyContextTokens = async (
+  jcode: JcodeClient,
+  sessionId: string,
+  tokens: number,
+): Promise<boolean> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<"bound">((resolve) => {
+    timer = setTimeout(() => resolve("bound"), CONTEXT_CAP_WAIT_MS.value);
+  });
+  try {
+    const outcome = await Promise.race([
+      jcode.setContextCap(sessionId, tokens),
+      bound,
+    ]);
+    if (outcome === "bound") {
+      log("warn", "context size change timed out; keeping the current size", {
+        tokens,
+      });
+      return false;
+    }
+    log("info", "context size applied", { tokens, effectiveBudget: outcome });
+    return true;
+  } catch (error) {
+    log("warn", "harness refused the context size; keeping the current one", {
+      tokens,
+      code: errorCode(error),
+    });
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const usageFromEvent = (
   event: Extract<ApiEvent, { ev: "token_usage" }>,
-): TurnUsage => ({
-  inputTokens: event.input,
-  outputTokens: event.output,
-  ...(event.cache_read_input !== undefined
-    ? { cacheReadInputTokens: event.cache_read_input }
-    : {}),
-});
+  provider: string | undefined,
+): TurnUsage => {
+  const promptTokens = promptTokensOf(event, provider);
+  return {
+    inputTokens: event.input,
+    outputTokens: event.output,
+    ...(event.cache_read_input !== undefined
+      ? { cacheReadInputTokens: event.cache_read_input }
+      : {}),
+    ...(event.cache_creation_input !== undefined
+      ? { cacheCreationInputTokens: event.cache_creation_input }
+      : {}),
+    ...(promptTokens !== undefined && { promptTokens }),
+  };
+};
+
+/**
+ * How many tokens the call put in front of the model, by the serving
+ * provider's own accounting (the one jcode's compaction uses at the pinned
+ * runtime): Anthropic reports cache reads and writes APART from the input,
+ * so the prompt is all three; OpenAI counts them INSIDE the input, so adding
+ * them would double a cached prompt. Undefined for a provider this table
+ * does not know: a guess would size a conversation on a wrong number.
+ */
+const promptTokensOf = (
+  event: Extract<ApiEvent, { ev: "token_usage" }>,
+  provider: string | undefined,
+): number | undefined => {
+  const name = provider?.toLowerCase() ?? "";
+  if (name.includes("openai") || name.includes("codex")) return event.input;
+  if (name.includes("anthropic") || name.includes("claude")) {
+    return (
+      event.input +
+      (event.cache_read_input ?? 0) +
+      (event.cache_creation_input ?? 0)
+    );
+  }
+  return undefined;
+};
+
+/** The provider serving each connection's session, as the daemon last
+ * reported it (`model_info`: sent at create, attach and every model switch).
+ * Keyed by connection, which serves exactly one session. */
+const connectionProviders = new WeakMap<JcodeClient, string>();
 
 /**
  * Inline vision: our `TurnImage` translates to jcode's `[mediaType, base64]`
  * tuple HERE and nowhere else (invariant 9: the vendor shape never crosses
  * the adapter boundary), for a turn's message and a steer alike. The daemon
  * prepends the images as content blocks in the same user message, on
- * `send_message` and on `soft_interrupt` (both read in the v0.94.0 source:
- * the injection groups a queued message's images ahead of its text).
+ * `send_message` and on `soft_interrupt` (both read in the v0.94.0 source,
+ * unchanged in v1.0.0-preview.136: the injection groups a queued message's
+ * images ahead of its text).
  * Undefined for none, so the request omits the key.
  */
 const jcodeImages = (
@@ -1059,8 +1404,8 @@ const isHarnessRefusal = (error: unknown): boolean => {
  *
  * jcode drains its soft-interrupt queue at a safe point, joins the grouped
  * texts with "\n\n", and appends them as ONE fresh user message (verified in
- * v0.71.1 `interrupts.rs`; byte-identical through v0.94.0). So each steer's text
- * always lands inside a
+ * v0.71.1 `interrupts.rs`; byte-identical through v1.0.0-preview.136). So
+ * each steer's text always lands inside a
  * SINGLE history entry, and the match is per-entry substring, longest steer
  * first, consuming each matched span:
  *
@@ -1102,7 +1447,8 @@ export const matchJoinedSteers = (
  * whole line wrapped `*` + U+2063 … U+2063 + `*`, ending in a hard break.
  * jcode prefixes an assistant entry's text with these when its reasoning
  * display is on (`show_thinking`, default on), so they are not words the
- * agent said to the person. Verified identical in v0.90.1 and v0.94.0
+ * agent said to the person. Verified identical in v0.90.1, v0.94.0 and
+ * v1.0.0-preview.136
  * (`jcode-render-core` `reasoning_line_markup`, whose own decoder keys on the
  * same two sentinels).
  */
@@ -1288,12 +1634,46 @@ const QUARANTINE_COUNTED = new Set([
   "tool_start",
   "tool_done",
   "token_usage",
+  "turn_stopped",
   "turn_done",
   "error",
 ]);
 
+/** One conversation's attachment: its own connection, bound to one session. */
+interface JcodeAttachment {
+  client: JcodeClient;
+  sessionId: string;
+  /** What the session could not take as configured (see applyPreferences). */
+  notices: string[];
+}
+
+/**
+ * What a session needs from the harness that owns its connection. The
+ * harness relaunches a runtime that died between turns, which leaves every
+ * held session on a closed connection; the session's next turn reattaches
+ * through here, on its own ref, before it sends anything.
+ */
+interface JcodeSessionHost {
+  /** Whether `client` is still open (false once its runtime is gone). */
+  isOpen(client: JcodeClient): boolean;
+  /** Open the session again on the live runtime, same ref when it can. */
+  reattach(
+    sessionRef: string,
+    options: StartSessionOptions,
+  ): Promise<JcodeAttachment>;
+  /** Count an operation in flight until the returned function is called:
+   * a runtime that dies under one is not relaunched (see `runtimeDied`). */
+  track(): () => void;
+  /** Close the session's connection, which is the detach (`release`). */
+  release(client: JcodeClient): Promise<void>;
+}
+
 class JcodeSession implements HarnessSession {
-  readonly sessionRef: string;
+  private client: JcodeClient;
+  private ref: string;
+  /** Opened with these; `setEnv` keeps their `env` current, and a reattach
+   * replays them onto the relaunched runtime, which knows none of them. */
+  private options: StartSessionOptions;
   /**
    * Drained into the FIRST turn, then dropped. A degraded preference is a
    * property of the session, not of each message — repeating it on every turn
@@ -1327,15 +1707,29 @@ class JcodeSession implements HarnessSession {
    * falls back to the prompt-content anchor.
    */
   private turnHistoryBaseline: number | null = null;
+  /**
+   * The context size this session was last set to, so an unchanged size
+   * costs no daemon round trip. Null until the first set (the session runs
+   * at the managed config's default until then).
+   */
+  private appliedContextTokens: number | null = null;
 
   constructor(
-    private readonly client: JcodeClient,
-    sessionId: string,
-    notices: string[] = [],
-    private readonly onRelease?: () => Promise<void>,
+    private readonly host: JcodeSessionHost,
+    attachment: JcodeAttachment,
+    options: StartSessionOptions,
   ) {
-    this.sessionRef = sessionId;
-    this.pendingNotices = notices;
+    this.client = attachment.client;
+    this.ref = attachment.sessionId;
+    this.pendingNotices = attachment.notices;
+    this.options = options;
+  }
+
+  /** Stable across a reattach, except for a session the relaunched runtime
+   * never knew (see the harness's `reattach`): the new ref rides the next
+   * `turn.result`. */
+  get sessionRef(): string {
+    return this.ref;
   }
 
   /**
@@ -1353,10 +1747,59 @@ class JcodeSession implements HarnessSession {
     if (this.turnActive) {
       throw new Error("release() called with a turn in flight");
     }
-    await this.onRelease?.();
+    await this.host.release(this.client);
   }
 
   async *runTurn(input: TurnInput): AsyncIterable<HarnessEvent> {
+    // A fresh turn has no stop yet. Cleared BEFORE any await, so a stop
+    // that lands while the turn is still being set up (a reattach, the
+    // context size) belongs to this turn and is honoured before the send.
+    this.abortRequested = false;
+    // In flight from the first line, the reattach included: a runtime that
+    // dies under a turn fails the sandbox, it is never relaunched under it.
+    const settled = this.host.track();
+    try {
+      await this.reattachIfClosed();
+      yield* this.streamTurn(input);
+    } finally {
+      settled();
+    }
+  }
+
+  /**
+   * Back onto the live runtime: it was relaunched since this session's last
+   * turn, so this connection is closed. The daemon persisted the transcript,
+   * so the same ref resumes it; the model, effort, environment and context
+   * size were the dead daemon's and are set again.
+   */
+  private async reattachIfClosed(): Promise<void> {
+    if (this.host.isOpen(this.client)) return;
+    const attachment = await this.host.reattach(this.ref, this.options);
+    this.client = attachment.client;
+    this.ref = attachment.sessionId;
+    this.pendingNotices.push(...attachment.notices);
+    this.appliedContextTokens = null;
+  }
+
+  private async *streamTurn(input: TurnInput): AsyncIterable<HarnessEvent> {
+    // The platform's size for this conversation goes in BEFORE the message,
+    // so the turn it rides already runs at it. Best-effort and bounded: a
+    // refusal or a slow daemon leaves the size where it was and never costs
+    // the turn (see applyContextTokens).
+    if (
+      input.contextTokens !== undefined &&
+      input.contextTokens !== this.appliedContextTokens
+    ) {
+      if (
+        await applyContextTokens(
+          this.client,
+          this.sessionRef,
+          input.contextTokens,
+        )
+      ) {
+        this.appliedContextTokens = input.contextTokens;
+      }
+    }
     // Subscribe BEFORE sending, or a short turn's first deltas race the
     // subscription (verified SDK behavior: run() does the same).
     const stream = this.client.events(this.sessionRef);
@@ -1518,7 +1961,13 @@ class JcodeSession implements HarnessSession {
       this.liveSteers = this.client.supports(SOFT_INTERRUPT_IDS_CAPABILITY)
         ? createLiveSteerTracker()
         : null;
-      this.abortRequested = false;
+      // A stop that landed during the setup above ends the turn before
+      // anything is sent: nothing ran, so there is nothing to cancel, and
+      // the gate below never opened, so no steer was taken either.
+      if (this.abortRequested) {
+        yield { type: "turn.done" };
+        return;
+      }
       this.turnActive = true;
       // A stale floor from a previous turn must never survive into this
       // one's reconcile: if the baseline read below never resolves (stream
@@ -1735,6 +2184,18 @@ class JcodeSession implements HarnessSession {
       // the runner truncates again for the wire.
       const toolInputs = new Map<string, { text: string; dropped: number }>();
       let streamingToolId: string | undefined;
+      // The model ended the turn with nothing visible, and jcode said so
+      // (jcode-turn-stopped.ts). Yielded once, by the first such frame: the
+      // bridge reports at most one stop per turn, and a second would add
+      // nothing.
+      let unansweredSent = false;
+      // Messages with visible words since the last tool call: the stretch
+      // jcode's own check judges (its per-request text). jcode raises the
+      // same stop for a safety stop AFTER real words, and a person who got
+      // words was not left in silence, so that stop is not reported. Ids
+      // only (an unframed delta is ""), never the text: a corrected message
+      // that ends empty leaves the set, as its words never stood.
+      const visibleMessages = new Set<string>();
       while (!terminal) {
         if (this.abortRequested && abortSeenAt === undefined) {
           abortSeenAt = Date.now();
@@ -1810,6 +2271,7 @@ class JcodeSession implements HarnessSession {
         switch (event.ev) {
           case "text_delta": {
             progressed = true;
+            if (event.text.trim()) visibleMessages.add(event.message_id ?? "");
             // The reply to a steered follow-up streams under THAT follow-up:
             // the tracker says which one, as it reads the frame.
             const replyTo = yield* this.observeSteerFrame({
@@ -1833,6 +2295,8 @@ class JcodeSession implements HarnessSession {
             // message on every bridge that sends it; one that did not could
             // not say which text to replace, so it is dropped.
             if (event.message_id !== undefined) {
+              if (event.text.trim()) visibleMessages.add(event.message_id);
+              else visibleMessages.delete(event.message_id);
               yield* this.observeSteerFrame({
                 kind: "replace",
                 messageId: event.message_id,
@@ -1871,6 +2335,7 @@ class JcodeSession implements HarnessSession {
             progressed = true;
             openToolCalls += 1;
             streamingToolId = event.call_id;
+            visibleMessages.clear();
             yield* this.observeSteerFrame({ kind: "tool_start" });
             yield {
               type: "tool.started",
@@ -1922,7 +2387,7 @@ class JcodeSession implements HarnessSession {
             break;
           }
           case "token_usage":
-            usage = usageFromEvent(event);
+            usage = usageFromEvent(event, connectionProviders.get(this.client));
             break;
           case "permission_request":
             // Local tool actions are auto-allowed: gating lives at the
@@ -1934,6 +2399,39 @@ class JcodeSession implements HarnessSession {
               .respondToPermission(this.sessionRef, event.request_id, "allow")
               .catch(() => {});
             break;
+          case "turn_stopped": {
+            // jcode's no-visible-output signal, ahead of an ordinary
+            // `turn_done`: the run ended cleanly but answered nothing. Ours
+            // only (a foreign run's stop was quarantined above, like all its
+            // frames), and never after a Stop: the person ended this turn,
+            // and an aborted turn keeps its own outcome.
+            if (unansweredSent || this.abortRequested) break;
+            const unanswered = readJcodeTurnStopped(event);
+            if (!unanswered) break;
+            unansweredSent = true;
+            if (visibleMessages.size > 0) {
+              // Words stand since the last tool call: the reply was cut
+              // short, not withheld. It stays the answer.
+              log(
+                "info",
+                "safety stop after visible text; kept as the answer",
+                {
+                  sessionRef: this.sessionRef,
+                  providerStopReason: event.provider_stop_reason?.slice(0, 64),
+                },
+              );
+              break;
+            }
+            log("warn", "turn ended with no visible answer", {
+              sessionRef: this.sessionRef,
+              code: unanswered.code,
+              // A provider's token ("refusal"), bounded anyway: the value is
+              // relayed, not ours.
+              providerStopReason: event.provider_stop_reason?.slice(0, 64),
+            });
+            yield unanswered;
+            break;
+          }
           case "turn_done":
             terminal = { type: "turn.done", ...(usage ? { usage } : {}) };
             break;
@@ -2187,6 +2685,9 @@ class JcodeSession implements HarnessSession {
     // the loop's abort grace starts counting from this flag, not from the
     // daemon's reply.
     this.abortRequested = true;
+    // A connection whose runtime is gone has nothing running behind it:
+    // the flag alone ends the turn before its send (see `runTurn`).
+    if (!this.host.isOpen(this.client)) return;
     // Stop means silence, daemon-side too: queued-but-undelivered interrupts
     // die with the turn instead of leaking into the next one.
     await this.client.cancelSoftInterrupts(this.sessionRef).catch(() => {});
@@ -2198,24 +2699,100 @@ class JcodeSession implements HarnessSession {
     // the turn; the generator's terminal is.
     await this.client.cancel(this.sessionRef);
   }
+
+  /** The late half of `StartSessionOptions.env`: the desktop came up after
+   * this session started, and its next shell must see the display. */
+  async setEnv(env: Record<string, string>): Promise<void> {
+    this.options = { ...this.options, env };
+    // A closed connection's runtime is gone: the reattach applies it.
+    if (!this.host.isOpen(this.client)) return;
+    await applySessionEnv(this.client, this.sessionRef, env);
+  }
 }
+
+/**
+ * How soon after an in-place relaunch a second runtime death fails the
+ * sandbox instead. One death between turns is recovered in place (a crash,
+ * or an exit the keep-alive could not prevent); a runtime that dies again
+ * this soon is crash-looping, and only a fresh container can recover it.
+ * Exported for the tests.
+ */
+export const RELAUNCH_WINDOW_MS = { value: 60_000 };
+
+/** One launched runtime: the daemon instance and what keeps it alive. */
+interface JcodeRuntime {
+  readonly homeDir: string;
+  readonly instance: LaunchedInstance;
+  /**
+   * THE KEEP-ALIVE. jcode's daemon exits after 5 minutes with no client
+   * (`IDLE_TIMEOUT_SECS`, compiled in, v1.0.0-preview.136 `server.rs`). It
+   * counts connections on its own socket, and the bridge holds one there
+   * per API connection. Conversations dial theirs lazily, so a prewarmed
+   * runtime had none: it exited 300 s after launch, and the next turn found
+   * it gone. This connection is held from launch to teardown, never bound
+   * to a session and never sent anything, so that count never reaches
+   * zero. Its unexpected close is also the first death signal
+   * (milliseconds after the daemon dies, measured).
+   */
+  readonly keepAlive: JcodeClient;
+  /** Set once it died or was taken down: whatever it signals after that is
+   * its teardown, never a death to act on. */
+  retired: boolean;
+}
+
+/** Open `instance`'s keep-alive; `died` hears its unexpected close. */
+const openKeepAlive = async (
+  instance: LaunchedInstance,
+  died: (reason: string) => void,
+): Promise<JcodeClient> => {
+  const keepAlive = await JcodeClient.connect({
+    socketPath: instance.socketPath,
+    clientName: "onecli-supervisor/0/keep-alive",
+  });
+  // Node treats an unlistened "error" as fatal (see connectClient).
+  keepAlive.on("error", (err) => {
+    log("error", "jcode transport error", { error: String(err) });
+  });
+  keepAlive.on("close", (error?: Error) => {
+    died(error ? String(error) : "jcode runtime closed its keep-alive");
+  });
+  return keepAlive;
+};
+
+/**
+ * Stop a launched instance, bridge first. The daemon is the bridge's child
+ * and the bridge never reaps it, so stopped first (the SDK's own order) it
+ * lingers as a zombie that `shutdown()` waits out: 7 s on every teardown,
+ * measured, with the daemon healthy or already dead. With the bridge gone
+ * first the zombie is reaped at once and `shutdown()` returns as soon as
+ * the daemon has stopped (52 ms healthy, 156 ms dead, measured). The
+ * daemon still gets its SIGTERM and grace from `shutdown()`.
+ */
+const stopInstance = async (instance: LaunchedInstance): Promise<void> => {
+  // A no-op on a bridge that already exited (Node guards a reaped pid).
+  instance.process.kill("SIGTERM");
+  await instance.shutdown();
+};
 
 export const createJcodeHarness = (): Harness => {
   /**
-   * The launched daemon instance — ONE per container, memoized as a PROMISE:
-   * `launchInstance` is destructive on re-entry (it unlinks the live socket
-   * and spawns a second daemon onto the same state dir), so a second launch
-   * must be structurally impossible, not merely unlikely. A rejected memo
-   * stays memoized on purpose — a container whose runtime will not launch is
-   * dead, and every later turn should fail identically instead of retrying
-   * the destructive launch.
+   * The runtime: ONE launched daemon instance at a time, memoized as a
+   * PROMISE. `launchInstance` is destructive on re-entry (it unlinks the
+   * live socket and spawns a second daemon onto the same state dir), so a
+   * second launch beside a live one must be structurally impossible. The
+   * only other launch is `relaunch`, which takes the dead one down first
+   * and is memoized here in its place.
+   *
+   * A rejected memo stays memoized on purpose: a container whose runtime
+   * will not launch is dead, and every later turn should fail identically
+   * instead of retrying the destructive launch.
    */
-  let instance: Promise<Awaited<ReturnType<typeof launchInstance>>> | undefined;
+  let runtime: Promise<JcodeRuntime> | undefined;
   /**
    * The daemon's own log file, re-emitted through `log()` (jcode-log.ts).
-   * Started at launch (once per container, like the instance) and
-   * stopped on dispose. The daemon's file is where its errors live; its
-   * stderr carries almost nothing.
+   * Started at the first launch, kept across a relaunch (same home, same
+   * file), stopped on dispose. The daemon's file is where its errors live;
+   * its stderr carries almost nothing.
    */
   let logForwarder: ReturnType<typeof startJcodeLogForwarder> | undefined;
   /**
@@ -2239,6 +2816,12 @@ export const createJcodeHarness = (): Harness => {
    * helper lifecycle at the pinned version (contract in jcode-swarm.ts).
    */
   let legacySocketPath: string | undefined;
+  /**
+   * Until when a refused model may wait for jcode's model list: set when the
+   * instance is up, since the daemon starts loading that list as it launches
+   * (see setModelWithRetry).
+   */
+  let modelListDeadline = 0;
   /** Connections WE closed — their `close` event is teardown, not death. */
   const deliberateCloses = new WeakSet<JcodeClient>();
   let connectionCounter = 0;
@@ -2246,12 +2829,24 @@ export const createJcodeHarness = (): Harness => {
   /** Terminal failure is reported once, and never for our own teardown. */
   let failed = false;
   let disposing = false;
+  /** Turns and session setups in flight on the runtime (`track`). */
+  let inFlight = 0;
+  /** When the runtime was last relaunched, for the crash-loop bound. */
+  let lastRelaunchAt: number | undefined;
 
   const fail = (reason: string) => {
     if (failed || disposing) return;
     failed = true;
     log("error", "jcode harness failed terminally", { reason });
     onFailure?.(reason);
+  };
+
+  /** Count an operation in flight; the returned function ends it. */
+  const track = (): (() => void) => {
+    inFlight += 1;
+    return () => {
+      inFlight -= 1;
+    };
   };
 
   const closeClient = async (client: JcodeClient): Promise<void> => {
@@ -2266,21 +2861,115 @@ export const createJcodeHarness = (): Harness => {
     await client.close().catch(() => {});
   };
 
-  const ensureInstance = (
-    homeDir: string,
-  ): Promise<Awaited<ReturnType<typeof launchInstance>>> => {
-    if (instance) return instance;
-    instance = launchDaemon(homeDir);
-    return instance;
+  const ensureRuntime = (homeDir: string): Promise<JcodeRuntime> => {
+    runtime ??= startRuntime(homeDir);
+    return runtime;
   };
 
-  const launchDaemon = async (
-    homeDir: string,
-  ): Promise<Awaited<ReturnType<typeof launchInstance>>> => {
+  /**
+   * Launch the daemon and hold its keep-alive. One death signal per
+   * runtime, whichever lands first: the keep-alive's close, any
+   * conversation connection's unexpected close, or the bridge's `exit`.
+   */
+  const startRuntime = async (homeDir: string): Promise<JcodeRuntime> => {
+    const instance = await launchDaemon(homeDir);
+    let keepAlive: JcodeClient;
+    try {
+      keepAlive = await openKeepAlive(instance, (reason) =>
+        runtimeDied(current, reason),
+      );
+    } catch (error) {
+      // A daemon that dies before its keep-alive is up fails the launch
+      // itself (the connect is refused): there is no runtime to relaunch.
+      await stopInstance(instance);
+      throw error;
+    }
+    const current: JcodeRuntime = {
+      homeDir,
+      instance,
+      keepAlive,
+      retired: false,
+    };
+    // The exit code / signal ride the reason: "exited" alone cannot tell
+    // an OOM kill from a panic from a clean stop. Subscribed once the
+    // record exists; an exit before then already failed the connect above.
+    instance.process.once(
+      "exit",
+      (code: number | null, signal: NodeJS.Signals | null) => {
+        runtimeDied(
+          current,
+          `jcode instance exited (code ${String(code)}, signal ${String(signal)})`,
+        );
+      },
+    );
+    return current;
+  };
+
+  /**
+   * THE RUNTIME DIED. Every connection to it is gone, and the next request
+   * on any of them rejects with "harness connection closed" (observed live:
+   * one crash and the sandbox served nothing again for the rest of its
+   * life). Between turns nothing was running, and the daemon persisted every
+   * transcript to the home: relaunch it there, and each held session
+   * reattaches on its own ref at its next turn (`JcodeSession.runTurn`).
+   * The whole sandbox is failed instead when that cannot be done honestly:
+   * a turn or a session setup was in flight on it (its work is lost, and a
+   * fresh container is what the control plane revives it into), or it
+   * already died once within `RELAUNCH_WINDOW_MS` (a crash loop).
+   */
+  const runtimeDied = (dead: JcodeRuntime, reason: string): void => {
+    if (dead.retired) return;
+    dead.retired = true;
+    if (disposing || failed) return;
+    if (inFlight > 0) {
+      fail(reason);
+      return;
+    }
+    const now = Date.now();
+    if (
+      lastRelaunchAt !== undefined &&
+      now - lastRelaunchAt < RELAUNCH_WINDOW_MS.value
+    ) {
+      fail(`${reason} (again, within ${RELAUNCH_WINDOW_MS.value} ms)`);
+      return;
+    }
+    lastRelaunchAt = now;
+    log("warn", "jcode runtime died between turns; relaunching in place", {
+      reason,
+    });
+    runtime = relaunch(dead);
+    runtime.then(
+      () => log("info", "jcode runtime relaunched", { ms: Date.now() - now }),
+      (error: unknown) => fail(`harness relaunch failed: ${String(error)}`),
+    );
+  };
+
+  const relaunch = async (dead: JcodeRuntime): Promise<JcodeRuntime> => {
+    await closeRuntime(dead);
+    return startRuntime(dead.homeDir);
+  };
+
+  /**
+   * Take a runtime down: every connection to it, then the instance. Every
+   * signal those closes raise lands on a retired runtime, so none reads as
+   * a death. The held sessions keep their refs in `sessionClients` (still
+   * held: each reattaches, or is released, on its own schedule).
+   */
+  const closeRuntime = async (target: JcodeRuntime): Promise<void> => {
+    target.retired = true;
+    const connections = [target.keepAlive, ...clients];
+    clients.clear();
+    await Promise.allSettled(connections.map((client) => client.close()));
+    await stopInstance(target.instance);
+  };
+
+  const launchDaemon = async (homeDir: string): Promise<LaunchedInstance> => {
     // §3.6: the harness's own session state lives ON the home volume,
     // which is exactly what makes resume survive a container stop/start.
     const jcodeHome = join(homeDir, JCODE_HOME_DIRNAME);
-    mkdirSync(jcodeHome, { recursive: true });
+    // First, so every step below (and the daemon) sees a real directory, and
+    // the per-command overlay lookup never finds a link to refuse.
+    cleanJcodeCloudEnvironment(jcodeHome);
     // The pin's volume half: every boot converges the home onto the vendored
     // binary, healing volumes that self-updated before the pin existed.
     cleanJcodeUpdaterState(jcodeHome);
@@ -2320,9 +3009,10 @@ export const createJcodeHarness = (): Harness => {
       // 0600 even though the value is a placeholder: this file is
       // credential-SHAPED, and the mode must already be right on the day
       // something real is ever considered for it.
-      // jcode canonicalizes account labels on load (renames them and
-      // re-saves the file), so nothing may ever assert the "onecli" label
-      // on disk — it exists only to be a valid non-empty string.
+      // Whether jcode keeps the "onecli" label on load is its choice, not
+      // ours: v0.94 renamed it (and re-saved the file), v1.0.0-preview.136
+      // keeps user-named labels. So nothing may ever assert the label on
+      // disk — it exists only to be a valid non-empty string.
       writeManagedFile(
         join(jcodeHome, "auth.json"),
         `${JSON.stringify({
@@ -2344,10 +3034,27 @@ export const createJcodeHarness = (): Harness => {
       // earlier OAuth grant wrote is still here, and the runtime would load
       // it as a live account beside the API key. Recursive so a directory
       // planted at this path is healed rather than throwing EISDIR: a throw
-      // here would fail the launch, and the memoized instance makes that
+      // here would fail the launch, and the memoized runtime makes that
       // permanent for the container. `rmSync` unlinks a planted symlink
       // rather than following it (the standing purge law above).
       rmSync(join(jcodeHome, "auth.json"), { recursive: true, force: true });
+    }
+
+    // Same law for an OpenAI ChatGPT (Codex) login: seed jcode's own store
+    // with the placeholder (see buildOpenAiOAuthPlaceholder), or remove one
+    // an earlier boot left on the durable home when the grant changed.
+    const openAiOAuth = hasOpenAiOAuthGrant(process.env);
+    if (openAiOAuth) {
+      writeManagedFile(
+        join(jcodeHome, "openai-auth.json"),
+        buildOpenAiOAuthPlaceholder(),
+        0o600,
+      );
+    } else {
+      rmSync(join(jcodeHome, "openai-auth.json"), {
+        recursive: true,
+        force: true,
+      });
     }
 
     const launched = await launchInstance({
@@ -2394,7 +3101,11 @@ export const createJcodeHarness = (): Harness => {
         // bypassing `StartSessionOptions` — so a caller passing a different
         // model would get a launch env and a session model that disagree.
         // `setModel` in `applyPreferences` is the single door.
-        ...(anthropic.oauthStub ? { JCODE_PROVIDER: "claude" } : {}),
+        ...(anthropic.oauthStub
+          ? { JCODE_PROVIDER: "claude" }
+          : !anthropic.route && openAiOAuth
+            ? { JCODE_PROVIDER: "openai" }
+            : {}),
         // The credential-route pin (see resolveAnthropicCredential). Read by
         // every Anthropic runtime the daemon constructs, so a session
         // resumed from either route lands on the route the grant names.
@@ -2402,20 +3113,6 @@ export const createJcodeHarness = (): Harness => {
       },
     });
 
-    // ONE of the two death signals this adapter owes the supervisor: the
-    // bridge process exiting means no connection can ever be served again.
-    // The per-connection `close` handler below is the other (and usually
-    // faster) signal — first one wins, `fail` is one-shot. The exit code /
-    // signal ride the reason: "exited" alone cannot tell an OOM kill from a
-    // panic from a clean stop.
-    launched.process.once(
-      "exit",
-      (code: number | null, signal: NodeJS.Signals | null) => {
-        fail(
-          `jcode instance exited (code ${String(code)}, signal ${String(signal)})`,
-        );
-      },
-    );
     // The SDK pipes the bridge's stderr and keeps only a startup-failure
     // tail; a crash AFTER startup would otherwise leave no trace.
     forwardJcodeStderr(launched.process.stderr);
@@ -2424,6 +3121,7 @@ export const createJcodeHarness = (): Harness => {
     // `jcode-api.sock` (what it hands back) beside `jcode.sock` (the daemon's
     // legacy listener the roster mirror queries).
     legacySocketPath = join(dirname(launched.socketPath), "jcode.sock");
+    modelListDeadline = Date.now() + MODEL_LIST_WAIT_MS.value;
 
     return launched;
   };
@@ -2434,11 +3132,10 @@ export const createJcodeHarness = (): Harness => {
    * own session, its own busy state, and its own event scope — the incident's
    * root fix. Mirrors the SDK's own `globalEvents` child-connection pattern.
    */
-  const connectClient = async (homeDir: string): Promise<JcodeClient> => {
-    const inst = await ensureInstance(homeDir);
+  const connectClient = async (current: JcodeRuntime): Promise<JcodeClient> => {
     connectionCounter += 1;
     const connected = await JcodeClient.connect({
-      socketPath: inst.socketPath,
+      socketPath: current.instance.socketPath,
       clientName: `onecli-supervisor/0/conv-${connectionCounter}`,
     });
 
@@ -2447,6 +3144,12 @@ export const createJcodeHarness = (): Harness => {
     // are per-EventEmitter, so every connection needs its own listeners.
     connected.on("error", (err) => {
       log("error", "jcode transport error", { error: String(err) });
+    });
+    // Which provider serves this connection's session: how a turn's usage
+    // is read (promptTokensOf). Arrives unprompted on create and attach,
+    // before any turn, and again on every model switch.
+    connected.on("model_info", (frame: { provider?: string }) => {
+      if (frame.provider) connectionProviders.set(connected, frame.provider);
     });
     connected.on(
       "harness_error",
@@ -2496,27 +3199,104 @@ export const createJcodeHarness = (): Harness => {
       },
     );
 
-    // THE other death signal. These are unix-socket connections to a local
-    // daemon: an unexpected close means the daemon died, and from that moment
-    // every request on every connection rejects with "harness connection
-    // closed" — including the ones that open sessions for new conversations.
-    // Observed live: one crash and the sandbox served nothing again for the
-    // rest of its life. A close WE initiated (dispose, a failed session
-    // setup) is teardown, not death.
+    // A death signal too, beside the keep-alive's: these are unix-socket
+    // connections to a local daemon, so an unexpected close means it died.
+    // Kept per connection because a turn's stream ends on this same
+    // teardown, and the death must be recorded before that turn's failure
+    // is classified (see `runtimeDied`). A close WE initiated (a release, a
+    // failed session setup) is teardown, not death.
     connected.on("close", (error?: Error) => {
       clients.delete(connected);
       if (deliberateCloses.has(connected)) return;
-      fail(error ? String(error) : "harness connection closed");
+      runtimeDied(current, error ? String(error) : "harness connection closed");
     });
 
     clients.add(connected);
     return connected;
   };
 
+  /**
+   * A connection on the live runtime, bound to the session `open` picks
+   * (created or attached) and set up as `options` say. The launch is this
+   * adapter's whole reason to exist: a runtime that will not come up fails
+   * the sandbox, never just the turn, or the error would be one the user is
+   * invited to retry forever. A failure past the connect (a stale resume
+   * ref, say) is confined to this session.
+   */
+  const openSession = async (
+    options: StartSessionOptions,
+    open: (client: JcodeClient) => Promise<{ session_id: string }>,
+  ): Promise<JcodeAttachment> => {
+    let client: JcodeClient;
+    try {
+      client = await connectClient(await ensureRuntime(options.homeDir));
+    } catch (error) {
+      fail(`harness launch failed: ${String(error)}`);
+      throw error;
+    }
+    try {
+      const { session_id: sessionId } = await open(client);
+      const notices = await applyPreferences(
+        client,
+        sessionId,
+        options,
+        modelListDeadline,
+      );
+      if (options.env && Object.keys(options.env).length > 0) {
+        await applySessionEnv(client, sessionId, options.env);
+      }
+      sessionClients.set(sessionId, client);
+      if (options.context) {
+        sessionConversations.set(sessionId, options.context.conversationId);
+      }
+      return { client, sessionId, notices };
+    } catch (error) {
+      // The connection exists but its session is unusable. Closing the
+      // connection IS the detach (one attachment per connection): without
+      // it, every retry would leak a socket and a live attachment that
+      // nothing will ever reach again.
+      await closeClient(client);
+      throw error;
+    }
+  };
+
+  const sessionHost: JcodeSessionHost = {
+    isOpen: (client) => clients.has(client),
+    track,
+    release: closeClient,
+    /**
+     * The same ref on the relaunched runtime, which loads it from the
+     * home. A session the dead daemon never persisted (opened, never sent a
+     * message: measured, `unknown_session`) has nothing to resume, so it
+     * starts again the way it first did (a thread forks its parent once
+     * more), and its new ref rides the next `turn.result`, the same
+     * heal-forward as the duplicate-ref guard in `startSession`.
+     */
+    reattach: async (sessionRef, options) => {
+      const attachment = await openSession(options, (client) =>
+        client.attachSession(sessionRef).catch((error: unknown) => {
+          if (errorCode(error) !== "unknown_session") throw error;
+          log("warn", "session unknown to the relaunched runtime; reopening", {
+            sessionRef,
+          });
+          return forkOrCreateSession(client, options);
+        }),
+      );
+      if (attachment.sessionId !== sessionRef) {
+        sessionClients.delete(sessionRef);
+        sessionConversations.delete(sessionRef);
+      }
+      return attachment;
+    },
+  };
+
   return {
     id: "jcode",
     capabilities: {
       resume: true,
+      // fork_session: a new session seeded with another's transcript (the
+      // daemon's `split`), served from the parent's persisted snapshot.
+      fork: true,
       thinking: true,
       toolEvents: true,
       // soft_interrupt: a mid-run message (and its images) joins the live
@@ -2549,22 +3329,23 @@ export const createJcodeHarness = (): Harness => {
     onFailure(listener) {
       onFailure = listener;
     },
+    prewarm(homeDir) {
+      if (disposing || runtime) return;
+      // The same memoized launch the first session awaits: a failure is
+      // remembered there and reported by that session (`openSession`), so
+      // a head start never changes how a dead runtime is surfaced. The
+      // keep-alive opens with it, so the runtime outlives jcode's idle
+      // exit however long the first turn takes to arrive.
+      ensureRuntime(homeDir).catch((error: unknown) => {
+        log("warn", "jcode prewarm failed; the first session reports it", {
+          error: String(error),
+        });
+      });
+    },
     async startSession(options: StartSessionOptions) {
-      let jcode: JcodeClient;
-      try {
-        jcode = await connectClient(options.homeDir);
-      } catch (error) {
-        // Launching the runtime is this adapter's whole reason to exist, and
-        // a connect refused by a LOCAL daemon means that daemon is gone. If
-        // it will not come up, the container can never serve a turn — and
-        // failing only the turn would hide that behind an error the user is
-        // invited to retry forever. Session-level failures on a live
-        // connection (a stale resume ref, say) deliberately do not come
-        // through here.
-        fail(`harness launch failed: ${String(error)}`);
-        throw error;
-      }
-
+      // In flight until it returns: a runtime that dies under a session
+      // setup fails the sandbox, as under a turn.
+      const settled = track();
       try {
         const resumeRef = options.resumeSessionRef;
         // ONE ref, one conversation. A resume ref held by a LIVE client in
@@ -2585,50 +3366,29 @@ export const createJcodeHarness = (): Harness => {
             },
           );
         }
-        const session =
+        const attachment = await openSession(options, (client) =>
           resumeRef && !holder
-            ? await jcode.attachSession(resumeRef)
-            : await jcode.createSession(options.homeDir);
-
-        const notices = await applyPreferences(
-          jcode,
-          session.session_id,
-          options,
+            ? client.attachSession(resumeRef)
+            : forkOrCreateSession(client, options),
         );
-        sessionClients.set(session.session_id, jcode);
-        if (options.context) {
-          sessionConversations.set(
-            session.session_id,
-            options.context.conversationId,
-          );
-        }
-        return new JcodeSession(jcode, session.session_id, notices, () =>
-          closeClient(jcode),
-        );
-      } catch (error) {
-        // The connection exists but its session is unusable. Closing the
-        // connection IS the detach (one attachment per connection) — without
-        // it, every retry would leak a socket and a live attachment that
-        // nothing will ever reach again.
-        await closeClient(jcode);
-        throw error;
+        return new JcodeSession(sessionHost, attachment, options);
+      } finally {
+        settled();
       }
     },
     async dispose() {
-      // Set BEFORE any close, because both teardown steps raise the very
-      // signals that mean "the harness died" — every connection's `close`,
-      // then the instance process's `exit` — and a deliberate teardown
-      // reported as a failure would have the sandbox recycled on every
-      // ordinary shutdown.
+      // Set BEFORE any close, because every teardown step raises the very
+      // signals that mean "the runtime died" (each connection's `close`,
+      // then the bridge's `exit`), and a deliberate teardown reported as a
+      // failure would have the sandbox recycled on every ordinary shutdown.
       disposing = true;
-      await Promise.allSettled([...clients].map((c) => closeClient(c)));
       sessionClients.clear();
       sessionConversations.clear();
-      if (instance) {
-        const inst = await instance.catch(() => undefined);
-        await inst?.shutdown();
-        instance = undefined;
-      }
+      // A relaunch in flight settles first, so what it launched is the
+      // runtime taken down here, never one left running behind dispose.
+      const current = await runtime?.catch(() => undefined);
+      runtime = undefined;
+      if (current) await closeRuntime(current);
       // After the shutdown, so the daemon's last lines (its own shutdown
       // trace) are drained by the follower's final poll.
       logForwarder?.stop();

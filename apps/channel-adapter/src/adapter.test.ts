@@ -1467,3 +1467,162 @@ describe("a waiting message's Send now on the narration card (socket arm)", () =
     expect(slack.callsTo("chat.update")).toEqual([]);
   });
 });
+
+describe("links back to the web app", () => {
+  // Every button that sends a Slack user to OneCLI is built here from
+  // APP_URL and the presence's own ids, never from text. The hostile-shaped
+  // ids prove each id is percent-encoded, so none can add a path segment.
+  const hostile = () =>
+    presence({
+      agent: { id: "ag/1?x", name: "Deploy Agent", workspaceId: "ws 1" },
+    });
+  const AGENT_PAGE = "https://app.example.com/w/ws%201/agents/ag%2F1%3Fx";
+  const CONNECT_ANSWER =
+    "Attach the account here: https://app.example.com/w/ws1/connections/apps/google-calendar";
+
+  type Button = { type: string; url?: string };
+  const buttonsOf = (blocks: string | undefined): Button[] =>
+    (JSON.parse(blocks ?? "[]") as { elements?: Button[] }[])
+      .flatMap((b) => b.elements ?? [])
+      .filter((el) => el.type === "button");
+
+  /** Serve `finished` once, with `answer` as t1's transcript. */
+  const finishedOnce = (finished: AdapterWorkItem, answer: string | null) => {
+    let served = false;
+    return feedControlPlane([hostile()], {
+      getWork: async () => {
+        if (served) return { finished: [] };
+        served = true;
+        return { finished: [finished] };
+      },
+      readTranscript: async () => ({
+        events: answer
+          ? [{ seq: 1, turnId: "t1", type: "text", payload: { text: answer } }]
+          : [],
+        nextSince: 1,
+        hasMore: false,
+      }),
+    }).controlPlane;
+  };
+
+  it("a finished turn's key card opens the agent's Models page", async () => {
+    await startAdapter(
+      finishedOnce(
+        workItem({
+          status: "failed",
+          finishedAt: "2026-08-06T10:00:05.000Z",
+          error: "No model key is configured for this agent.",
+          errorCode: "no_model_key",
+        }),
+        null,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(1),
+    );
+    const post = slack.callsTo("chat.postMessage")[0]!;
+    expect(buttonsOf(post.form.blocks).map((b) => b.url)).toEqual([
+      `${AGENT_PAGE}/models`,
+    ]);
+  });
+
+  it("a finished turn's connect card deep-links into the agent's chat", async () => {
+    await startAdapter(
+      finishedOnce(
+        workItem({ status: "done", finishedAt: "2026-08-06T10:00:05.000Z" }),
+        CONNECT_ANSWER,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(1),
+    );
+    const post = slack.callsTo("chat.postMessage")[0]!;
+    expect(buttonsOf(post.form.blocks).map((b) => b.url)).toEqual([
+      `${AGENT_PAGE}/chat?attach=google-calendar`,
+    ]);
+  });
+
+  it("an early reply's connect card deep-links into the agent's chat", async () => {
+    let served = false;
+    const { controlPlane } = feedControlPlane([hostile()], {
+      getWork: async () => {
+        if (served) return { finished: [] };
+        served = true;
+        return {
+          finished: [],
+          replies: [
+            {
+              linkId: "l1",
+              presenceId: "p1",
+              conversationId: "cv1",
+              externalThreadId: "D100",
+              kind: "direct" as const,
+              turnId: "t9",
+              followUp: {
+                id: "f1",
+                message: "also this",
+                source: "slack",
+                userName: null,
+                sourceThreadId: null,
+              },
+              reply: CONNECT_ANSWER,
+            },
+          ],
+        };
+      },
+    });
+    await startAdapter(controlPlane);
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(1),
+    );
+    const post = slack.callsTo("chat.postMessage")[0]!;
+    expect(buttonsOf(post.form.blocks).map((b) => b.url)).toEqual([
+      `${AGENT_PAGE}/chat?attach=google-calendar`,
+    ]);
+  });
+
+  it("without APP_URL there are no buttons: the key failure and the connect link post as text", async () => {
+    let served = false;
+    const { controlPlane } = feedControlPlane([hostile()], {
+      getWork: async () => {
+        if (served) return { finished: [] };
+        served = true;
+        return {
+          finished: [
+            workItem({
+              status: "failed",
+              finishedAt: "2026-08-06T10:00:05.000Z",
+              error: "No model key is configured for this agent.",
+              errorCode: "no_model_key",
+            }),
+          ],
+          replies: [
+            {
+              linkId: "l1",
+              presenceId: "p1",
+              conversationId: "cv1",
+              externalThreadId: "D100",
+              kind: "direct" as const,
+              turnId: "t9",
+              followUp: {
+                id: "f1",
+                message: "also this",
+                source: "slack",
+                userName: null,
+                sourceThreadId: null,
+              },
+              reply: CONNECT_ANSWER,
+            },
+          ],
+        };
+      },
+    });
+    await startAdapter(controlPlane, { appUrl: "" });
+    await vi.waitFor(() =>
+      expect(slack.callsTo("chat.postMessage")).toHaveLength(2),
+    );
+    for (const post of slack.callsTo("chat.postMessage")) {
+      expect(buttonsOf(post.form.blocks)).toEqual([]);
+    }
+  });
+});

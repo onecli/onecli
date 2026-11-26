@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import {
-  IMPORTED_SKILL_CONTENT_MAX_LENGTH,
+  SKILL_CONTENT_MAX_LENGTH,
   MAX_IMPORTED_SKILL_BYTES,
   MAX_IMPORTED_SKILL_FILES,
   MAX_SKILL_ZIP_ENTRIES,
@@ -18,6 +19,7 @@ import {
   stripSkillFrontmatter,
 } from "../apps/github-skill-repo";
 import { readZip, ZipError, type ZipEntry } from "../lib/zip";
+import { skillLeaveOutReason } from "../lib/skill-import-rules";
 
 /**
  * Turn a skill zip (the format Claude, Codex and the agentskills.io standard
@@ -47,6 +49,8 @@ export interface ImportedSkill {
   /** SKILL.md's body plus every file, in bytes. */
   bytes: number;
   skipped: { path: string; reason: string }[];
+  /** sha256 over every imported file, SKILL.md included (skillFingerprint). */
+  fingerprint: string;
 }
 
 export interface SkillZipResult {
@@ -61,7 +65,7 @@ const MAX_SKILL_FOLDER_DEPTH = 3;
 /** A folder or name echoed back in a problem is clipped: it is zip text. */
 const MAX_ECHO_CHARS = 120;
 const TOO_LARGE = `The skill would be larger than ${MAX_IMPORTED_SKILL_BYTES / (1024 * 1024)} MB`;
-const BODY_TOO_LONG = `SKILL.md is longer than ${IMPORTED_SKILL_CONTENT_MAX_LENGTH.toLocaleString("en-US")} characters`;
+const BODY_TOO_LONG = `SKILL.md is longer than ${SKILL_CONTENT_MAX_LENGTH.toLocaleString("en-US")} characters`;
 
 const clip = (text: string): string => {
   // Zip text is echoed to people and models: control characters become "?"
@@ -74,19 +78,26 @@ const clip = (text: string): string => {
 
 const baseName = (path: string): string => path.split("/").at(-1) ?? "";
 
-/** OS and tool clutter: left out quietly-but-reported, never imported. */
-const isClutter = (path: string): boolean => {
-  const segments = path.split("/");
-  const last = segments.at(-1) ?? "";
-  return (
-    segments.some(
-      (s) => s === "__MACOSX" || s === ".git" || s === "node_modules",
-    ) ||
-    last === ".DS_Store" ||
-    last === "Thumbs.db" ||
-    last === "desktop.ini" ||
-    last.startsWith("._")
-  );
+/**
+ * The skill's fingerprint: sha256 over one `<sha256 of file>  <path>` line
+ * per file (shasum's own output format), sorted by path in byte order,
+ * SKILL.md as it was in the zip. It covers exactly the files imported, so
+ * `skillCheckCommand` can recompute it on the source folder and compare a
+ * copy against its source without trusting either side. (The sandbox copy's
+ * SKILL.md is re-rendered from the stored fields, so check the source, not
+ * the materialized folder.)
+ */
+const skillFingerprint = (files: { path: string; bytes: Buffer }[]): string => {
+  const lines = [...files]
+    .sort((a, b) =>
+      Buffer.compare(Buffer.from(a.path, "utf8"), Buffer.from(b.path, "utf8")),
+    )
+    .map(
+      (f) =>
+        `${createHash("sha256").update(f.bytes).digest("hex")}  ${f.path}\n`,
+    )
+    .join("");
+  return createHash("sha256").update(lines, "utf8").digest("hex");
 };
 
 const folderOf = (skillMdPath: string): string => {
@@ -108,7 +119,12 @@ const skillFolders = (entries: ZipEntry[]): string[] => {
       entries
         .filter(
           (e) =>
-            !isClutter(e.path) && baseName(e.path).toLowerCase() === SKILL_FILE,
+            baseName(e.path).toLowerCase() === SKILL_FILE &&
+            // Its folder checked like a file: under a left-out folder (a
+            // vendored package's own skill) it is never a skill, while the
+            // folder's own name meets only the file rules, which no valid
+            // skill name fits (a skill may be named "venv").
+            skillLeaveOutReason(folderOf(e.path)) === null,
         )
         .map((e) => folderOf(e.path))
         .filter(
@@ -158,15 +174,17 @@ const readSkill = async (
   );
   if (!skillMd) return { problem: "SKILL.md is missing" };
   let skillMdText: string | null;
+  let skillMdBytes: Buffer;
   try {
     const bytes = await skillMd.read(
       Math.min(
         // Frontmatter rides on top of the body: room for both, in UTF-8.
-        IMPORTED_SKILL_CONTENT_MAX_LENGTH * 4,
+        SKILL_CONTENT_MAX_LENGTH * 4,
         MAX_SKILL_ZIP_UNPACKED_BYTES - budget.used,
       ),
     );
     budget.used += bytes.length;
+    skillMdBytes = bytes;
     skillMdText = decodeUtf8Text(bytes);
   } catch (err) {
     if (!(err instanceof ZipError)) throw err;
@@ -189,7 +207,7 @@ const readSkill = async (
   }
   const content = stripSkillFrontmatter(skillMdText).trim();
   if (content.length === 0) return { problem: "SKILL.md has no instructions" };
-  if (content.length > IMPORTED_SKILL_CONTENT_MAX_LENGTH) {
+  if (content.length > SKILL_CONTENT_MAX_LENGTH) {
     return { problem: BODY_TOO_LONG };
   }
 
@@ -201,7 +219,13 @@ const readSkill = async (
     files: [],
     bytes: Buffer.byteLength(content),
     skipped: [],
+    fingerprint: "",
   };
+  const hashed: { path: string; bytes: Buffer }[] = [
+    { path: skillMd.path.slice(prefix.length), bytes: skillMdBytes },
+  ];
+  // Real files past MAX_IMPORTED_SKILL_FILES: counted, never half-imported.
+  let overCap = 0;
   const skip = (path: string, reason: string) =>
     skill.skipped.push({ path: clip(path), reason });
   // SKILL.md is the rendered file's own path.
@@ -210,8 +234,12 @@ const readSkill = async (
   for (const entry of [...own].sort((a, b) => (a.path < b.path ? -1 : 1))) {
     if (entry === skillMd || entry.isDirectory) continue;
     const rel = entry.path.slice(prefix.length);
-    if (isClutter(entry.path)) {
-      skip(rel, "System file");
+    // Leaving a file out by its name is SKILL_LEAVE_OUT_RULES' job alone:
+    // the check command follows that table, so a name rule added here
+    // instead would make every such skill read as changed.
+    const leftOut = skillLeaveOutReason(rel);
+    if (leftOut) {
+      skip(rel, leftOut);
       continue;
     }
     if (entry.isSymlink) {
@@ -230,17 +258,18 @@ const readSkill = async (
       continue;
     }
     // SKILL.md is one of the skill's files (MAX_IMPORTED_SKILL_FILES).
+    // A skill that doesn't fit is refused whole: half a library imports
+    // fine and then fails at run time, far from the cause.
     if (skill.files.length >= MAX_IMPORTED_SKILL_FILES - 1) {
-      skip(rel, `More than ${MAX_IMPORTED_SKILL_FILES} files`);
+      overCap += 1;
       continue;
     }
     const room = Math.min(
       MAX_IMPORTED_SKILL_BYTES - skill.bytes,
       MAX_SKILL_ZIP_UNPACKED_BYTES - budget.used,
     );
-    if (entry.declaredSize > room) {
-      skip(rel, TOO_LARGE);
-      continue;
+    if (entry.declaredSize !== null && entry.declaredSize > room) {
+      return { problem: TOO_LARGE };
     }
     let bytes: Buffer;
     try {
@@ -248,7 +277,8 @@ const readSkill = async (
       bytes = await entry.read(room);
     } catch (err) {
       if (!(err instanceof ZipError)) throw err;
-      skip(rel, err.code === "too_large" ? TOO_LARGE : err.message);
+      if (err.code === "too_large") return { problem: TOO_LARGE };
+      skip(rel, err.message);
       continue;
     }
     budget.used += bytes.length;
@@ -261,7 +291,15 @@ const readSkill = async (
       executable: entry.executable || (text?.startsWith("#!") ?? false),
     });
     skill.bytes += bytes.length;
+    hashed.push({ path: rel, bytes });
   }
+  if (overCap > 0) {
+    const total = skill.files.length + 1 + overCap;
+    return {
+      problem: `A skill holds at most ${MAX_IMPORTED_SKILL_FILES} files, SKILL.md included, and this one has ${total.toLocaleString("en-US")}, not counting the files left out. Remove some, then import again`,
+    };
+  }
+  skill.fingerprint = skillFingerprint(hashed);
   return skill;
 };
 

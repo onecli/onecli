@@ -126,6 +126,10 @@ export interface PendingApproval {
   /** The agent's claim that this request is one of a task's several, so
    *  cards can group them. Grouping only: it grants nothing. */
   batch?: ApprovalBatch;
+  /** "Approve similar", when the gateway offers it for this request (a
+   *  documented update of one record): what it would also allow, and its
+   *  bounds. */
+  similar?: ApprovalSimilar | null;
   agent: PendingApprovalAgent;
   /** RFC 3339 timestamp. */
   createdAt: string;
@@ -134,6 +138,16 @@ export interface PendingApproval {
 }
 
 export type ApprovalDecisionInput = "approve" | "deny";
+
+/** The gateway's "Approve similar" offer on one held request. */
+export interface ApprovalSimilar {
+  /** What it covers, e.g. "Attio updates to companies". */
+  label: string;
+  /** How long the window stays open. */
+  windowMinutes: number;
+  /** How many requests the window lets through before the next one asks. */
+  maxRequests: number;
+}
 
 /** How a decision landed: delivered, or the approval was already gone
  * (expired, decided elsewhere, withdrawn when the agent stopped waiting, or
@@ -199,13 +213,15 @@ export const listPending = (opts?: {
 export const decide = async (
   id: string,
   decision: ApprovalDecisionInput,
+  /** `similar`: approve this and the agent's similar updates for a while. */
+  scope?: "similar",
 ): Promise<DecisionOutcome> => {
   const { headers, credentials } = await getGatewayFetchOptions();
   const resp = await fetch(`${base()}/${encodeURIComponent(id)}/decision`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     credentials,
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify({ decision, ...(scope && { scope }) }),
   });
   if (resp.ok) return "delivered";
   if (resp.status === 410 || resp.status === 404) return "already_settled";

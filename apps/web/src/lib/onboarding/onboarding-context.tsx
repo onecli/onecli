@@ -1,11 +1,22 @@
 "use client";
 
-import { createContext, useContext, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import type { OnboardingProgress } from "./steps";
+import { DEFAULT_AGENT_NAME } from "./steps";
 import { completeOnboarding, saveOnboardingProgress } from "./actions";
 import { getActiveWorkspacePath } from "@/lib/workspaces/actions";
+import { useCreateHostedAgent } from "@/hooks/use-agents";
+import { useOpenDirectThread } from "@/hooks/use-conversations";
 
 interface OnboardingContextValue {
   /** Where the created agent lives — set once creation succeeds. */
@@ -14,6 +25,14 @@ interface OnboardingContextValue {
   /** The default workspace the flow creates into, resolved at layout boot —
    * present from the first render, so resume paths reach the chat too. */
   workspaceId: string;
+  /**
+   * Make the flow's agent exist, as `DEFAULT_AGENT_NAME`, and start its
+   * machine: the welcome step calls this on mount so the whole welcome dwell
+   * is boot time. Idempotent (a created or in-flight agent is kept), and
+   * quiet: a refusal here (quota, no runner) is swallowed, and the name
+   * step's own create-on-submit is the fallback that reports it.
+   */
+  ensureAgent: () => void;
   recordCreatedAgent: (data: { agentId: string; agentName: string }) => void;
   completing: boolean;
   /** Finish onboarding and land in the created agent's chat (or the
@@ -44,6 +63,13 @@ export const OnboardingProvider = ({
   // One completion per session — a double-click must not double-notify.
   const completedRef = useRef(false);
 
+  const createAgent = useCreateHostedAgent();
+  const openThread = useOpenDirectThread();
+  // One create per provider life: the welcome step mounts twice under
+  // StrictMode and again on a back-navigation, and each must find the first
+  // in flight rather than mint a second agent.
+  const ensuringRef = useRef(false);
+
   const progress = useMemo<OnboardingProgress>(
     () => ({
       ...initialProgress,
@@ -63,6 +89,44 @@ export const OnboardingProvider = ({
       agentName: data.agentName,
     }).catch(() => {});
   };
+
+  const { mutateAsync: create } = createAgent;
+  const { mutate: open } = openThread;
+  const ensureAgent = useCallback(() => {
+    if (createdAgentId || ensuringRef.current) return;
+    ensuringRef.current = true;
+    const run = async () => {
+      const agent = await create({
+        name: DEFAULT_AGENT_NAME,
+        workspaceId: initialWorkspaceId,
+      });
+      setCreatedAgentId(agent.id);
+      setCreatedAgentName(agent.name);
+      // The greeting's door checks the survey's `createdAgentId`, so the
+      // save must land BEFORE the thread opens, or the greeting is skipped
+      // as "not the onboarding agent". Awaited here for exactly that; the
+      // flow itself never waits on it.
+      await saveOnboardingProgress({
+        createdAgentId: agent.id,
+        agentName: agent.name,
+      });
+      open({ agentId: agent.id, workspaceId: initialWorkspaceId });
+    };
+    run().catch(() => {
+      // Quiet by design: the name step creates on submit and reports the
+      // refusal with its own copy. Re-armed so that fallback (and a later
+      // welcome mount) may try again.
+      ensuringRef.current = false;
+    });
+  }, [createdAgentId, create, open, initialWorkspaceId]);
+
+  // A resumed flow with an agent that already exists: open its thread so
+  // the greeting is in flight while the person finishes the flow.
+  const resumedAgentId = initialProgress.createdAgentId ?? null;
+  useEffect(() => {
+    if (resumedAgentId)
+      open({ agentId: resumedAgentId, workspaceId: initialWorkspaceId });
+  }, [resumedAgentId, open, initialWorkspaceId]);
 
   const handleComplete = async (destination?: string) => {
     if (completedRef.current) return;
@@ -94,6 +158,7 @@ export const OnboardingProvider = ({
         createdAgentId,
         createdAgentName,
         workspaceId: initialWorkspaceId,
+        ensureAgent,
         recordCreatedAgent,
         completing,
         handleComplete,

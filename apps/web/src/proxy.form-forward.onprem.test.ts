@@ -19,6 +19,7 @@ vi.hoisted(() => {
 });
 
 import { NextRequest } from "next/server";
+import { ACTION_HEADER } from "next/dist/client/components/app-router-headers";
 import { proxy, WEB_AUTH_PAGES } from "./proxy";
 
 const DASHBOARD = "https://onecli.example.test";
@@ -67,6 +68,25 @@ describe("onprem: api form submits on dashboard page paths", () => {
         const response = proxy(request(page, method));
         expect(rewrittenTo(response), `${method} ${page}`).toBeNull();
       }
+    }
+  });
+
+  it("leaves the page's own server-function calls to the page", () => {
+    // The sign-in and sign-up screens call a server function (the landing
+    // lookup) once the session exists; Next POSTs it to the page path with
+    // its action header. Forwarded, the api answers 404 and the visitor
+    // lands one hop later. Next's own constant names the header, so a
+    // rename in Next fails here rather than silently re-breaking the call.
+    for (const page of WEB_AUTH_PAGES) {
+      const call = new NextRequest(`${DASHBOARD}${page}`, {
+        method: "POST",
+        headers: { [ACTION_HEADER]: "7f3a" },
+      });
+      expect(rewrittenTo(proxy(call)), page).toBeNull();
+      // Control: the same POST without the header is an api form submit.
+      expect(rewrittenTo(proxy(request(page, "POST"))), page).toBe(
+        `${API_INTERNAL}${page}`,
+      );
     }
   });
 

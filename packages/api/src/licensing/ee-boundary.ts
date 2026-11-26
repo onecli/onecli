@@ -65,8 +65,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/web/src/app/**",
-    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way. The agent's full-page Computer (hosted platform only; notFound off cloud) mounts the licensed desktop page the same way.",
-    count: 15,
+    why: "Next.js route files are mount points, not libraries — the app must be able to route to a licensed page when licensed. Each is a one-line re-export or a thin entitlement wrapper (server-side isEntitled() check → the licensed page or the locked card) carrying no feature logic. The two former residuals (`p/[workspaceId]/layout.tsx`, `(admin)/layout.tsx`) now mount free implementations that route role questions through the provider seam. The aws-marketplace fulfillment routes (cloud-billing-only pages; dark off cloud) mount the licensed billing actions the same way. The agent's full-page Computer (hosted platform only; notFound off cloud) mounts the licensed desktop page the same way. The org admin pages (billing, groups, usage, general, SSO, app availability) are redirects into the Settings modal now (plans/flatten-ui.md); the modal's slot pages mount the licensed bodies through lib/settings-modal, a seam of its own.",
+    count: 9,
     permanent: true,
   },
   {
@@ -113,8 +113,8 @@ export const SEAMS: readonly Seam[] = [
   },
   {
     from: "apps/web/src/lib/**",
-    why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down. (43 → 42 when the AWS-external-id server action — which reached requireRole directly — became an admin-gated API route, taking its crossing with it.)",
-    count: 42,
+    why: "DEBT. Free surfaces that statically embed an enterprise or hosted-platform control: quota dialogs and plan badges (inert without billing), workspace sharing, member provisioning and role management. Each render now sits behind the unified gate (usePlanGate locks by plan on cloud and by license on self-host), but the static imports remain; this number must only go down. (43 → 42 when the AWS-external-id server action — which reached requireRole directly — became an admin-gated API route, taking its crossing with it. 42 → 49 with the flattened shell, plans/flatten-ui.md: the Settings modal, lib/settings-modal, is the mount point the deleted org admin route pages were, so the six crossings that left apps/web/src/app/** (15 → 9) moved here (the modal's page bodies, one file each, mount the licensed SSO, billing, groups, general and app-availability pages; resolve.ts and org-landing.ts ask the role resolver) and the v1 sidebar and header's four crossings left with them. Net across the two seams 57 → 58: the top bar's invite button reads the membership. 49 → 48 when the sidebar's admin rows moved from the licensed getUserOrgRole server action to the free cached org membership query, and the action, left with no callers, was deleted. Next: thread the modal's licensed bodies through a dynamic seam like the desktop's, which takes the modal's crossings off this count.)",
+    count: 48,
   },
   {
     from: "packages/api/src/routes/**",
@@ -133,8 +133,14 @@ export const SEAMS: readonly Seam[] = [
  * Pinned exactly (the caps and this total behave as `=`): removing a crossing
  * must lower the seam count AND this total in the same change, so freed slack
  * can never be silently re-spent elsewhere.
+ *
+ * 47 → 54 with the flattened shell: the six crossings the org admin route
+ * pages made from the permanent app/** seam (not counted here) now sit in
+ * lib/settings-modal (counted), plus the top bar's invite button. See the
+ * lib/** entry for the arithmetic and the way back down. 54 → 53 when the
+ * sidebar stopped calling the licensed getUserOrgRole action.
  */
-export const CROSSING_DEBT = 47;
+export const CROSSING_DEBT = 53;
 
 /**
  * Dynamic (`import(...)` / `next/dynamic`) reaches into licensed code. These
@@ -186,10 +192,10 @@ export const DYNAMIC_SEAMS: readonly DynamicSeam[] = [
     specifiers: ["@/ee/desktop/desktop-dock"],
   },
   {
-    // The agent page header lazily names the hosted agent's Computer
+    // The agent top bar's controls lazily name the hosted agent's Computer
     // button, beside the agent menu; rendered only on the hosted platform
     // (IS_CLOUD) for hosted agents, so a self-host never loads it.
-    from: "apps/web/src/app/(dashboard)/w/[workspaceId]/agents/[agentId]/_components/agent-page-header.tsx",
+    from: "apps/web/src/lib/dashboard/shell/agent-top-bar-controls.tsx",
     specifiers: ["@/ee/desktop/desktop-header-chip"],
   },
   {

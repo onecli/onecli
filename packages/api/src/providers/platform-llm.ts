@@ -30,6 +30,14 @@ export interface PlatformLlmProvider {
     pool: ReadonlyArray<{ type: string; hostPattern: string }>,
     owner: TrialCreditOwner | null,
   ) => boolean;
+  /**
+   * The most context, in tokens, a conversation may run at while its agent
+   * runs on the trial credit: a larger context costs more per message, and
+   * the credit is a fixed budget. A conversation the platform sized above it
+   * runs at this instead until the agent has a key of its own. Absent = no
+   * limit.
+   */
+  trialMaxContextTokens?: number;
 }
 
 /** What the trial-credit rule knows about the org's founding owner. */

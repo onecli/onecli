@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -166,9 +166,12 @@ const stubHarvester = {
   stop: () => undefined,
 };
 
-/** A short /tmp home — the daemon binds a unix socket under it, and macOS's
- * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro). */
-const shortHome = () => mkdtempSync("/tmp/ocl-");
+/** A short /tmp home: the daemon binds a unix socket under it, and macOS's
+ * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro).
+ * Resolved to the real path, like the sandbox's real /workspace: macOS's
+ * /tmp is a symlink, and jcode (v1.0+) refuses every bash command when any
+ * component of its home's path is one. */
+const shortHome = () => mkdtempSync(`${realpathSync("/tmp")}/ocl-`);
 
 const supervisorConfig = (homeDir: string) => ({
   homeDir,

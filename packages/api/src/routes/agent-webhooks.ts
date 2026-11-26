@@ -23,6 +23,7 @@ import {
   AUDIT_SOURCE,
   recordAuditEvent,
 } from "../services/audit-service";
+import { parseBody } from "../lib/request-body";
 
 /**
  * Agent webhooks (plans/agent-webhooks.md). Two surfaces:
@@ -35,12 +36,6 @@ import {
  * - `/v1/hooks/:token` — the public catch URL an external app POSTs to. The
  *   token is the only credential; anything wrong reads as 404.
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
 
 const invalid = (issues: { message: string }[]) =>
   new ServiceError("UNPROCESSABLE", issues[0]?.message ?? "Invalid body");

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Plus, Sparkles } from "lucide-react";
+import { Plus, Sparkles } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import {
@@ -18,6 +18,7 @@ import { AddFromLibraryButton } from "./add-from-library-button";
 import { ImportSkillZipButton } from "./import-skill-zip-button";
 import { AgentLibrarySection } from "./agent-library-section";
 import { OrgLibrarySection } from "./org-library-section";
+import { ListRowsSkeleton } from "@/lib/dashboard/shell/list-rows-skeleton";
 
 /**
  * The Skills section, parameterized by door.
@@ -63,14 +64,7 @@ export const SkillsSection = (props: SkillsSectionProps) => {
     setDialogOpen(true);
   };
 
-  if (view.isPending) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 className="text-muted-foreground size-5 animate-spin" />
-        <span className="sr-only">Loading skills</span>
-      </div>
-    );
-  }
+  if (view.isPending) return <ListRowsSkeleton label="Loading skills" />;
 
   // Never render mutating controls over a failed load — a blind edit would
   // write against invisible state (the apps-tab law).

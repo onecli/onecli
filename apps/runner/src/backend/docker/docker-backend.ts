@@ -16,6 +16,7 @@ import {
   type EngineTransport,
 } from "./engine-client";
 import { buildTar, type TarEntry } from "./tar";
+import { createInjectablePathGuard } from "../injectable-path";
 import { log } from "../../log";
 
 /**
@@ -67,47 +68,22 @@ const NODE_GID = 1000;
  * it resolves in-container symlinks) or the system directories the image's
  * own tooling lives in (a control-plane bug must not be able to overwrite
  * /usr/local/bin/node in every sandbox). Mounts that exist only on other
- * substrates are omitted: they do not exist here.
+ * substrates are omitted: they do not exist here. The shared absolute-path
+ * rule matters specifically HERE: a relative path would spin the ancestor
+ * walk forever (`posix.dirname(".") === "."`).
  */
-const FORBIDDEN_PATH_PREFIXES = [
-  `${HOME_MOUNT}/`,
-  "/usr/",
-  "/bin/",
-  "/sbin/",
-  "/proc/",
-  "/sys/",
-  "/dev/",
-];
-
-/**
- * Refuse a payload file path the injection must never touch — the same
- * conservative allowlist every substrate enforces on the identical payload:
- * one substrate trust model. The
- * wire schema only enforces a non-empty string, and beyond the shared rules
- * one shape is dangerous specifically HERE: a relative path would spin the
- * ancestor walk forever (`posix.dirname(".") === "."`).
- */
-const assertInjectablePath = (containerPath: string): void => {
-  if (
-    containerPath.length > 300 ||
-    !/^\/[A-Za-z0-9._/-]+$/.test(containerPath)
-  ) {
-    throw new Error(
-      `payload file path is not an absolute, conservative path: ${containerPath}`,
-    );
-  }
-  if (containerPath.split("/").includes("..")) {
-    throw new Error(`payload file path contains "..": ${containerPath}`);
-  }
-  if (
-    containerPath === HOME_MOUNT ||
-    FORBIDDEN_PATH_PREFIXES.some((prefix) => containerPath.startsWith(prefix))
-  ) {
-    throw new Error(
-      `payload file path targets the durable home or a system directory: ${containerPath}`,
-    );
-  }
-};
+const assertInjectablePath = createInjectablePathGuard({
+  exact: [HOME_MOUNT],
+  prefixes: [
+    `${HOME_MOUNT}/`,
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+  ],
+});
 
 export interface DockerBackendOptions {
   /** Initial owner label; replaced by `identify()` once registration

@@ -1,6 +1,7 @@
 "use client";
 
 import { toast } from "sonner";
+import { cn } from "@onecli/ui/lib/utils";
 import {
   Tooltip,
   TooltipContent,
@@ -24,6 +25,7 @@ export const CopyableCommand = ({
   toastMessage,
   tooltip = "Copy command",
   variant = "chip",
+  className,
 }: {
   command: string;
   /** The success toast — the "now do this" follow-up after copying. */
@@ -32,6 +34,8 @@ export const CopyableCommand = ({
   tooltip?: string;
   /** `chip` is the mono code pill; `link` matches adjacent inline links. */
   variant?: "chip" | "link";
+  /** Extra classes for the visible text (e.g. weight). */
+  className?: string;
 }) => {
   const { copy } = useCopyToClipboard();
   return (
@@ -46,11 +50,12 @@ export const CopyableCommand = ({
           // interactive. `link` wears the exact class of the sibling anchors
           // (rest, hover, and focus) so a command offered as a peer of a link
           // reads as one.
-          className={
+          className={cn(
             variant === "link"
               ? inlineLinkClassName
-              : "bg-muted/60 hover:bg-muted rounded px-1 py-0.5 font-mono text-[11px] transition-colors"
-          }
+              : "bg-muted/60 hover:bg-muted rounded px-1 py-0.5 font-mono text-[11px] transition-colors",
+            className,
+          )}
           onClick={() => {
             void copy(command).then((copied) => {
               if (copied) toast.success(toastMessage);

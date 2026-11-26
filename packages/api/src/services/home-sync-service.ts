@@ -175,6 +175,18 @@ export const bumpHomeForScope = async (scope: {
 // bytes); skills stay local — they have no write-back side — but share the
 // one folded-scalar definition so their frontmatter can't drift from it.
 
+/**
+ * The line under a rendered SKILL.md's frontmatter. It speaks about the
+ * FILE (a projection the platform rewrites), and for the agent's own skills
+ * it names the way to change the SKILL: an agent read the bare "Managed by
+ * OneCLI" as "this skill is not yours to edit" and sent its person to the
+ * dashboard for a change skill_update makes.
+ */
+const skillMdHeader = (scope: string): string =>
+  scope === "agent"
+    ? "<!-- Managed by OneCLI (agent skill): this file is rewritten from the platform, so don't edit it here. This is your own skill: change it with skill_update. -->"
+    : `<!-- Managed by OneCLI (${scope} skill) — regenerated from the dashboard; edits here are overwritten. -->`;
+
 const renderSkillMd = (skill: {
   name: string;
   description: string;
@@ -188,7 +200,7 @@ const renderSkillMd = (skill: {
     // straight to the database) still reach the agent as one plain line.
     `description: ${foldedScalar(cleanSkillDescription(skill.description))}`,
     "---",
-    `<!-- Managed by OneCLI (${skill.scope} skill) — regenerated from the dashboard; edits here are overwritten. -->`,
+    skillMdHeader(skill.scope),
     "",
     skill.content,
     "",
@@ -536,9 +548,9 @@ export type SyncFinalExtras = Omit<SyncPart, "files" | "blobs"> & {
  * composer decided (library skills first, each giving its name back to the
  * agent's own skill it shadowed; then the agent's and organization's skills,
  * largest first). Leaving a skill out costs one skill; refusing or cutting
- * the sync short would cost the agent its memory. The import door's tier
- * budgets keep agents far from this, so it is logged as an error, never
- * expected.
+ * the sync short would cost the agent its memory. The tier budgets, held at
+ * every door that grows a skill, keep agents far from this, so it is logged
+ * as an error, never expected.
  */
 export const fitSkillsToSync = ({
   agentId,

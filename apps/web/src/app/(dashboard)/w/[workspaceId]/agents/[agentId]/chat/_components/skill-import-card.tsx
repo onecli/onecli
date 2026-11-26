@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
-import { agentSectionPath } from "@/lib/navigation";
+import { mergedSectionPath } from "@/lib/navigation";
 import { formatBytes } from "@/lib/format-bytes";
 import type { SkillImportCardData } from "@/lib/chat/skill-import";
+import { SkillFingerprint } from "@/lib/skills/skill-fingerprint";
 
 export interface SkillImportCardProps {
   data: SkillImportCardData;
@@ -68,6 +69,7 @@ export const SkillImportCard = ({ data }: SkillImportCardProps) => {
                   {skill.skippedCount > 3 && "…"}
                 </p>
               )}
+              <SkillFingerprint fingerprint={skill.fingerprint} />
             </div>
           </div>
         );
@@ -98,7 +100,7 @@ export const SkillImportCard = ({ data }: SkillImportCardProps) => {
 
       {agentId && data.skills.length > 0 && (
         <Link
-          href={agentSectionPath(pathname, agentId, "skills")}
+          href={mergedSectionPath(pathname, agentId, "skills")}
           className="text-brand self-start text-sm underline underline-offset-2 hover:opacity-80"
         >
           Open skills

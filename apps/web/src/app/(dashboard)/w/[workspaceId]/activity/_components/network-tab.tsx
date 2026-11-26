@@ -17,6 +17,7 @@ import { ActivityFilterControl } from "./activity-filter";
 import { LiveToggle } from "./live-toggle";
 import { ActivityDetailDialog } from "./activity-detail-dialog";
 import { ClearFilterChip } from "./clear-filter-chip";
+import { ListRowsSkeleton } from "@/lib/dashboard/shell/list-rows-skeleton";
 
 const EMPTY_MESSAGES: Record<ActivityFilter, string> = {
   all: "No requests yet.",
@@ -67,10 +68,7 @@ export const NetworkTab = ({
       </div>
 
       {list.isPending ? (
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="text-muted-foreground size-5 animate-spin" />
-          <span className="sr-only">Loading requests</span>
-        </div>
+        <ListRowsSkeleton label="Loading requests" />
       ) : list.isError ? (
         <div
           role="alert"

@@ -1,4 +1,8 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import {
+  toolFactory,
+  type AppPermissionDefinition,
+  type AppTool,
+} from "./types";
 
 // PagerDuty REST API v2 (docs.pagerduty.com/developer/api/reference), paths
 // from PagerDuty's published OpenAPI (github.com/PagerDuty/api-schema). The
@@ -16,6 +20,8 @@ import type { AppPermissionDefinition, AppTool } from "./types";
 const HOST = "api.pagerduty.com";
 const HOST_ALIASES = ["api.eu.pagerduty.com"];
 
+const tool = toolFactory(HOST, HOST_ALIASES);
+
 const read = (
   id: string,
   name: string,
@@ -23,34 +29,9 @@ const read = (
   pathPattern: string,
   aliasPatterns?: string[],
   methods: string[] = ["GET"],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  hostAliasPatterns: HOST_ALIASES,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+): AppTool => tool(id, name, description, pathPattern, methods, aliasPatterns);
 
-const write = (
-  id: string,
-  name: string,
-  description: string,
-  pathPattern: string,
-  methods: string[],
-  aliasPatterns?: string[],
-): AppTool => ({
-  id,
-  name,
-  description,
-  hostPattern: HOST,
-  hostAliasPatterns: HOST_ALIASES,
-  pathPattern,
-  ...(aliasPatterns ? { aliasPatterns } : {}),
-  ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-});
+const write = tool;
 
 export const pagerdutyPermissions: AppPermissionDefinition = {
   provider: "pagerduty",

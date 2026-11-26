@@ -18,6 +18,7 @@ import ssh2, {
 const { Server } = ssh2;
 import { authenticate, certificateLineOf } from "./auth";
 import { ResolverRefusedError, type TerminatorBackend } from "./backend/types";
+import { boundedWait } from "./bounded-wait";
 import {
   SessionOpenRefusedError,
   type ControlPlaneClient,
@@ -142,25 +143,6 @@ export const createTerminatorServer = <T>(
   const connections = new Set<Connection>();
   const sessions = new Set<ConnectionSession<T>>();
 
-  /** Resolves when `settle` fires or the bound elapses — never rejects, so a
-   * stalled peer cannot pin a refused connection open. */
-  const within = (
-    settle: (done: () => void) => void,
-    timeoutMs: number,
-  ): Promise<void> =>
-    new Promise<void>((resolve) => {
-      let finished = false;
-      const finish = (): void => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        resolve();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      timer.unref();
-      settle(finish);
-    });
-
   /** A short human line; PTY channels get it inline, exec/sftp on stderr.
    * Resolves once the bytes have reached the socket (or the write threw). */
   const writeNotice = (
@@ -168,7 +150,7 @@ export const createTerminatorServer = <T>(
     hasPty: boolean,
     message: string,
   ): Promise<void> =>
-    within((done) => {
+    boundedWait((done) => {
       try {
         if (hasPty) channel.write(`\r\n${message}\r\n`, () => done());
         else channel.stderr.write(`${message}\n`, () => done());
@@ -191,7 +173,7 @@ export const createTerminatorServer = <T>(
     message: string,
   ): Promise<void> => {
     await writeNotice(channel, hasPty, message);
-    const drained = within(
+    const drained = boundedWait(
       (done) => channel.once("close", done),
       REFUSAL_DRAIN_TIMEOUT_MS,
     );

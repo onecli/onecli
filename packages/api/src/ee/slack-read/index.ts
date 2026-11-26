@@ -14,6 +14,8 @@ import {
   readConversation,
   deleteAsUser,
   editAsUser,
+  isOwnAsUser,
+  listOwnAsUser,
   sendAsUser,
 } from "./service";
 
@@ -28,6 +30,8 @@ export const eeConversationSender: ConversationSender = {
   send: (input) => sendAsUser(input),
   edit: (input) => editAsUser(input),
   delete: (input) => deleteAsUser(input),
+  listOwn: (input) => listOwnAsUser(input),
+  isOwn: (input) => isOwnAsUser(input),
 };
 
 /** The injected "Connect your Slack" OAuth return. The signature is

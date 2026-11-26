@@ -5,6 +5,8 @@
  * anything that doesn't match the expected shape yields null (no card).
  */
 
+import { SKILL_FINGERPRINT_PATTERN } from "@onecli/api/lib/skill-import-rules";
+
 export interface SkillImportCardSkill {
   name: string;
   files: number;
@@ -12,6 +14,8 @@ export interface SkillImportCardSkill {
   groups: Record<string, number>;
   skipped: { path: string; reason: string }[];
   skippedCount: number;
+  /** sha256 of the imported files, "" when the result carries none. */
+  fingerprint: string;
   replaced: boolean;
 }
 
@@ -79,6 +83,11 @@ export const parseSkillImport = (
         groups,
         skipped,
         skippedCount: Math.max(num(raw.skippedCount), skipped.length),
+        fingerprint:
+          typeof raw.fingerprint === "string" &&
+          SKILL_FINGERPRINT_PATTERN.test(raw.fingerprint)
+            ? raw.fingerprint
+            : "",
         replaced: raw.replaced === true,
       },
     ];

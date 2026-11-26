@@ -3,6 +3,7 @@ import { generateApiKey } from "./api-key-service";
 import { generateWorkspaceId, generateOrganizationId } from "../lib/ids";
 import { getNewOrgPolicySeeder } from "../providers";
 import { logger } from "../lib/logger";
+import { orgNameFromEmail } from "../lib/email-org-name";
 import {
   validateDisplayName,
   DISPLAY_NAME_MAX_LEN,
@@ -105,7 +106,7 @@ const bootstrapNames = (
   ownerName: string | null | undefined,
   displayName?: string,
 ) => {
-  const orgName = displayName || userEmail.split("@")[0] || "Personal";
+  const orgName = displayName || orgNameFromEmail(userEmail) || "Personal";
   const baseSlug = slugify(orgName) || "personal";
   return {
     orgName,
@@ -287,13 +288,12 @@ export interface EnsuredOrganization {
 export const ensureUserOrganization = async (
   userId: string,
   userEmail: string,
-  displayName?: string,
 ): Promise<EnsuredOrganization> => {
   const owner = await db.user.findUnique({
     where: { id: userId },
     select: { name: true },
   });
-  const names = bootstrapNames(userId, userEmail, owner?.name, displayName);
+  const names = bootstrapNames(userId, userEmail, owner?.name);
 
   let outcome: EnsuredOrganization & { seed: boolean };
   try {

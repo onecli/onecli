@@ -22,6 +22,7 @@ use sqlx::PgPool;
 
 use super::{refresh_oauth_token, OAuthRefresh, RefreshOutcome};
 use crate::connect::PolicyEngine;
+use crate::test_support::test_pool;
 
 // ── The fake provider ────────────────────────────────────────────────────
 
@@ -141,22 +142,6 @@ fn config(token_url: &'static str) -> &'static apps::RefreshConfig {
 }
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
-
-async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = std::env::var("GATEWAY_TEST_DATABASE_URL") else {
-        assert!(
-            std::env::var("CI").is_err(),
-            "GATEWAY_TEST_DATABASE_URL must be set in CI: the refresh serialization tests must not silently skip"
-        );
-        eprintln!("skipping: GATEWAY_TEST_DATABASE_URL unset");
-        return None;
-    };
-    Some(
-        db::create_pool(&url)
-            .await
-            .expect("connect to test database"),
-    )
-}
 
 /// One simulated gateway instance: its own shared pool, refresh pool and
 /// in-process stripes, pointed at the same database as every other.

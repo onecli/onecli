@@ -15,7 +15,7 @@ import type {
   TranscriptPage,
   TurnsPage,
 } from "@/lib/api/types";
-import { hasUnsettledTurn } from "@/lib/chat/turns";
+import { turnsPollInterval } from "@/lib/chat/turns";
 
 /** A staged server upload riding a send. Local preview URLs stay composer-owned. */
 export type OutgoingAttachment = AttachmentMeta;
@@ -38,8 +38,10 @@ export interface OutgoingMessage {
  * anything is UNSETTLED — an active turn or a `joining` follow-up: a
  * follow-up that promotes and then born-fails emits no stream event either,
  * and a poll that stopped at the active turn's close would leave its bubble
- * reading "received" forever. An errored read stops the loop rather than
- * hammering a 404 (the `use-agents.ts` poll guard).
+ * reading "received" forever. Faster while a turn has not reached the agent
+ * (`turnsPollInterval`): its machine may be booting, and the poll is what
+ * flips the caption the moment it runs. An errored read stops the loop rather
+ * than hammering a 404 (the `use-agents.ts` poll guard).
  *
  * Windowed since the lazy-history change: this is the NEWEST window (the
  * server's default, ~50 turns — the industry chat-open size), not the whole
@@ -51,11 +53,7 @@ export const useTurns = (conversationId: string) =>
     queryFn: () => conversations.turns(conversationId),
     enabled: conversationId.length > 0,
     refetchInterval: (query) =>
-      query.state.error
-        ? false
-        : hasUnsettledTurn(query.state.data?.turns)
-          ? 2_500
-          : false,
+      query.state.error ? false : turnsPollInterval(query.state.data?.turns),
     refetchIntervalInBackground: false,
   });
 
@@ -149,6 +147,25 @@ export const useDirectConversation = (agentId: string | undefined) =>
     queryFn: () => conversations.ensureDirect(agentId ?? ""),
     enabled: agentId !== undefined && agentId.length > 0,
     staleTime: Infinity,
+  });
+
+/**
+ * Open the agent's direct thread AHEAD of the chat page: the onboarding
+ * flow calls it the moment the agent exists, so the greeting the door posts
+ * is dispatched while the person is still on the flow and is on screen when
+ * they arrive. Workspace-scoped (the onboarding URL carries none). Quiet
+ * and fire-and-forget: the chat page's own `useDirectConversation` lands on
+ * the same row either way, so a failure here costs nothing visible.
+ */
+export const useOpenDirectThread = () =>
+  useMutation({
+    mutationFn: ({
+      agentId,
+      workspaceId,
+    }: {
+      agentId: string;
+      workspaceId: string;
+    }) => conversations.ensureDirect(agentId, { workspaceId }),
   });
 
 /**

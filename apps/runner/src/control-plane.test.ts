@@ -416,6 +416,30 @@ describe("uploadAttachment (the raw-body POST)", () => {
         encodeURIComponent("the run"),
       );
       expect(req!.headers["x-onecli-file-sha256"]).toBe("a".repeat(64));
+      // A reply's file sends no purpose: absent = attach to the reply.
+      expect(req!.headers["x-onecli-file-purpose"]).toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("a staged file (send_message files) carries its purpose header", async () => {
+    const server = await startServer();
+    try {
+      const client = createControlPlaneClient({
+        baseUrl: server.url,
+        token: "rnr_t",
+      });
+      await client.uploadAttachment("sb-1", {
+        conversationId: "cv-1",
+        turnId: "t-1",
+        name: "report.csv",
+        mimeType: "text/csv",
+        sha256: "b".repeat(64),
+        purpose: "send",
+        bytes: Buffer.from("a,b"),
+      });
+      expect(server.seen[0]?.headers["x-onecli-file-purpose"]).toBe("send");
     } finally {
       await server.close();
     }

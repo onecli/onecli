@@ -403,6 +403,57 @@ describe.skipIf(!PROOF_URL)("provision claim over real PostgreSQL", () => {
     // committed a row.
   });
 
+  it("concurrent duplicate claims by existing accounts: exactly one wins, the membership is the winner's alone", async () => {
+    seeded = await seed();
+    const minted = await mint(seeded);
+    const token = tokenOf(minted.claimUrl);
+
+    // The same race on the existing-account branch (Branch A), which moves
+    // the placeholder's membership, workspace and key to the claimer and
+    // deletes the placeholder.
+    const racers = await Promise.all(
+      [0, 1].map((i) =>
+        db.user.create({
+          data: {
+            email: `racer-${i}-${CLAIMER_EMAIL}`,
+            externalAuthId: `ba:${randomUUID()}`,
+          },
+        }),
+      ),
+    );
+    const outcomes = await Promise.allSettled(
+      racers.map((who) =>
+        claimProvision(token, who.id, who.email, who.externalAuthId!),
+      ),
+    );
+
+    const winners = outcomes.filter((o) => o.status === "fulfilled");
+    const losers = outcomes.filter((o) => o.status === "rejected");
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+
+    const winnerIdx = outcomes.findIndex((o) => o.status === "fulfilled");
+    const winner = racers[winnerIdx]!;
+    const loser = racers[1 - winnerIdx]!;
+    const memberIds = (
+      await db.organizationMember.findMany({
+        where: { organizationId: seeded.organizationId },
+        select: { userId: true },
+      })
+    ).map((m) => m.userId);
+    expect(memberIds).toContain(winner.id);
+    expect(memberIds).not.toContain(loser.id);
+    expect(memberIds).not.toContain(minted.userId);
+    const key = await db.apiKey.findFirstOrThrow({
+      where: { workspaceId: minted.workspaceId },
+    });
+    expect(key.userId).toBe(winner.id);
+
+    // The winner is an org member, so the purge removes it; the loser never
+    // joined the org, so remove it here.
+    await db.user.delete({ where: { id: loser.id } });
+  });
+
   it("an expired-flip claim attempt is reaped by the next sweep, freeing the seat", async () => {
     seeded = await seed();
     const minted = await mint(seeded);

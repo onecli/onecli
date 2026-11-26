@@ -2,7 +2,7 @@
 // Install page and the onboarding install step). Pure string building — the
 // callers decide edition gating (IS_CLOUD) and which agent, if any, to pin.
 
-export const PROD_APP_URL = "https://app.onecli.sh";
+const PROD_APP_URL = "https://app.onecli.sh";
 
 export interface CodingTool {
   id: string;

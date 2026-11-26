@@ -201,6 +201,8 @@ export const InlineApprovalItem = ({
             </p>
             <ApprovalActions
               approvalId={approval.id}
+              similar={approval.similar}
+              agentName={approval.agent.name}
               size="xs"
               className="ms-auto shrink-0"
             />

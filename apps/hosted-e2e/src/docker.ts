@@ -20,19 +20,12 @@ export const dockerKill = async (container: string): Promise<void> => {
   await exec("docker", ["kill", container]).catch(() => {});
 };
 
-export const dockerRm = async (container: string): Promise<void> => {
-  await exec("docker", ["rm", "-f", container]).catch(() => {});
-};
-
 export const dockerNetworkRm = async (network: string): Promise<void> => {
   await exec("docker", ["network", "rm", network]).catch(() => {});
 };
 
 export const containerNameFor = (sandboxId: string): string =>
   `onecli-sandbox-${sandboxId}`;
-
-export const volumeNameFor = (sandboxId: string): string =>
-  `onecli-home-${sandboxId}`;
 
 const lines = (stdout: string): string[] =>
   stdout

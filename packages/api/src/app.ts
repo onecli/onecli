@@ -22,6 +22,7 @@ import {
 } from "./providers/hooks/sandbox-lifecycle-hooks";
 import { registerPlatformJob } from "./services/platform-jobs";
 import { memoryReviewJob } from "./services/memory-review-service";
+import { contextFitJob } from "./services/context-fit-service";
 import { registerEeRoutes } from "./ee";
 import { installLegacyProjectCompat } from "./lib/legacy-project-compat";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
@@ -162,6 +163,7 @@ export const createApiApp = (
   // The platform's own jobs, on the poll (platform-jobs). Idempotent, so a
   // second app in the same process registers nothing twice.
   registerPlatformJob(memoryReviewJob);
+  registerPlatformJob(contextFitJob);
   initSession(session);
   if (options?.orgAppConfig) initOrgAppConfig(options.orgAppConfig);
   if (options?.selfUrl) initSelfUrl(options.selfUrl);

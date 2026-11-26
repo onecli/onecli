@@ -48,6 +48,8 @@ export interface ProviderTransportHandlers {
   onApprovalDecision: (input: {
     approvalId: string;
     decision: "approve" | "deny";
+    /** `similar`: the card's "Approve similar" button. */
+    scope?: "similar";
     clickerExternalUserId: string;
   }) => void;
   /** A human clicked a GROUPED approval card (Approve all / Deny all, or one

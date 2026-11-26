@@ -37,10 +37,6 @@ export interface Agent {
   lastSeenAt: string | null;
   /** The avatar's public (key-fenced) URL, or null for the default mark. */
   imageUrl?: string | null;
-  /** Live background work is holding this agent's computer up right now
-   * (step 13's held-awake signal, in agent vocabulary). Optional: an older
-   * API answers without it, and absent must read as false, never a crash. */
-  workingInBackground?: boolean;
 }
 
 export interface CreatedAgent {
@@ -55,6 +51,25 @@ export interface CreatedAgent {
   /** LLM keys attached automatically at creation. Empty = the workspace has
    * no key yet, and the agent cannot run until one is added. */
   llmKeys: string[];
+}
+
+/**
+ * `GET /v1/agents/:id/sandbox`: the machine's lifecycle status. The
+ * vocabulary is `SANDBOX_STATUSES` in @onecli/api's sandbox-service (a
+ * server module the client bundle must not import); `null` = no machine (a
+ * BYO agent) or a status this client does not know.
+ */
+export type SandboxStatus =
+  | "unprovisioned"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "maintenance";
+
+export interface AgentSandbox {
+  status: SandboxStatus | null;
 }
 
 export interface AgentDetail {
@@ -75,9 +90,6 @@ export interface AgentDetail {
   recentRequestAt: string | null;
   /** The avatar's public (key-fenced) URL, or null for the default mark. */
   imageUrl?: string | null;
-  /** Live background work is holding this agent's computer up right now
-   * (step 13's held-awake signal). Optional for older APIs; absent = false. */
-  workingInBackground?: boolean;
 }
 
 export interface DropboxFolder {
@@ -329,7 +341,9 @@ export interface ResourceCounts {
 
 export interface CreateAgentInput {
   name: string;
-  identifier: string;
+  /** Required for a BYO agent (the handle a machine is pinned to); a hosted
+   *  agent's is derived server-side from the name and follows renames. */
+  identifier?: string;
   /** Defaults to "byo" server-side. */
   kind?: AgentKind;
   /** Hosted only; server defaults it to "jcode". */
@@ -768,6 +782,10 @@ export interface TurnUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  /** The prompt the call carried, normalized by the harness for its
+   *  provider's cache accounting; absent when it could not tell. */
+  promptTokens?: number;
 }
 
 /** OUR effort scale — the harness adapter translates it (§3.5). */

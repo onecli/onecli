@@ -5,10 +5,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingActionApprovalItem } from "@/lib/api/channel-approvals";
 
 /**
- * The agent-proposed custom connection card: the person reviews WHERE and
- * HOW the key goes (domain highlighted, key masked) and types the key into
- * a password field; Approve stays disabled until there is a key and calls
- * the dedicated route, Decline the ordinary decide door.
+ * The agent-proposed custom connection card: the person sees the app's name
+ * and the domain the key goes to, types the key into a password field, and
+ * can open OneCLI's guide from "Need help?". Approve stays disabled until
+ * there is a key and calls the dedicated route, Decline the ordinary decide
+ * door.
  */
 
 const state = vi.hoisted(() => ({
@@ -47,11 +48,6 @@ const item = (
     name: "AcmeCRM",
     hostPattern: "api.acmecrm.io",
     registrableDomain: "acmecrm.io",
-    pathPattern: "/v1/*",
-    headerName: "Authorization",
-    valueFormat: "Bearer {value}",
-    docsUrl: "https://docs.acmecrm.io/auth",
-    reason: "You asked for your campaigns.",
     ...over,
   },
 });
@@ -63,20 +59,17 @@ describe("CustomConnectionApprovalRow", () => {
     state.approvePending = false;
   });
 
-  it("renders the proposal with the domain highlighted and the key masked", () => {
+  it("is short: the name, where the key goes, the key field", () => {
     render(<ActionApprovalRow item={item()} />);
     expect(screen.getByText("Connect AcmeCRM?")).toBeTruthy();
-    expect(screen.getByTestId("cc-host").textContent).toBe(
-      "api.acmecrm.io/v1/*",
-    );
-    expect(
-      screen.getByTestId("cc-host").querySelector("mark")?.textContent,
-    ).toBe("acmecrm.io");
-    expect(screen.getByTestId("cc-header").textContent).toBe(
-      "Authorization: Bearer ••••••",
-    );
-    expect(screen.getByText("You asked for your campaigns.")).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
+    // In its own chat the agent is the conversation: no subtitle.
+    expect(screen.queryByText(/Donna/)).toBeNull();
+  });
+
+  it("names the asking agent in the bell, which lists every agent's asks", () => {
+    render(<ActionApprovalRow item={item()} showAgent />);
+    expect(screen.getByText("Donna")).toBeTruthy();
+    expect(screen.getByText(/asks you for an API key/)).toBeTruthy();
   });
 
   it("never shows a warning banner", () => {
@@ -132,23 +125,17 @@ describe("CustomConnectionApprovalRow", () => {
     expect(line.querySelector("strong")?.textContent).toBe("api.acmecrm.io");
   });
 
-  it("links the docs only when the URL is https", () => {
+  it("Need help? opens OneCLI's custom connections guide in a new tab, the card's only link", () => {
     render(<ActionApprovalRow item={item()} />);
-    const link = screen.getByRole("link", {
-      name: "https://docs.acmecrm.io/auth",
-    });
-    expect(link.getAttribute("href")).toBe("https://docs.acmecrm.io/auth");
-  });
-
-  it.each([
-    "javascript:alert(1)",
-    "http://docs.acmecrm.io/auth",
-    "data:text/html,hi",
-    "not a url",
-  ])("renders a non-https docs URL as plain text: %s", (docsUrl) => {
-    render(<ActionApprovalRow item={item({ docsUrl })} />);
-    expect(screen.queryByRole("link")).toBeNull();
-    expect(screen.getByTestId("cc-docs-text").textContent).toBe(docsUrl);
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(1);
+    const link = screen.getByRole("link", { name: /Need help\?/ });
+    expect(link.getAttribute("href")).toBe(
+      "https://onecli.sh/docs/integrations/custom-connections",
+    );
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(link.textContent).toContain("(opens in a new tab)");
   });
 
   it("shows a loading state while connecting", () => {

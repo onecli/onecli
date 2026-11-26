@@ -288,13 +288,16 @@ export const createAnswerTracker = (): AnswerTracker => {
  * only reader, so `messageId` and `replyTo` are dropped, and corrections
  * and finished replies are consumed (a reply reaches the transcript as its
  * own `text` event, and streams there as deltas keyed by the follow-up, see
- * `replyTargetOf`). Keeping them off the wire keeps every runner and
- * control plane, old or new, reading the same vocabulary.
+ * `replyTargetOf`). An unanswered turn's reason is consumed too: it reaches
+ * the transcript as the turn's failure (`turn.result`'s code and error),
+ * never as an event of its own. Keeping them off the wire keeps every runner
+ * and control plane, old or new, reading the same vocabulary.
  */
 export const toWireEvent = (event: HarnessEvent): AgentEvent | null => {
   switch (event.type) {
     case "text.replace":
     case "message.replied":
+    case "turn.unanswered":
       return null;
     case "text.delta":
       return { type: "text.delta", text: event.text };

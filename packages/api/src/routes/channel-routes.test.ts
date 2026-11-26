@@ -1141,6 +1141,31 @@ describe("the adapter wire (authenticated by a registered cha_ token)", () => {
     });
   });
 
+  it("forwards Approve similar, and refuses the similar scope on a deny", async () => {
+    const decide = (decision: "approve" | "deny") =>
+      appRbacOff.request("/v1/channel-adapter/decision", {
+        method: "POST",
+        headers: { ...CHA_AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          presenceId: "pr-1",
+          approvalId: "ap-1",
+          decision,
+          scope: "similar",
+          clickerExternalUserId: "U1",
+        }),
+      });
+    expect((await decide("deny")).status).toBe(422);
+    expect(services.decideApprovalFromChannel).not.toHaveBeenCalled();
+    expect((await decide("approve")).status).toBe(200);
+    expect(services.decideApprovalFromChannel).toHaveBeenCalledWith({
+      presenceId: "pr-1",
+      approvalId: "ap-1",
+      decision: "approve",
+      scope: "similar",
+      clickerExternalUserId: "U1",
+    });
+  });
+
   it("forwards an ACTION-approval decision to the action decide door (socket arm)", async () => {
     services.decideActionApprovalFromChannel.mockResolvedValue({
       kind: "decided",
@@ -1976,6 +2001,52 @@ describe("POST /v1/channels/slack/interactivity", () => {
       decision: "approve",
       clickerExternalUserId: "U-clicker",
     });
+  });
+
+  it("routes Approve similar as an approve asking for the similar scope, and the card says until when", async () => {
+    services.decideApprovalFromChannel.mockResolvedValueOnce({
+      kind: "decided",
+      decidedByName: "Morgan",
+      similar: {
+        label: "Attio updates to companies",
+        until: "2026-11-03T17:22:00Z",
+      },
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}"));
+    try {
+      const body = interactivityBody({
+        ...approvePayload,
+        actions: [{ action_id: "channel_approve_similar", value: "ap-77" }],
+        response_url: "https://hooks.slack.com/actions/T1/B1/abc",
+      });
+      const res = await appRbacOff.request("/v1/channels/slack/interactivity", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          ...slackSigned(body),
+        },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(services.decideApprovalFromChannel).toHaveBeenCalledWith({
+        presenceId: "pr-1",
+        approvalId: "ap-77",
+        decision: "approve",
+        scope: "similar",
+        clickerExternalUserId: "U-clicker",
+      });
+      const { settleDetachedRepliesForTests } =
+        await import("./channel-inbound-slack");
+      await settleDetachedRepliesForTests();
+      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toEqual({
+        replace_original: true,
+        text: "✅ Approved by Morgan · Attio updates to companies allowed until <!date^1793726520^{time}|17:22 UTC>",
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("does NOT POST to a response_url outside hooks.slack.com (SSRF allowlist)", async () => {

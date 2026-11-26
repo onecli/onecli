@@ -41,11 +41,8 @@ export interface PolicyEditorProps {
 export const PolicyEditor = ({ scope }: PolicyEditorProps) => {
   const rulesQuery = usePolicyRules(scope);
   const defaultQuery = usePolicyDefault(scope);
-  // Directory identities are what org rules target — resolved through the
-  // edition seam (EE: the org-admin-gated directory reads; OSS: always
-  // undefined, identities fall back to the raw id). The agent-name lookup that
-  // used to sit here went with the workspace page in step 6: `useAgents` was
-  // already disabled at org scope, so this reads identically.
+  // Directory identities are what org rules target. The directory reads are
+  // org-admin-gated, so for anyone else an identity falls back to its raw id.
   const directoryName = useDirectoryNames();
 
   const setRuleEnabled = useSetPolicyRuleEnabled(scope);

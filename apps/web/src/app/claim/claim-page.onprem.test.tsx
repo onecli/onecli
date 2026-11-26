@@ -53,7 +53,7 @@ afterEach(() => {
 describe("/claim wrapper (provisioning dark reads)", () => {
   it("unlicensed: locked card, token NEVER resolved, org name never fetched", async () => {
     render(await Page(props));
-    expect(screen.getByText("Enterprise")).toBeInTheDocument();
+    expect(screen.getByText("Enterprise feature")).toBeInTheDocument();
     expect(state.tokenReads).toBe(0);
     expect(screen.queryByTestId("claim-sign-in")).toBeNull();
   });
@@ -63,6 +63,6 @@ describe("/claim wrapper (provisioning dark reads)", () => {
     render(await Page(props));
     expect(state.tokenReads).toBe(1);
     expect(screen.getByTestId("claim-sign-in")).toBeInTheDocument();
-    expect(screen.queryByText("Enterprise")).toBeNull();
+    expect(screen.queryByText("Enterprise feature")).toBeNull();
   });
 });

@@ -468,6 +468,33 @@ describe.skipIf(!PROOF_URL)("approve with the key", () => {
   });
 });
 
+describe.skipIf(!PROOF_URL)("the card's read", () => {
+  it("the bell's listing hands the card the name and where the key goes, and nothing else the agent wrote", async () => {
+    const stage = await seedStage();
+    const approvalId = await propose(stage);
+
+    const res = await app.request(
+      `/v1/workspaces/${WORKSPACE}/channel-approvals`,
+      { headers: { "x-workspace-id": WORKSPACE } },
+    );
+    expect(res.status).toBe(200);
+    const { items } = (await res.json()) as {
+      items: { id: string; agentName: string; customConnection: unknown }[];
+    };
+    const item = items.find((i) => i.id === approvalId);
+    expect(item?.agentName).toBe(`cc agent ${seq}`);
+    expect(item?.customConnection).toEqual({
+      name: proposal.name,
+      hostPattern: "api.acmecrm.io",
+      registrableDomain: "acmecrm.io",
+    });
+    // The agent's docs link and reason never reach the browser at all.
+    const wire = JSON.stringify(item);
+    expect(wire).not.toContain(proposal.docsUrl);
+    expect(wire).not.toContain(proposal.reason);
+  });
+});
+
 describe.skipIf(!PROOF_URL)("route fences", () => {
   it("another workspace, another agent, an unknown id, or another action: not found, nothing created", async () => {
     const stage = await seedStage();

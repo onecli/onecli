@@ -1,6 +1,6 @@
 import type { AgentEffort } from "@onecli/agent-protocol";
-import type { LlmProviderId } from "./types";
-import { llmProvider } from "./registry";
+import type { LlmAuthMode, LlmProviderId } from "./types";
+import { forAuthMode, llmProvider } from "./registry";
 
 export interface AgentModelOverride {
   model: string | null;
@@ -12,14 +12,18 @@ export interface AgentModelOverride {
 export interface ResolvedModel {
   /** The PROVIDER's id; the harness adapter translates it (§3.5). */
   model: string;
-  /** Absent = send no effort and let the provider's own default stand. */
+  /** Absent = send no effort and let the model's own default stand. */
   effort?: AgentEffort;
+  /** The level the user chose and this provider can express; null = none. */
+  chosenEffort: AgentEffort | null;
   /** Whether the user chose either of these, or they came from the registry. */
   overridden: boolean;
 }
 
 /**
- * What this agent should run, given the provider its granted key names.
+ * What this agent should run, given the provider its granted key names and
+ * how that key authenticates (a subscription login may not run the API
+ * default, see `LlmProvider.oauth`).
  *
  * PURE WITH RESPECT TO THE NETWORK — it reads the agent's override and the
  * registry's PINNED defaults, never the catalog cache and never the wire. That
@@ -34,27 +38,34 @@ export interface ResolvedModel {
 export const resolveAgentModel = (
   agent: AgentModelOverride,
   provider: LlmProviderId,
+  authMode: LlmAuthMode,
 ): ResolvedModel => {
   const definition = llmProvider(provider);
+  const { defaultModel } = forAuthMode(definition, authMode);
   const stale = agent.modelProvider !== provider;
-  const model = (!stale && agent.model) || definition.defaultModel;
+  const model = (!stale && agent.model) || defaultModel;
 
   // A level this provider cannot express is dropped rather than forwarded —
   // the same read-side defensiveness as the provider check above.
   const chosen = stale ? null : agent.effort;
+  const chosenEffort =
+    definition.efforts.find((option) => option.id === chosen)?.id ?? null;
+  // The default level belongs to the default model only (see
+  // `LlmProvider.defaultEffort`): a model the user picked runs at its own
+  // default unless they picked a level too.
   const effort =
-    definition.efforts.find((option) => option.id === chosen)?.id ??
-    definition.defaultEffort;
+    chosenEffort ??
+    (model === defaultModel ? definition.defaultEffort : undefined);
 
   return {
     model,
     ...(effort && { effort }),
+    chosenEffort,
     // Derived from what SURVIVED, not from what is stored. An override this
     // function just discarded — a foreign provider's stamp, or a level this
     // provider cannot express — must not still be reported as the user's
     // choice: the Models card renders that flag as "Your choice", and it would
     // be pointing at a value identical to the default.
-    overridden:
-      model !== definition.defaultModel || effort !== definition.defaultEffort,
+    overridden: model !== defaultModel || chosenEffort !== null,
   };
 };

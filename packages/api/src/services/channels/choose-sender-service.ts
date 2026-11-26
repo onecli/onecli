@@ -32,8 +32,10 @@ import {
 } from "./send-message-service";
 import {
   SENDER_CHOICES,
+  threadRefSchema,
   type SendAs,
   type SenderChoice,
+  type ThreadRef,
 } from "../../validations/recipients";
 import {
   SLACK_ACCESS_ACTION,
@@ -73,6 +75,7 @@ const youNamed = async (userId: string | null): Promise<string> => {
 const chooseSenderPayloadSchema = personalAskSchema.extend({
   to: z.string(),
   text: z.string(),
+  thread: threadRefSchema.optional(),
   recipient: z.object({
     kind: z.enum(["person", "channel"]),
     ref: z.string().min(1),
@@ -86,6 +89,17 @@ export const chooseSenderPayloadOf = (
 ): ChooseSenderPayload => chooseSenderPayloadSchema.parse(raw);
 
 const agentLabel = (name: string) => cleanLabel(name, 80) || "the agent";
+
+/** The agent's name as platform text speaks it ("the agent" when unset). */
+const agentNameOf = async (agentId: string): Promise<string> =>
+  agentLabel(
+    (
+      await db.agent.findUnique({
+        where: { id: agentId },
+        select: { name: true },
+      })
+    )?.name ?? "",
+  );
 
 /** The card's words: server-built, with a preview of the exact message. */
 const chooseSenderSummary = (p: ChooseSenderPayload) =>
@@ -126,16 +140,13 @@ const getSendAsPreference = async (input: {
   return row && isSenderChoice(row.sendAs) ? row.sendAs : null;
 };
 
-/** Store a person's sender for one recipient. Returns the value it
- * replaced (null = none). */
+/** Store a person's sender for one recipient. */
 const setSendAsPreference = async (input: {
   agentId: string;
   userId: string;
   recipientRef: string;
   sendAs: SenderChoice;
-}): Promise<SenderChoice | null> => {
-  const before = await getSendAsPreference(input);
-  if (before === input.sendAs) return before;
+}): Promise<void> => {
   await db.agentSendAsPreference.upsert({
     where: prefKey(input),
     create: {
@@ -146,7 +157,6 @@ const setSendAsPreference = async (input: {
     },
     update: { sendAs: input.sendAs },
   });
-  return before;
 };
 
 /** The caller's own preferences on one agent (Contacts). */
@@ -200,6 +210,10 @@ interface SendContext {
   originTurnId: string | null;
   readerUserId: string | null;
   askerUserId: string | null;
+  /** send_message `thread`, parsed at the tool door. */
+  thread?: ThreadRef;
+  /** Staged files (send_message `files`). Agent path only in v1. */
+  attachmentIds?: readonly string[];
 }
 
 /** send_message as the agent: today's behavior, verbatim. */
@@ -213,7 +227,20 @@ const sendAsAgentPath = async (
     originConversationId: input.originConversationId,
     originTurnId: input.originTurnId,
     readerUserId: input.readerUserId,
+    ...(input.thread && { thread: input.thread }),
+    ...(input.attachmentIds && { attachmentIds: input.attachmentIds }),
   });
+  if (input.attachmentIds?.length && outcome.kind === "held") {
+    return {
+      ok: true,
+      result: {
+        status: "held",
+        to: outcome.to,
+        files: input.attachmentIds.length,
+        note: `Not sent yet. Files to another conversation always need approval: a card names each file, and nothing is uploaded until someone approves it. The decision arrives as a notice in this conversation. Say so in one short line; never say the files were sent.`,
+      },
+    };
+  }
   switch (outcome.kind) {
     case "blocked":
       return {
@@ -281,6 +308,7 @@ const sendAsYouPath = (
         : input.recipient.label,
     conversationRef: input.recipient.ref,
     text: input.text,
+    ...(input.thread && { thread: input.thread }),
     originConversationId: input.originConversationId,
     originTurnId: input.originTurnId,
     ...(input.picked && { consented: true }),
@@ -297,12 +325,40 @@ const bothSendersPossible = async (
   return sender !== null && (await sender.available(agentId));
 };
 
-/** Tag a result with who sent and whether a preference drove it. */
+/** Tag a result with who sent and whether a preference drove it, plus
+ * where it landed, only when it was actually delivered (a held or
+ * needs-access send has not landed anywhere yet). */
 const tagged = (
   outcome: ActAsYouOutcome,
   extra: Record<string, unknown>,
+  landed: string,
 ): ActAsYouOutcome =>
-  outcome.ok ? { ok: true, result: { ...outcome.result, ...extra } } : outcome;
+  outcome.ok
+    ? {
+        ok: true,
+        result: {
+          ...outcome.result,
+          ...extra,
+          ...(outcome.result.status === "sent" && { landed }),
+        },
+      }
+    : outcome;
+
+/**
+ * Where the message shows up, for the confirmation: a DM sent as the agent
+ * lands in the AGENT's DM with that person, not the asker's, which is
+ * exactly where people looked and found nothing.
+ */
+const landedNote = (
+  sendAs: SenderChoice,
+  recipient: SendRecipient,
+  agentName: string,
+): string =>
+  recipient.kind === "channel"
+    ? `When you confirm, say who it came from: "as you" or "as ${agentName}", in ${recipient.label}. One short line, no notes about defaults.`
+    : sendAs === "you"
+      ? `When you confirm, say it was sent as them in their own DM with ${recipient.label}. One short line, no notes about defaults.`
+      : `When you confirm, say it was sent as ${agentName}, so ${recipient.label} sees it in ${agentName}'s DM with them, not in the person's own DM with ${recipient.label}. One short line, no notes about defaults.`;
 
 /**
  * The send_message tool's body. "agent" and "you" run that path (and, when
@@ -313,6 +369,17 @@ const tagged = (
 export const sendMessageWithSender = async (
   input: SendContext & { sendAs: SendAs },
 ): Promise<ActAsYouOutcome> => {
+  if (input.attachmentIds?.length) {
+    // Files go as the agent only (v1): "as you" refuses plainly, never a
+    // silent switch; "ask" needs no sender card (there is one sender).
+    if (input.sendAs === "you") {
+      return {
+        ok: false,
+        error: `Sending files as you isn't supported yet; send them as ${await agentNameOf(input.agentId)} or without files. Nothing was sent.`,
+      };
+    }
+    return sendAsAgentPath(input);
+  }
   if (input.sendAs === "you" && !getConversationSender()) {
     return { ok: false, error: enterpriseLicenseMessage("granular_access") };
   }
@@ -345,20 +412,20 @@ export const sendMessageWithSender = async (
     userId: readerUserId,
     recipientRef: recipient.ref,
   };
+  const agentName = await agentNameOf(input.agentId);
 
   if (input.sendAs !== "ask") {
-    const before = await setSendAsPreference({
+    // Saved quietly (Contacts shows it): announcing every switch made an
+    // explicit pick read like a mistake.
+    await setSendAsPreference({
       ...pref,
       sendAs: input.sendAs,
     });
-    const updated = before !== null && before !== input.sendAs;
-    return tagged(await run(input.sendAs), {
-      sendAs: input.sendAs,
-      ...(updated && {
-        preferenceUpdated: true,
-        preferenceNote: `The person switched: from now on, messages to ${recipient.label} go ${input.sendAs === "you" ? "as them" : "as you (the agent)"}. Say so in one short line.`,
-      }),
-    });
+    return tagged(
+      await run(input.sendAs),
+      { sendAs: input.sendAs },
+      landedNote(input.sendAs, recipient, agentName),
+    );
   }
 
   const remembered = await getSendAsPreference(pref);
@@ -383,17 +450,11 @@ export const sendMessageWithSender = async (
       await forget();
       return requestChooseSender({ ...input, readerUserId, recipient });
     }
-    const agent = await db.agent.findUnique({
-      where: { id: input.agentId },
-      select: { name: true },
-    });
-    const other =
-      remembered === "you" ? `as ${agentLabel(agent?.name ?? "")}` : "as me";
-    return tagged(outcome, {
-      sendAs: remembered,
-      remembered: true,
-      preferenceNote: `Sent ${remembered === "you" ? "as the person" : "as you (the agent)"} because that is their usual for ${recipient.label}. When you confirm, mention it briefly, e.g. "${remembered === "you" ? "Sent as you" : "Sent"} to ${recipient.label} (your usual for ${recipient.label}, say '${other}' to switch)".`,
-    });
+    return tagged(
+      outcome,
+      { sendAs: remembered, remembered: true },
+      landedNote(remembered, recipient, agentName),
+    );
   }
 
   return requestChooseSender({ ...input, readerUserId, recipient });
@@ -403,22 +464,33 @@ export const sendMessageWithSender = async (
 const requestChooseSender = async (
   input: SendContext & { readerUserId: string; recipient: SendRecipient },
 ): Promise<ActAsYouOutcome> => {
-  const pending = await db.actionApproval.findFirst({
-    where: {
-      agentId: input.agentId,
-      action: CHOOSE_SENDER_ACTION,
-      status: "pending",
-      expiresAt: { gt: new Date() },
-      AND: [
-        {
-          payload: { path: ["recipient", "ref"], equals: input.recipient.ref },
-        },
-        { payload: { path: ["readerUserId"], equals: input.readerUserId } },
-        { payload: { path: ["text"], equals: input.text } },
-      ],
-    },
-    select: { id: true },
-  });
+  const pending = (
+    await db.actionApproval.findMany({
+      where: {
+        agentId: input.agentId,
+        action: CHOOSE_SENDER_ACTION,
+        status: "pending",
+        expiresAt: { gt: new Date() },
+        AND: [
+          {
+            payload: {
+              path: ["recipient", "ref"],
+              equals: input.recipient.ref,
+            },
+          },
+          { payload: { path: ["readerUserId"], equals: input.readerUserId } },
+          { payload: { path: ["text"], equals: input.text } },
+        ],
+      },
+      select: { id: true, payload: true },
+    })
+  ).find(
+    // The same send, thread included: the same words into another thread
+    // (or the top level) are a different message.
+    (row) =>
+      chooseSenderPayloadSchema.safeParse(row.payload).data?.thread?.ts ===
+      input.thread?.ts,
+  );
   // A fresher ask for this recipient replaces the person's still-pending
   // "connect / allow writing" card for it: one card to act on, not two.
   await supersedeStaleAccessCards(input);
@@ -427,6 +499,7 @@ const requestChooseSender = async (
     ...ask,
     to: input.to,
     text: input.text,
+    ...(input.thread && { thread: input.thread }),
     recipient: input.recipient,
   };
   const id =
@@ -469,6 +542,7 @@ registerActionHandler(
       agentId: approval.agentId,
       to: p.to,
       text: p.text,
+      ...(p.thread && { thread: p.thread }),
       originConversationId: approval.conversationId,
       originTurnId: approval.originTurnId,
       readerUserId: p.readerUserId,

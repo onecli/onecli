@@ -1,4 +1,8 @@
-import type { AppPermissionDefinition, AppTool } from "./types";
+import {
+  toolFactory,
+  type AppPermissionDefinition,
+  type AppTool,
+} from "./types";
 
 // Twilio REST APIs (twilio.com/docs/usage/api). Each product has its own host
 // (`api.twilio.com` for the 2010 core API, `verify.twilio.com`, …), and each
@@ -31,19 +35,15 @@ const tool = (
   pathPattern: string,
   methods: string[],
   aliasPatterns?: string[],
-): AppTool => {
-  const [hostPattern, hostAliasPatterns] = REGIONAL(product);
-  return {
+): AppTool =>
+  toolFactory(...REGIONAL(product))(
     id,
     name,
     description,
-    hostPattern,
-    hostAliasPatterns,
     pathPattern,
-    ...(aliasPatterns ? { aliasPatterns } : {}),
-    ...(methods.length === 1 ? { method: methods[0] } : { methods }),
-  };
-};
+    methods,
+    aliasPatterns,
+  );
 
 const ACCT = "/2010-04-01/Accounts/*";
 

@@ -46,14 +46,50 @@ export const EVAL_SCHEDULE_OUTCOMES = [
 ] as const;
 export type EvalScheduleOutcome = (typeof EVAL_SCHEDULE_OUTCOMES)[number];
 
+/** When a scheduled run's results are sent. A run that failed outright is
+ * always sent, whatever this says.
+ * - `always`: every run;
+ * - `changes`: a question broke or got fixed since the run before;
+ * - `failures`: any question did not pass. */
+export const EVAL_REPORT_WHEN = ["always", "changes", "failures"] as const;
+export type EvalReportWhen = (typeof EVAL_REPORT_WHEN)[number];
+
+/** Where a scheduled run's results go: the schedule creator's own chat
+ * with the agent, or a channel the agent's bot is in. */
+export const evalReportSchema = z.discriminatedUnion("to", [
+  z.strictObject({
+    to: z.literal("chat"),
+    when: z.enum(EVAL_REPORT_WHEN).default("always"),
+  }),
+  z.strictObject({
+    to: z.literal("channel"),
+    channelRef: z.string().trim().min(1, "Pick a channel.").max(100),
+    when: z.enum(EVAL_REPORT_WHEN).default("always"),
+  }),
+]);
+export type EvalReportBody = z.output<typeof evalReportSchema>;
+
+/** Where a scheduled run's results go, as stored and read back: a channel
+ * also carries the name it had when the schedule was saved, for display. */
+export type EvalReport =
+  | { to: "chat"; when: EvalReportWhen }
+  | {
+      to: "channel";
+      channelRef: string;
+      channelLabel: string;
+      when: EvalReportWhen;
+    };
+
 /** PUT /v1/agents/:agentId/evals/schedule: create or replace. The schedule
  * string is validated by croner in the service (the engine that computes
  * occurrences), never by a regex here. Strict, so a client can never set
- * the creator or any server-owned field. */
+ * the creator or any server-owned field. `report` absent keeps the stored
+ * setting (the pause switch saves without it); null stops sending. */
 export const evalScheduleSchema = z.strictObject({
   schedule: z.string().trim().min(1, "Enter a schedule.").max(100),
   timezone: z.string().trim().min(1, "Enter a timezone.").max(100),
   enabled: z.boolean().default(true),
+  report: evalReportSchema.nullable().optional(),
 });
 export type EvalScheduleInput = z.input<typeof evalScheduleSchema>;
 export type EvalScheduleBody = z.output<typeof evalScheduleSchema>;

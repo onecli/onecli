@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import {
   Copy,
   Check,
@@ -27,6 +28,8 @@ import { SecretDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_com
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import { IDENTIFIER_REGEX } from "@onecli/api/validations/agent";
 import { nameToIdentifier } from "@/lib/agents/agent-identifier";
+import { defaultAgentSection } from "@/lib/agents/agent-sections";
+import { agentPagePath } from "@/lib/navigation";
 import { useCounts, useHasConnectionsToChoose } from "@/hooks/use-counts";
 import { ChooseConnectionsDialog } from "./choose-connections-dialog";
 
@@ -39,6 +42,8 @@ export const CreateAgentDialog = ({
   open,
   onOpenChange,
 }: CreateAgentDialogProps) => {
+  const router = useRouter();
+  const { workspaceId } = useParams<{ workspaceId: string }>();
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [identifier, setIdentifier] = useState("");
@@ -47,6 +52,7 @@ export const CreateAgentDialog = ({
     id: string;
     name: string;
     identifier: string;
+    kind: string;
   } | null>(null);
   // A new agent starts with no connection: the chooser pops right after
   // create (after the key, if there was none), when the workspace has any
@@ -93,6 +99,7 @@ export const CreateAgentDialog = ({
             id: agent.id,
             name: agent.name,
             identifier: agent.identifier,
+            kind: agent.kind,
           });
           setHasLlmKey(agent.llmKeys.length > 0);
           toast.success(
@@ -121,6 +128,18 @@ export const CreateAgentDialog = ({
       setIdentifierTouched(false);
       setCreated(null);
       setHasLlmKey(null);
+      // The flow is over and the agent exists: open it, the way a hosted
+      // create opens its chat. Left where it was, the page that offered
+      // creation would still be asking for an agent.
+      if (created) {
+        router.push(
+          agentPagePath(
+            workspaceId,
+            created.id,
+            defaultAgentSection(created.kind),
+          ),
+        );
+      }
     }
     onOpenChange(value);
   };

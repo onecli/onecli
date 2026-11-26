@@ -100,11 +100,7 @@ const resolveAuthenticatedUser = async () => {
     if (!existedByEmail) {
       const defaultWorkspace = await findUserDefaultWorkspace(dbUser.id);
       if (!defaultWorkspace) {
-        await ensureUserOrganization(
-          dbUser.id,
-          dbUser.email,
-          dbUser.name ?? undefined,
-        );
+        await ensureUserOrganization(dbUser.id, dbUser.email);
       }
     }
 

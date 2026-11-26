@@ -105,6 +105,21 @@ describe(
       expect(outcome.hung).toBe(false);
       expect(outcome.code).toBe(0);
     });
+
+    it("keeps the runner channel's token out of every process it starts", async () => {
+      // The harness, the agent's shells, background processes and a
+      // schedule's check all inherit this process's environment, so the
+      // token must leave it once the config has read it. Observed from a
+      // preload: at exit the environment no longer carries it.
+      // MUTATION-PROOF: drop the delete in index.ts and this reads "present".
+      const outcome = await runToEnd(
+        "process.on('exit', () => process.stderr.write(`token=${process.env.SANDBOX_WS_TOKEN === undefined ? 'absent' : 'present'}\\n`));\n",
+        { SANDBOX_WS_TOKEN: "test-bootstrap-token" },
+      );
+
+      expect(outcome.code).toBe(0);
+      expect(outcome.stderr).toContain("token=absent");
+    });
   },
 );
 

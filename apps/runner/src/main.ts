@@ -212,6 +212,11 @@ const main = async (options: RunnerMainOptions): Promise<void> => {
   // container the sandbox's socket authenticated as, which the server knows.
   let containerRefOf: (sandboxId: string) => string | undefined = () =>
     undefined;
+  // Same late-bind: the runner (built after the server) remembers where the
+  // backend placed each sandbox, which a read-only-home report carries.
+  let nodeOf: (sandboxId: string) => string | undefined = () => undefined;
+  // Same late-bind for the ready-time node lookup (runner.learnNode).
+  let learnNode: (sandboxId: string) => Promise<void> = async () => undefined;
   // The resumable channel's keyring. Parsed HERE (not in loadConfig) so the
   // config stays a plain record; a malformed value throws at boot like any
   // other config error, never silently disabling resumption.
@@ -274,6 +279,7 @@ const main = async (options: RunnerMainOptions): Promise<void> => {
         controlPlane.uploadAttachment(sandboxId, file),
       sendToSandbox: (sandboxId, item) => sendToSandbox(sandboxId, item),
       containerRefOf: (sandboxId) => containerRefOf(sandboxId),
+      nodeOf: (sandboxId) => nodeOf(sandboxId),
       portHub: {
         handle: (sandboxId, message) => portHub.handle(sandboxId, message),
       },
@@ -281,6 +287,15 @@ const main = async (options: RunnerMainOptions): Promise<void> => {
       // closed). Arm it from the control plane right away, so a share made
       // while the box slept works on the first preview request.
       onReady: (sandboxId) => {
+        // Where the substrate placed this box, learned at once (off the
+        // report chain), so a home that freezes in its first minute still
+        // reports its node (runner.learnNode).
+        void learnNode(sandboxId).catch((error: unknown) =>
+          log("warn", "node lookup at ready failed", {
+            sandboxId,
+            error: String(error),
+          }),
+        );
         if (!config.portApi) return;
         void controlPlane
           .sandboxAllowedPorts(sandboxId)
@@ -324,6 +339,8 @@ const main = async (options: RunnerMainOptions): Promise<void> => {
   });
 
   const runner = createRunner({ config, backend, controlPlane, wsServer });
+  nodeOf = (sandboxId) => runner.nodeOf(sandboxId);
+  learnNode = (sandboxId) => runner.learnNode(sandboxId);
 
   /**
    * Shutdown has to DRAIN, not just stop.

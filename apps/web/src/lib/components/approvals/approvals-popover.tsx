@@ -130,6 +130,7 @@ export const ApprovalsPopover = ({
                 <ActionApprovalRow
                   key={`act-${entry.item.id}`}
                   item={entry.item}
+                  showAgent
                 />
               ) : (
                 <ReachAskRow key={`reach-${entry.item.id}`} item={entry.item} />

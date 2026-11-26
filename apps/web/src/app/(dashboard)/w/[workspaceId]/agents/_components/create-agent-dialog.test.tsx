@@ -13,7 +13,16 @@ const state = vi.hoisted(() => ({
   counts: { apps: 0, secrets: 0 },
   renderedCounts: undefined as { apps: number; secrets: number } | undefined,
 }));
-const mocks = vi.hoisted(() => ({ mutate: vi.fn(), onOpenChange: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  mutate: vi.fn(),
+  onOpenChange: vi.fn(),
+  push: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mocks.push }),
+  useParams: () => ({ workspaceId: "ws-1" }),
+}));
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("@/hooks/use-agents", () => ({
@@ -77,7 +86,13 @@ const createAgent = async (llmKeys: string[]) => {
   await user.click(screen.getByRole("button", { name: "Create" }));
   const onSuccess = mocks.mutate.mock.calls[0]![1].onSuccess;
   act(() =>
-    onSuccess({ id: "ag-1", name: "Donna", identifier: "donna", llmKeys }),
+    onSuccess({
+      id: "ag-1",
+      name: "Donna",
+      identifier: "donna",
+      kind: "byo",
+      llmKeys,
+    }),
   );
   return user;
 };
@@ -87,6 +102,7 @@ beforeEach(() => {
   state.renderedCounts = undefined;
   mocks.mutate.mockClear();
   mocks.onOpenChange.mockClear();
+  mocks.push.mockClear();
 });
 
 describe("the bring-your-own create dialog's success step", () => {
@@ -156,5 +172,22 @@ describe("the bring-your-own create dialog's success step", () => {
     await user.click(screen.getByRole("button", { name: "Add LLM key" }));
     await user.click(screen.getByRole("button", { name: "save key" }));
     await waitFor(() => expect(mocks.onOpenChange).toHaveBeenCalledWith(false));
+    expect(mocks.push).toHaveBeenCalledWith("/w/ws-1/agents/ag-1/connections");
+  });
+
+  it("opens the new agent when the flow ends, even put off with Later", async () => {
+    const user = await createAgent([]);
+    await user.click(screen.getByRole("button", { name: "Later" }));
+    expect(mocks.push).toHaveBeenCalledExactlyOnceWith(
+      "/w/ws-1/agents/ag-1/connections",
+    );
+  });
+
+  it("goes nowhere when cancelled before anything was created", async () => {
+    const user = userEvent.setup();
+    render(<CreateAgentDialog open onOpenChange={mocks.onOpenChange} />);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mocks.onOpenChange).toHaveBeenCalledWith(false);
+    expect(mocks.push).not.toHaveBeenCalled();
   });
 });

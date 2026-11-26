@@ -195,6 +195,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cache",
  "common",
  "dashmap",
  "serde",
@@ -3023,6 +3024,7 @@ dependencies = [
  "db",
  "ee",
  "inject",
+ "percent-encoding",
  "policy",
  "serde",
  "serde_json",

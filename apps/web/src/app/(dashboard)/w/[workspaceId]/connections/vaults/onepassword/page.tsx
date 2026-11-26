@@ -1,40 +1,16 @@
-"use client";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
-import { Badge } from "@onecli/ui/components/badge";
-import { OnePasswordSetup } from "../../_components/onepassword-setup";
-import { withWorkspacePrefix } from "@/lib/navigation";
+interface Props {
+  params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
 
-export default function OnePasswordPage() {
-  const pathname = usePathname();
-  return (
-    <div className="space-y-6">
-      <Link
-        href={withWorkspacePrefix(pathname, "/connections/vaults")}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ArrowLeft className="size-4" />
-        Vaults
-      </Link>
-      <div>
-        <div className="flex items-center gap-2">
-          <h1 className="text-xl font-semibold tracking-tight">1Password</h1>
-          <Badge
-            variant="secondary"
-            className="text-[10px] font-normal px-1.5 py-0"
-          >
-            Beta
-          </Badge>
-        </div>
-        <p className="text-muted-foreground text-sm">
-          Resolve secrets on-demand from 1Password using a service account.
-          Nothing is stored on the server.
-        </p>
-      </div>
-
-      <OnePasswordSetup />
-    </div>
-  );
+/** An old URL: Settings > Apps, the 1Password setup
+ *  (`?settings=apps&vault=onepassword`). */
+export default async function OnePasswordPage({ params, searchParams }: Props) {
+  const { workspaceId } = await params;
+  await redirectToSettingsModal({ workspaceId }, "apps", {
+    ...(await searchParams),
+    vault: "onepassword",
+  });
 }

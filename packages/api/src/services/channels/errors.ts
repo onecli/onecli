@@ -33,3 +33,23 @@ export class DeadIntegrationCredentialError extends Error {
     this.name = "DeadIntegrationCredentialError";
   }
 }
+
+/** A send's `thread` is not in the recipient's conversation (another
+ * channel's link, or a message id that conversation does not hold):
+ * nothing was posted. */
+export class ThreadNotInConversationError extends Error {
+  constructor() {
+    super("thread is not in the recipient's conversation");
+    this.name = "ThreadNotInConversationError";
+  }
+}
+
+/** The provider refused the upload for a reason no retry fixes (Slack: no
+ * files:write scope, uploads disabled in the workspace, a file type the
+ * workspace refuses): nothing was posted. `code` is the provider's own. */
+export class FileUploadUnavailableError extends Error {
+  constructor(readonly code: string) {
+    super(`file upload unavailable (${code})`);
+    this.name = "FileUploadUnavailableError";
+  }
+}

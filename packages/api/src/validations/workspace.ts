@@ -18,8 +18,6 @@ export const createWorkspaceSchema = z.object({
   name: nameSchema,
 });
 
-export type CreateWorkspaceInput = z.infer<typeof createWorkspaceSchema>;
-
 export const updateWorkspaceSchema = z
   .object({
     name: nameSchema.optional(),
@@ -30,5 +28,3 @@ export const updateWorkspaceSchema = z
   .refine((data) => data.name !== undefined || data.timezone !== undefined, {
     message: "At least one field must be provided",
   });
-
-export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;

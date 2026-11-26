@@ -10,10 +10,11 @@ import { useAuth } from "@/providers/auth-provider";
 import { AuthScreen } from "@/lib/auth/_components/auth-screen";
 import { AuthDivider } from "@/lib/auth/_components/auth-divider";
 import { AuthFormError } from "@/lib/auth/_components/auth-form-error";
-import { AuthPending } from "@/lib/auth/_components/auth-pending";
+import { AuthSyncError } from "@/lib/auth/_components/auth-sync-error";
 import { GoogleButton } from "@/lib/auth/_components/google-button";
 import { redirectErrorMessage } from "@/lib/auth/auth-errors";
 import { usePostAuthRedirect } from "@/lib/auth/use-post-auth-redirect";
+import { PendingLanding } from "@/lib/dashboard/shell/pending-landing";
 
 /** Matches the identity layer's own floor, so the form refuses before the API does. */
 const MIN_PASSWORD_LENGTH = 8;
@@ -52,7 +53,7 @@ export const OnpremSignupContent = ({
   adoptsExistingInstall,
   invitation,
 }: OnpremSignupContentProps) => {
-  const { isAuthenticated, isLoading, signIn, signUpWithPassword } = useAuth();
+  const { isAuthenticated, signIn, signUpWithPassword } = useAuth();
   const searchParams = useSearchParams();
 
   const [name, setName] = useState("");
@@ -104,15 +105,18 @@ export const OnpremSignupContent = ({
     }
   };
 
-  if (isLoading || isAuthenticated) {
-    // On an upgrading deployment this is where handing the old install over
-    // happens, and it is the one step here that can fail after the account
-    // already exists — so its message has to reach the screen.
-    return (
-      <AuthPending
-        label={isAuthenticated ? "Setting things up..." : null}
-        error={syncError}
-      />
+  // Signed up: the dashboard's skeleton holds the screen while the account
+  // is set up and its landing looked up, so the form gives way straight to
+  // the dashboard filling in. On an upgrading deployment this is where
+  // handing the old install over happens, the one step here that can fail
+  // after the account already exists, so its message replaces the skeleton.
+  // While the session is still being checked the form stands, as the server
+  // drew it.
+  if (isAuthenticated) {
+    return syncError ? (
+      <AuthSyncError message={syncError} />
+    ) : (
+      <PendingLanding />
     );
   }
 

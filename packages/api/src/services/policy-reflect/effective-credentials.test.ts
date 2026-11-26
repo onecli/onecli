@@ -532,6 +532,233 @@ describe("fencing + redaction", () => {
     expect(json).not.toContain("org-b");
   });
 
+  // c1 is reached by two org grants and two workspace grants; "ws-a" names it
+  // twice (directly and through its provider pool), and s1 is named by an org
+  // and a workspace grant. Provenance order is grant order: rule-named ids
+  // first, then pool expansions.
+  const mixedGrants = () => ({
+    agent: { id: "agent-1" },
+    orgRows: [
+      orgGrant("org-a", BAIT),
+      simRow({
+        id: "org-b",
+        scope: "organization",
+        workspaceId: null,
+        organizationId: "org-1",
+        logicalId: "org-b",
+        name: `${BAIT}-2`,
+        identities: [identityRow({ id: "org-b", agentId: "agent-1" })],
+        targets: [
+          targetRow({
+            id: "org-b-c",
+            kind: "connection",
+            appConnectionId: "c1",
+          }),
+          targetRow({ id: "org-b-s", kind: "secret", secretId: "s1" }),
+        ],
+      }),
+    ],
+    workspaceRows: [
+      simRow({
+        id: "ws-a",
+        logicalId: "ws-a",
+        name: "Workspace grant A",
+        identities: [identityRow({ id: "ws-a", agentId: "agent-1" })],
+        targets: [
+          targetRow({
+            id: "ws-a-c",
+            kind: "connection",
+            appConnectionId: "c1",
+          }),
+          targetRow({
+            id: "ws-a-p",
+            kind: "app",
+            appProvider: "gmail",
+            appConnectionScope: "workspace",
+          }),
+          targetRow({ id: "ws-a-s", kind: "secret", secretId: "s1" }),
+        ],
+      }),
+      simRow({
+        id: "ws-b",
+        logicalId: "ws-b",
+        name: "Workspace grant B",
+        identities: [identityRow({ id: "ws-b", agentId: "agent-1" })],
+        targets: [
+          targetRow({
+            id: "ws-b-c",
+            kind: "connection",
+            appConnectionId: "c1",
+          }),
+        ],
+      }),
+    ],
+    ruleConnections: [{ id: "c1", label: "Gmail", provider: "gmail" }],
+    scopeConnections: [
+      {
+        id: "c1",
+        label: "Gmail",
+        provider: "gmail",
+        scope: "workspace",
+        workspaceId: "p1",
+      },
+    ],
+    ruleSecrets: [{ id: "s1", name: "Key", hostPattern: "api.example.com" }],
+  });
+
+  it("a non-admin sees ONE marker first, then each workspace grant once, per credential", async () => {
+    armStubs(mixedGrants());
+    const result = await effectiveCredentials("agent-1", {
+      ...CTX,
+      viewerSeesOrgRules: false,
+    });
+    expect(result.connections.map((c) => [c.id, c.provenance])).toEqual([
+      [
+        "c1",
+        [
+          { kind: "rule", scope: "organization", redacted: true },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-a", name: "Workspace grant A" },
+          },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-b", name: "Workspace grant B" },
+          },
+        ],
+      ],
+    ]);
+    expect(result.secrets.map((s) => [s.id, s.provenance])).toEqual([
+      [
+        "s1",
+        [
+          { kind: "rule", scope: "organization", redacted: true },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-a", name: "Workspace grant A" },
+          },
+        ],
+      ],
+    ]);
+    expect(JSON.stringify(result)).not.toContain(BAIT);
+  });
+
+  it("an org-admin sees every grant once, in grant order, per credential", async () => {
+    armStubs(mixedGrants());
+    const result = await effectiveCredentials("agent-1", CTX);
+    expect(result.connections.map((c) => [c.id, c.provenance])).toEqual([
+      [
+        "c1",
+        [
+          {
+            kind: "rule",
+            scope: "organization",
+            rule: { logicalId: "org-a", name: BAIT },
+          },
+          {
+            kind: "rule",
+            scope: "organization",
+            rule: { logicalId: "org-b", name: `${BAIT}-2` },
+          },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-a", name: "Workspace grant A" },
+          },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-b", name: "Workspace grant B" },
+          },
+        ],
+      ],
+    ]);
+    expect(result.secrets.map((s) => [s.id, s.provenance])).toEqual([
+      [
+        "s1",
+        [
+          {
+            kind: "rule",
+            scope: "organization",
+            rule: { logicalId: "org-b", name: `${BAIT}-2` },
+          },
+          {
+            kind: "rule",
+            scope: "workspace",
+            rule: { logicalId: "ws-a", name: "Workspace grant A" },
+          },
+        ],
+      ],
+    ]);
+  });
+
+  it("the redacted marker keeps its place when a workspace grant comes first", async () => {
+    // The workspace rule names c1 directly; the org rule reaches it only through
+    // its provider pool, which expands after the rule-named ids.
+    armStubs({
+      agent: { id: "agent-1" },
+      orgRows: [
+        simRow({
+          id: "org-pool",
+          scope: "organization",
+          workspaceId: null,
+          organizationId: "org-1",
+          logicalId: "org-pool",
+          name: BAIT,
+          identities: [identityRow({ id: "org-pool", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "org-pool",
+              kind: "app",
+              appProvider: "gmail",
+              appConnectionScope: "workspace",
+            }),
+          ],
+        }),
+      ],
+      workspaceRows: [
+        simRow({
+          id: "ws-a",
+          logicalId: "ws-a",
+          name: "Workspace grant A",
+          identities: [identityRow({ id: "ws-a", agentId: "agent-1" })],
+          targets: [
+            targetRow({
+              id: "ws-a",
+              kind: "connection",
+              appConnectionId: "c1",
+            }),
+          ],
+        }),
+      ],
+      ruleConnections: [{ id: "c1", label: "Gmail", provider: "gmail" }],
+      scopeConnections: [
+        {
+          id: "c1",
+          label: "Gmail",
+          provider: "gmail",
+          scope: "workspace",
+          workspaceId: "p1",
+        },
+      ],
+    });
+    const result = await effectiveCredentials("agent-1", {
+      ...CTX,
+      viewerSeesOrgRules: false,
+    });
+    expect(result.connections[0]?.provenance).toEqual([
+      {
+        kind: "rule",
+        scope: "workspace",
+        rule: { logicalId: "ws-a", name: "Workspace grant A" },
+      },
+      { kind: "rule", scope: "organization", redacted: true },
+    ]);
+  });
+
   it("an org-admin sees the named org grant (the bait is non-vacuous)", async () => {
     armStubs({
       agent: { id: "agent-1" },

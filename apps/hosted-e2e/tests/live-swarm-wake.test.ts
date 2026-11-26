@@ -1,3 +1,4 @@
+import { UNSETTLED_TURN_STATUSES } from "@onecli/api/validations/conversation";
 import { expect, test } from "vitest";
 import { scenario, type Cx } from "../src/scenario.js";
 import {
@@ -36,6 +37,8 @@ import {
  *       tests/live-swarm-wake.test.ts --testTimeout=900000
  */
 const OAUTH_TOKEN = process.env.E2E_ANTHROPIC_OAUTH_TOKEN;
+
+const UNSETTLED: readonly string[] = UNSETTLED_TURN_STATUSES;
 
 const liveScenario = (name: string, body: (cx: Cx) => Promise<void>): void => {
   if (!OAUTH_TOKEN) {
@@ -130,8 +133,10 @@ liveScenario(
               await stack.v1.get(`/v1/conversations/${lead.id}/turns`),
             )
           ).turns,
-        (rows) =>
-          rows.every((t) => ["done", "failed", "aborted"].includes(t.status)),
+        // The product's own "still owed an outcome" set, not a hand list: a
+        // wake that lands while another wake runs is steered INTO it and
+        // closes `joined`, which is settled too.
+        (rows) => rows.every((t) => !UNSETTLED.includes(t.status)),
         "every turn in the lead chat to settle",
         420_000,
       );

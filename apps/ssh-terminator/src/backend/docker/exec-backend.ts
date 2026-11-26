@@ -6,6 +6,7 @@ import {
   type ExecBackend,
   type RelayRequest,
 } from "../types";
+import { createExitLatch } from "../exit-latch";
 import { createDockerStreamDemuxer } from "./demux";
 import type { DockerEngineApi, ExecCreateConfig } from "./engine-api";
 
@@ -87,24 +88,10 @@ export const createDockerExecBackend = (
     );
     const socket = await engine.execStart(execId, tty);
 
-    let settled = false;
+    const exit = createExitLatch();
     // Set when the relay disposes us (client disconnect) — switches the exit
     // poll to its fast, code-is-moot budget.
     let disposed = false;
-    let resolveExit: (code: number) => void = () => undefined;
-    let rejectExit: (error: Error) => void = () => undefined;
-    const exited = new Promise<number>((resolve, reject) => {
-      resolveExit = (code) => {
-        if (settled) return;
-        settled = true;
-        resolve(code);
-      };
-      rejectExit = (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-    });
 
     // Client→daemon stdin is unframed in both modes. On the !TTY arm a
     // stdin EOF half-closes the hijacked connection (FIN), which the daemon
@@ -147,7 +134,7 @@ export const createDockerExecBackend = (
     }
 
     socket.on("error", (error: Error) => {
-      rejectExit(
+      exit.reject(
         new ExecDisconnectedError(`exec transport error: ${error.message}`),
       );
     });
@@ -167,12 +154,12 @@ export const createDockerExecBackend = (
           ? pollOptions.disposedAttempts
           : pollOptions.attempts;
         for (let attempt = 0; attempt < attempts; attempt += 1) {
-          if (settled) return;
+          if (exit.isSettled()) return;
           let inspected;
           try {
             inspected = await engine.execInspect(execId);
           } catch (error) {
-            rejectExit(
+            exit.reject(
               new ExecDisconnectedError(
                 `exec inspect failed after stream close: ${
                   error instanceof Error ? error.message : String(error)
@@ -186,7 +173,7 @@ export const createDockerExecBackend = (
           // ExitCode:null — a transient some daemons expose) is NOT honest, so
           // keep polling rather than fabricate a code from the null.
           if (!inspected.Running && inspected.ExitCode !== null) {
-            resolveExit(inspected.ExitCode);
+            exit.resolve(inspected.ExitCode);
             return;
           }
           await sleep(pollOptions.intervalMs);
@@ -194,12 +181,12 @@ export const createDockerExecBackend = (
         // Budget exhausted: still running (a disposed exec docker keeps alive
         // after we detach) or a code that never landed. No honest value —
         // collapse to 1, the kube arm's same no-honest-code posture.
-        resolveExit(1);
+        exit.resolve(1);
       })();
     });
 
     return {
-      exited,
+      exited: exit.exited,
       ...(tty && {
         resize: (cols: number, rows: number) => {
           engine.execResize(execId, rows, cols).catch((error: unknown) => {

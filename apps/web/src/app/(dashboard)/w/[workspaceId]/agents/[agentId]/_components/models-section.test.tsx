@@ -108,14 +108,16 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const llmKey = { id: "sec-a", name: "Anthropic", type: "anthropic" } as Secret;
 const genericSecret = { id: "sec-g", name: "Token", type: "generic" } as Secret;
 
-const renderSection = () => {
+const renderSection = (hosted = true) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  return render(<ModelsSection agentId="agent-1" />, { wrapper });
+  return render(<ModelsSection agentId="agent-1" hosted={hosted} />, {
+    wrapper,
+  });
 };
 
 describe("ModelsSection", () => {
@@ -188,5 +190,23 @@ describe("ModelsSection", () => {
       "href",
       "/w/ws-1/connections/llms",
     );
+  });
+
+  // The platform picks only a hosted agent's model: the models read answers
+  // 422 for a BYO agent, which the card would show as a load error.
+  it("shows the model picker for a hosted agent", () => {
+    renderSection(true);
+    expect(screen.getByTestId("model-card")).toBeInTheDocument();
+    expect(screen.getByText(/The model above runs on/)).toBeInTheDocument();
+  });
+
+  it("leaves the picker out for a BYO agent, keys still listed", () => {
+    renderSection(false);
+    expect(screen.queryByTestId("model-card")).not.toBeInTheDocument();
+    expect(screen.queryByText(/The model above/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "LLM keys" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("tab-add")).toBeInTheDocument();
   });
 });

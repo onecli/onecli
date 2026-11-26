@@ -35,14 +35,18 @@ let db: typeof import("@onecli/db").db;
 let search: typeof import("./recipient-search-service");
 let mentions: typeof import("./mention-resolution-service");
 
-// ── Fake Slack (users.list / conversations.list) ───────────────────────────
+// ── Fake Slack (users.list / users.conversations / conversations.list) ─────
 
 let slackServer: Server;
 /** The roster the fake serves — tests reshape it per arm. */
 let rosterMembers: unknown[] = [];
 let rosterChannels: unknown[] = [];
+/** The bot's OWN channels (users.conversations with the bot token). */
+let ownChannels: unknown[] = [];
 /** When set, every roster call answers this Slack error (dead token, rate limit). */
 let rosterError: string | null = null;
+/** Every call the fake answered, in order. */
+let slackCalls: { method: string; form: URLSearchParams }[] = [];
 
 const startSlackFake = (): Promise<string> =>
   new Promise((resolve) => {
@@ -51,11 +55,14 @@ const startSlackFake = (): Promise<string> =>
       req.on("data", (chunk: Buffer) => (raw += chunk.toString("utf8")));
       req.on("end", () => {
         const method = (req.url ?? "/").slice(1);
+        slackCalls.push({ method, form: new URLSearchParams(raw) });
         res.writeHead(200, { "content-type": "application/json" });
         if (rosterError !== null) {
           res.end(JSON.stringify({ ok: false, error: rosterError }));
         } else if (method === "users.list") {
           res.end(JSON.stringify({ ok: true, members: rosterMembers }));
+        } else if (method === "users.conversations") {
+          res.end(JSON.stringify({ ok: true, channels: ownChannels }));
         } else if (method === "conversations.list") {
           res.end(JSON.stringify({ ok: true, channels: rosterChannels }));
         } else {
@@ -187,6 +194,8 @@ beforeEach(async () => {
   await reset();
   rosterMembers = [];
   rosterChannels = [];
+  ownChannels = [];
+  slackCalls = [];
 });
 
 afterAll(async () => {
@@ -325,6 +334,55 @@ describe.skipIf(!PROOF_URL)("findChannels", () => {
     expect(channels.map((c) => c.ref)).toContain("C0GP");
     // And the returned name keeps the REAL spelling.
     expect(channels[0]!.name).toBe("#guy-private");
+  });
+
+  it("a channel the bot is in is found from its own channels, past a workspace too big to walk", async () => {
+    // The reported miss: the workspace list never reached the bot's channel
+    // inside its paging bound, so a send to it said "not visible". The bot's
+    // own read lists it; an exact name ends the search with no workspace
+    // read at all.
+    // MUTATION-PROOF: drop the own read and the workspace list (which does
+    // not hold the channel here) answers empty.
+    const agentId = await seedAgent("own");
+    const integration = await seedIntegration();
+    await seedPresence(agentId, integration.id);
+    ownChannels = [{ id: "C0DEALS", name: "deals", is_private: true }];
+
+    const channels = await search.findChannels(agentId, "#deals");
+
+    expect(channels).toEqual([
+      {
+        kind: "channel",
+        ref: "C0DEALS",
+        name: "#deals",
+        member: true,
+        private: true,
+      },
+    ]);
+    expect(slackCalls.map((c) => c.method)).toEqual(["users.conversations"]);
+    const form = slackCalls[0]!.form;
+    expect(form.get("types")).toBe("public_channel,private_channel");
+    expect(form.get("limit")).toBe("999");
+  });
+
+  it("a folded own match does not end the search: the exact name may be in the workspace", async () => {
+    // "#guy_private" folds to the bot's own #guy-private, but a send needs
+    // the EXACT name, so the workspace read must still run.
+    // MUTATION-PROOF: let a folded match settle the search and #guy_private
+    // never reaches the answer.
+    const agentId = await seedAgent("fold");
+    const integration = await seedIntegration();
+    await seedPresence(agentId, integration.id);
+    ownChannels = [{ id: "C0GP", name: "guy-private" }];
+    rosterChannels = [{ id: "C0GU", name: "guy_private", is_member: false }];
+
+    const channels = await search.findChannels(agentId, "#guy_private");
+
+    expect(slackCalls.map((c) => c.method)).toEqual([
+      "users.conversations",
+      "conversations.list",
+    ]);
+    expect(channels.map((c) => c.ref)).toEqual(["C0GP", "C0GU"]);
   });
 
   it("separator folding works for people too (dan.abramov)", async () => {

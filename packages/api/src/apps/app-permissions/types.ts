@@ -69,6 +69,31 @@ export const hostPatternsOf = (tool: AppTool): string[] => [
   ...(tool.hostAliasPatterns ?? []),
 ];
 
+/**
+ * A positional tool builder bound to one API's hosts. One method is stored as
+ * `method`, several as `methods`; `hostAliasPatterns` and `aliasPatterns` are
+ * set only when given.
+ */
+export const toolFactory =
+  (hostPattern: string, hostAliasPatterns?: string[]) =>
+  (
+    id: string,
+    name: string,
+    description: string,
+    pathPattern: string,
+    methods: string[],
+    aliasPatterns?: string[],
+  ): AppTool => ({
+    id,
+    name,
+    description,
+    hostPattern,
+    ...(hostAliasPatterns ? { hostAliasPatterns } : {}),
+    pathPattern,
+    ...(aliasPatterns ? { aliasPatterns } : {}),
+    ...(methods.length === 1 ? { method: methods[0] } : { methods }),
+  });
+
 // The gateway treats a pattern ending in "*" as a prefix match; tool patterns
 // reuse the wildcard's leading "*" segments verbatim, so comparing the literal
 // text before the trailing "*" with `startsWith` mirrors the matcher — and

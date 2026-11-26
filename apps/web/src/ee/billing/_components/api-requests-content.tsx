@@ -1,6 +1,7 @@
 "use client";
 
 import type { ApiRequestsData } from "@/ee/billing/api-request-actions";
+import { pct } from "@/ee/billing/format";
 
 const formatDate = (iso: string) =>
   new Date(iso).toLocaleDateString("en-US", {
@@ -11,9 +12,6 @@ const formatDate = (iso: string) =>
   });
 
 const formatNumber = (n: number) => n.toLocaleString("en-US");
-
-const pct = (used: number, total: number) =>
-  total > 0 ? Math.min((used / total) * 100, 100) : 0;
 
 export const ApiRequestsContent = ({ data }: { data: ApiRequestsData }) => {
   return (

@@ -23,13 +23,24 @@ const PAGE_FUNCTIONS = [
   "hideThirdPartyFrames",
   "restoreFrames",
   "waitForQuietDom",
+  "readFieldValue",
+  "readHref",
+  "isFileInput",
+  "isPasswordField",
 ] as const;
+
+/** A bare element for the per-element page functions (`locator.evaluate`). */
+const ELEMENT = { closest: () => null, isContentEditable: false };
 
 /** What each takes, as `page.evaluate` passes it. */
 const ARGS: Partial<Record<(typeof PAGE_FUNCTIONS)[number], unknown[]>> = {
   readPageState: [[300, 3, 4]],
   hideThirdPartyFrames: ["example.com"],
   waitForQuietDom: [[300, 1500]],
+  readFieldValue: [ELEMENT],
+  readHref: [ELEMENT],
+  isFileInput: [ELEMENT],
+  isPasswordField: [ELEMENT],
 };
 
 const source = readFileSync(new URL("./driver.ts", import.meta.url), "utf8");
@@ -81,6 +92,13 @@ const bareContext = (args: unknown[]) => ({
   },
   clearTimeout: () => {},
   Promise,
+  // The DOM classes the per-element functions test against; a page has them.
+  HTMLInputElement: class {},
+  HTMLTextAreaElement: class {},
+  HTMLSelectElement: class {},
+  HTMLElement: class {},
+  HTMLAnchorElement: class {},
+  HTMLAreaElement: class {},
 });
 
 /** A page with iframes, as hideThirdPartyFrames sees it, from a host and a list of frame srcs. */

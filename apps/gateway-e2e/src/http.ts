@@ -59,12 +59,3 @@ export const makeResponse = (
   header: (name: string) => headers[name.toLowerCase()],
   json: () => JSON.parse(body) as unknown,
 });
-
-/** Split a raw response into its head lines and body at the blank line. */
-export const splitHeadAndBody = (
-  raw: string,
-): { head: string[]; body: string } => {
-  const split = raw.indexOf("\r\n\r\n");
-  const head = (split === -1 ? raw : raw.slice(0, split)).split("\r\n");
-  return { head, body: split === -1 ? "" : raw.slice(split + 4) };
-};

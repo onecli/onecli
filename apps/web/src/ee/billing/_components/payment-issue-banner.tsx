@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowUpRight, CreditCard } from "lucide-react";
 import { queryKeys } from "@/lib/api/keys";
 import { CAPS } from "@/lib/env";
-import { generateOrgPrefix } from "@/lib/org-navigation";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 import { getPaymentIssue } from "../payment-issue-actions";
 import { formatDollars } from "../format";
 
@@ -20,6 +20,7 @@ import { formatDollars } from "../format";
  * first place a confused customer looks.
  */
 export const PaymentIssueBanner = () => {
+  const billingHref = useSettingsHref()("billing");
   const { data: issue } = useQuery({
     queryKey: queryKeys.billing.paymentIssue(),
     queryFn: () => getPaymentIssue(),
@@ -30,8 +31,6 @@ export const PaymentIssueBanner = () => {
   });
 
   if (!issue) return null;
-
-  const orgPrefix = generateOrgPrefix(issue.organizationId);
 
   const isPastDue = issue.kind === "past_due";
   const title = isPastDue
@@ -73,7 +72,7 @@ export const PaymentIssueBanner = () => {
           {content}
         </a>
       ) : (
-        <Link href={`${orgPrefix}/billing`} className={className}>
+        <Link href={billingHref} className={className}>
           {content}
         </Link>
       )}

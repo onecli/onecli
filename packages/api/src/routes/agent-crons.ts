@@ -10,7 +10,12 @@ import {
   updateCron,
 } from "../services/agent-cron-service";
 import { ensureDirectConversation } from "../services/conversation-service";
-import { createCronSchema, updateCronSchema } from "../validations/crons";
+import {
+  createCronSchema,
+  parseCronWordsSchema,
+  updateCronSchema,
+} from "../validations/crons";
+import { parseScheduleWords } from "../services/schedule-parse-service";
 import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
@@ -112,6 +117,25 @@ export const agentCronRoutes = () => {
       metadata: { agentId, cronId, fields: Object.keys(body.data) },
     });
     return c.json(cron);
+  });
+
+  // POST /agents/:agentId/crons/parse — the dialog's fallback for "When"
+  // words its own rules did not understand. Reads only; saves nothing.
+  app.post("/:agentId/crons/parse", async (c) => {
+    const a = c.get("auth");
+    const workspaceId = requireWorkspaceId(a);
+    const body = parseCronWordsSchema.safeParse(await parseBody(c.req.raw));
+    if (!body.success) {
+      throw new ServiceError("BAD_REQUEST", "Send the words and a timezone");
+    }
+    return c.json(
+      await parseScheduleWords(
+        workspaceId,
+        a.organizationId,
+        c.req.param("agentId"),
+        body.data,
+      ),
+    );
   });
 
   // POST /agents/:agentId/crons/:cronId/run — force-fire by pulling

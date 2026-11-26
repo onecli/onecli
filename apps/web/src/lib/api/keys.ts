@@ -17,6 +17,9 @@ export const queryKeys = {
       [...queryKeys.agents.all(), "detail", agentId] as const,
     models: (agentId: string) =>
       [...queryKeys.agents.all(), "models", agentId] as const,
+    // The machine's lifecycle status (the onboarding boot screen's poll).
+    sandbox: (agentId: string) =>
+      [...queryKeys.agents.all(), "sandbox", agentId] as const,
     // Explicitly-targeted workspace (the org-level picker, the sidebar) —
     // keyed by that workspace, deliberately outside the URL-derived scope()
     // prefix. Under root(), so the namespace sweep still reaches it.
@@ -262,6 +265,8 @@ export const queryKeys = {
     all: () => ["crons", ...scope()] as const,
     agent: (agentId: string) =>
       [...queryKeys.crons.all(), "agent", agentId] as const,
+    parse: (agentId: string, text: string, timezone: string) =>
+      [...queryKeys.crons.all(), "parse", agentId, timezone, text] as const,
   },
   webhooks: {
     all: () => ["webhooks", ...scope()] as const,
@@ -318,6 +323,8 @@ export const queryKeys = {
     all: () => ["runs", ...scope()] as const,
     list: (filter: object) =>
       [...queryKeys.runs.all(), "list", filter] as const,
+    newest: (agentId: string, cronId: string) =>
+      [...queryKeys.runs.all(), "newest", agentId, cronId] as const,
     detail: (agentId: string, turnId: string) =>
       [...queryKeys.runs.all(), "detail", agentId, turnId] as const,
   },
@@ -333,6 +340,8 @@ export const queryKeys = {
       [...queryKeys.evals.all(), "agent", agentId] as const,
     run: (agentId: string, runId: string) =>
       [...queryKeys.evals.all(), "run", agentId, runId] as const,
+    reportChannels: (agentId: string) =>
+      [...queryKeys.evals.all(), "report-channels", agentId] as const,
   },
   channels: {
     all: () => ["channels", ...scope()] as const,

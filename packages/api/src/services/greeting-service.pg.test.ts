@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { grantModelKey } from "../testing/model-key-grant.js";
 
 /**
  * THE AGENT SPEAKS FIRST — on real PostgreSQL.
@@ -77,39 +78,6 @@ const recordOnboardingAgent = async (agentId: string, userId = USER) => {
   });
 };
 
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
-
 /**
  * A hosted agent. `onboarding` defaults to TRUE — these suites are about the
  * greeting, whose subject is the onboarding agent, so the interesting variable
@@ -131,7 +99,13 @@ const seedAgent = async (
     },
     select: { id: true },
   });
-  if (options.withKey) await grantLlmKey(agent.id, suffix);
+  if (options.withKey) {
+    await grantModelKey(db, {
+      workspaceId: WORKSPACE,
+      agentId: agent.id,
+      name: `${P}${suffix}`,
+    });
+  }
   if (options.onboarding !== false) await recordOnboardingAgent(agent.id);
   return agent.id;
 };

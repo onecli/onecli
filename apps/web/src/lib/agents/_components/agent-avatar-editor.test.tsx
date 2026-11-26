@@ -24,7 +24,8 @@ const { AgentAvatarEditor } = await import("./agent-avatar-editor");
 
 const IMG = "https://api.example.com/v1/agent-images/ag1/aaa";
 // As the server projects it: already scrolled to where the icon is set.
-const SETTINGS = "https://api.slack.com/apps/A1/general#display";
+const SETTINGS =
+  "https://api.slack.com/apps/A1/general#:~:text=App%20icon%20%26%20Preview";
 const agent = (
   over?: Partial<Parameters<typeof AgentAvatarEditor>[0]["agent"]>,
 ) => ({

@@ -1,13 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readSync,
-  realpathSync,
-} from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { z } from "zod";
 import {
   ATTACHMENT_CHUNK_RAW_BYTES,
@@ -21,6 +14,7 @@ import {
   type WorkItem,
 } from "@onecli/agent-protocol";
 import type { CapabilityFragment } from "../home/renderer";
+import { containedPath as containedUnder } from "../home/contained-path";
 import type { PlatformToolDefinition } from "../platform-tools";
 import { log } from "../log";
 
@@ -107,6 +101,12 @@ export const mimeTypeFor = (name: string): string => {
  * fires when the frames never reached it or its answer never came back. */
 export const SEND_FILE_TIMEOUT_MS = 28_000;
 
+/** send_message `files` ran out of the call's time. Whatever was staged is
+ * never sent (unnamed by any send, the platform sweeps it), so retrying
+ * with less is safe, and the model hears that, not "check if it arrived". */
+const STAGING_TIMED_OUT =
+  "The files took too long to upload. Nothing was sent. Send fewer or smaller files at once.";
+
 const argsSchema = z.object({
   path: z.string().min(1).max(4096),
   caption: z.string().max(MAX_OUTBOUND_CAPTION_CHARS).optional(),
@@ -126,6 +126,15 @@ export interface SendFileTools {
   tools: PlatformToolDefinition[];
   /** Resolve a correlated result — called INLINE from the reader loop. */
   handleResult(item: FileResult): void;
+  /** Read and stream send_message `files` as staged attachments, settling
+   * by `deadline` (epoch ms). */
+  stageFiles(
+    paths: readonly string[],
+    context: { conversationId: string; turnId: string } | null,
+    deadline: number,
+  ): Promise<
+    { ok: true; attachmentIds: string[] } | { ok: false; error: string }
+  >;
   /** Reject everything in flight (shutdown). */
   close(): void;
 }
@@ -164,39 +173,29 @@ export const createSendFileTools = (
 
   /**
    * The agent's path, resolved to its REAL location and checked against the
-   * home's real location. Lexical containment first (cheap, and `..` never
-   * gets to touch the filesystem), then realpath so a symlink anywhere in
-   * the chain cannot point the read outside the home. Errors are the
-   * caller's to word: a missing file is the common case, not an attack.
+   * home's real location (home/contained-path.ts, the rule `onecli-browser
+   * upload` shares). Errors are worded here: a missing file is the common
+   * case, not an attack.
    */
   const containedPath = (
     raw: string,
   ): { ok: true; path: string } | { ok: false; error: string } => {
-    const outside = refuse(
-      "Files can only be sent from your home directory (/workspace).",
-    );
-    const candidate = isAbsolute(raw) ? resolve(raw) : resolve(home, raw);
-    const lexical = relative(home, candidate);
-    if (lexical === "" || lexical.startsWith("..") || isAbsolute(lexical)) {
-      return outside;
-    }
-    let real: string;
-    let realHome: string;
-    try {
-      realHome = realpathSync(home);
-      real = realpathSync(candidate);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR")
+    const contained = containedUnder(home, raw);
+    if (contained.ok) return contained;
+    switch (contained.reason) {
+      case "outside":
+        return refuse(
+          "Files can only be sent from your home directory (/workspace).",
+        );
+      case "missing":
         return refuse("No file at that path.");
-      if (code === "ELOOP")
+      case "loop":
         return refuse("That path is a symlink loop; send the real file.");
-      return refuse(`That path could not be resolved (${code ?? "error"}).`);
+      case "unresolvable":
+        return refuse(
+          `That path could not be resolved (${contained.code ?? "error"}).`,
+        );
     }
-    const rel = relative(realHome, real);
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return outside;
-    if (rel.split(sep).some((seg) => seg === "..")) return outside;
-    return { ok: true, path: real };
   };
 
   /**
@@ -252,15 +251,98 @@ export const createSendFileTools = (
     }
   };
 
-  const awaitResult = (uploadId: string): Promise<FileResult | null> =>
+  const awaitResult = (
+    uploadId: string,
+    timeoutMs: number,
+  ): Promise<FileResult | null> =>
     new Promise((resolveResult) => {
       const timer = setTimeout(() => {
         pending.delete(uploadId);
         resolveResult(null);
-      }, options.timeoutMs ?? SEND_FILE_TIMEOUT_MS);
+      }, timeoutMs);
       timer.unref();
       pending.set(uploadId, { resolve: resolveResult, timer });
     });
+
+  /**
+   * Stream one read file as `file.part` frames and wait for its correlated
+   * `file.result` (at most `timeoutMs`). `purpose: "send"` stages it for
+   * send_message (stored, but never shown under the reply). Never throws:
+   * a refusal is model text.
+   */
+  const streamFile = async (input: {
+    bytes: Buffer;
+    name: string;
+    context: { conversationId: string; turnId: string };
+    caption?: string;
+    purpose?: "send";
+    timeoutMs: number;
+  }): Promise<
+    | { ok: true; attachmentId: string | undefined }
+    | { ok: false; error: string }
+  > => {
+    const mimeType = mimeTypeFor(input.name);
+    const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+    const uploadId = randomUUID();
+    const of = Math.max(
+      1,
+      Math.ceil(input.bytes.byteLength / ATTACHMENT_CHUNK_RAW_BYTES),
+    );
+    const waiter = awaitResult(uploadId, input.timeoutMs);
+    try {
+      for (let part = 1; part <= of; part += 1) {
+        const start = (part - 1) * ATTACHMENT_CHUNK_RAW_BYTES;
+        options.send({
+          kind: "file.part",
+          uploadId,
+          conversationId: input.context.conversationId,
+          turnId: input.context.turnId,
+          name: input.name,
+          mimeType,
+          sizeBytes: input.bytes.byteLength,
+          sha256,
+          ...(input.caption !== undefined && { caption: input.caption }),
+          ...(input.purpose && { purpose: input.purpose }),
+          part,
+          of,
+          dataBase64: input.bytes
+            .subarray(start, start + ATTACHMENT_CHUNK_RAW_BYTES)
+            .toString("base64"),
+        });
+      }
+    } catch (error) {
+      // A dying transport: the waiter would time out; settle it now instead.
+      const entry = pending.get(uploadId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        pending.delete(uploadId);
+      }
+      log("warn", "send_file: transport write failed", {
+        error: String(error),
+      });
+      return refuse("The file could not be sent (connection lost). Try again.");
+    }
+
+    const result = await waiter;
+    if (!result) {
+      return refuse(
+        input.purpose === "send"
+          ? STAGING_TIMED_OUT
+          : "The platform did not confirm the file in time. It may have arrived — check before sending it again.",
+      );
+    }
+    if (!result.ok) {
+      return refuse(result.error ?? "The file was not accepted.");
+    }
+    return { ok: true, attachmentId: result.attachmentId };
+  };
+
+  /** The name the AGENT gave (a symlink's own name, not its target's):
+   * that is what it will call the file when it tells the person. */
+  const nameOf = (path: string): string =>
+    sanitizeAttachmentName(
+      basename(path).slice(0, MAX_ATTACHMENT_NAME_CHARS * 2),
+    );
 
   const sendFile = async (
     args: unknown,
@@ -286,78 +368,95 @@ export const createSendFileTools = (
     const read = readContained(contained.path);
     if (!read.ok) return read;
 
-    // The name the AGENT gave (a symlink's own name, not its target's): that
-    // is what it will call the file when it tells the person.
-    const name = sanitizeAttachmentName(
-      basename(parsed.data.path).slice(0, MAX_ATTACHMENT_NAME_CHARS * 2),
-    );
-    const mimeType = mimeTypeFor(name);
-    const sha256 = createHash("sha256").update(read.bytes).digest("hex");
-    const uploadId = randomUUID();
-    const of = Math.max(
-      1,
-      Math.ceil(read.bytes.byteLength / ATTACHMENT_CHUNK_RAW_BYTES),
-    );
-
+    const name = nameOf(parsed.data.path);
     // Count BEFORE sending: a refusal below still cost the slot for this
     // turn, which is the conservative reading (the control plane's count is
     // the authority; this one only makes the fast path honest).
     rememberSent(context.turnId, count + 1);
-    const waiter = awaitResult(uploadId);
-    try {
-      for (let part = 1; part <= of; part += 1) {
-        const start = (part - 1) * ATTACHMENT_CHUNK_RAW_BYTES;
-        options.send({
-          kind: "file.part",
-          uploadId,
-          conversationId: context.conversationId,
-          turnId: context.turnId,
-          name,
-          mimeType,
-          sizeBytes: read.bytes.byteLength,
-          sha256,
-          ...(parsed.data.caption !== undefined && {
-            caption: parsed.data.caption,
-          }),
-          part,
-          of,
-          dataBase64: read.bytes
-            .subarray(start, start + ATTACHMENT_CHUNK_RAW_BYTES)
-            .toString("base64"),
-        });
-      }
-    } catch (error) {
-      // A dying transport: the waiter would time out; settle it now instead.
-      const entry = pending.get(uploadId);
-      if (entry) {
-        clearTimeout(entry.timer);
-        pending.delete(uploadId);
-      }
-      log("warn", "send_file: transport write failed", {
-        error: String(error),
-      });
-      return refuse("The file could not be sent (connection lost). Try again.");
-    }
-
-    const result = await waiter;
-    if (!result) {
-      return refuse(
-        "The platform did not confirm the file in time. It may have arrived — check before sending it again.",
-      );
-    }
-    if (!result.ok) {
-      return refuse(result.error ?? "The file was not accepted.");
-    }
+    const streamed = await streamFile({
+      bytes: read.bytes,
+      name,
+      context,
+      ...(parsed.data.caption !== undefined && {
+        caption: parsed.data.caption,
+      }),
+      timeoutMs: options.timeoutMs ?? SEND_FILE_TIMEOUT_MS,
+    });
+    if (!streamed.ok) return streamed;
     return {
       ok: true,
       result: {
         sent: true,
         name,
         sizeBytes: read.bytes.byteLength,
-        mimeType,
-        attachmentId: result.attachmentId,
+        mimeType: mimeTypeFor(name),
+        attachmentId: streamed.attachmentId,
       },
     };
+  };
+
+  /**
+   * send_message `files`: every path is checked and read FIRST (the same
+   * containment, caps and per-turn count as send_file), so a bad path or an
+   * over-cap file refuses the whole send before a single byte leaves. Then
+   * each is streamed STAGED (`purpose: "send"`): stored under the calling
+   * turn, never shown under the reply, waiting for the send_message that
+   * names it by id. All of it settles by `deadline`, the share of the
+   * tool call's clock the forward leaves (`FORWARD_RESERVE_MS`).
+   */
+  const stageFiles = async (
+    paths: readonly string[],
+    context: { conversationId: string; turnId: string } | null,
+    deadline: number,
+  ): Promise<
+    { ok: true; attachmentIds: string[] } | { ok: false; error: string }
+  > => {
+    if (!context) {
+      return refuse(
+        "send_message with files works only while you are answering a message.",
+      );
+    }
+    const count = sentPerTurn.get(context.turnId) ?? 0;
+    if (count + paths.length > MAX_OUTBOUND_ATTACHMENTS_PER_TURN) {
+      return refuse(
+        `You can send at most ${MAX_OUTBOUND_ATTACHMENTS_PER_TURN} files per reply (send_file and send_message together). Nothing was sent.`,
+      );
+    }
+    const files: { name: string; bytes: Buffer }[] = [];
+    for (const path of paths) {
+      const contained = containedPath(path);
+      if (!contained.ok)
+        return refuse(`${path}: ${contained.error} Nothing was sent.`);
+      const read = readContained(contained.path);
+      if (!read.ok) return refuse(`${path}: ${read.error} Nothing was sent.`);
+      files.push({ name: nameOf(path), bytes: read.bytes });
+    }
+    rememberSent(context.turnId, count + files.length);
+    const attachmentIds: string[] = [];
+    for (const file of files) {
+      const timeoutMs = deadline - Date.now();
+      if (timeoutMs <= 0) return refuse(STAGING_TIMED_OUT);
+      const streamed = await streamFile({
+        ...file,
+        context,
+        purpose: "send",
+        timeoutMs,
+      });
+      if (!streamed.ok) {
+        return refuse(
+          streamed.error === STAGING_TIMED_OUT
+            ? STAGING_TIMED_OUT
+            : `${file.name}: ${streamed.error} Nothing was sent.`,
+        );
+      }
+      if (!streamed.attachmentId) {
+        return refuse(
+          `${file.name}: the platform did not store it. Nothing was sent.`,
+        );
+      }
+      attachmentIds.push(streamed.attachmentId);
+    }
+    return { ok: true, attachmentIds };
   };
 
   return {
@@ -386,6 +485,7 @@ export const createSendFileTools = (
         execute: sendFile,
       },
     ],
+    stageFiles,
     handleResult(item) {
       const waiter = pending.get(item.uploadId);
       if (!waiter) return; // timed out already — nothing waits

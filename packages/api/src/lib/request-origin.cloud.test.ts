@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./env", () => ({
   IS_CLOUD: true,
-  APP_URL: "http://localhost:10254",
 }));
 
 vi.mock("../providers/self-url", () => ({

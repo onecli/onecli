@@ -9,7 +9,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.10.0"
+  version: "0.11.0"
 ---`;
 
 const FRONTMATTER_BROAD = `---
@@ -23,7 +23,7 @@ description: >-
 compatibility: Only active when HTTPS_PROXY contains aoc_ (automatic when launched via \`onecli run\`)
 metadata:
   author: onecli
-  version: "0.10.0"
+  version: "0.11.0"
 ---`;
 
 const SKILL_BODY = `
@@ -201,9 +201,19 @@ request. Make that one card for the reviewer:
 - Send one group's requests in parallel, all of it at once, so the
   reviewer sees them on one card. Wait until that group is decided before
   sending the next. Don't send them one after another waiting on each
-  approval. Set a total only when you send that many at once: if your
+  approval: a script that loops over the list and waits on every call gives
+  the reviewer one card per record, the thing they most dislike. Start the
+  whole group in the background (\`&\` then \`wait\`, or a thread pool), never
+  a plain \`for\` loop of blocking calls. Set a total only when you send that
+  many at once: if your
   calls run one at a time (each waiting on its approval), use ONE bulk call
   where the API has one, or tag no total.
+- An update card of one CRM record (Attio, HubSpot, Salesforce) may offer
+  **Approve similar**. If the reviewer picks it, your next updates of that
+  same kind (same app, same record type, same method) go through without a
+  card for a short window, up to a set number. Creates, deletes and other
+  record types still ask. Don't rely on it: send the group in parallel
+  anyway.
 - Check that you sent every request of the group before you wait: the
   number started must equal the group's size. A shell \`while read\`
   loop over a file skips its last line when the file has no trailing
@@ -305,6 +315,19 @@ First classify the gateway error code, not just its HTTP status:
   tell the user which permission is missing; it is added in the GitHub
   App's settings and then approved by whoever installed it (an organization
   owner, for an organization).
+- **Bitbucket Cloud**: the REST API is \`https://api.bitbucket.org/2.0/\`
+  (repositories under \`/repositories/<workspace>/<repo_slug>/...\`; find
+  the user's workspaces with \`GET /user/workspaces\`, then list one's
+  repositories with \`GET /repositories/<workspace>\`). Clone and push over
+  HTTPS as \`https://bitbucket.org/<workspace>/<repo>.git\` with no
+  credentials in the URL: the gateway signs git in. A 403 "Your credentials
+  lack one or more required privilege scopes" means the Bitbucket OAuth
+  consumer was not granted that scope (creating a repository takes
+  \`repository:admin\` and deleting one \`repository:delete\`, which OneCLI
+  does not request). Do not retry: tell the user which scope is missing; it
+  is added on the consumer in the Bitbucket workspace settings, and the
+  account is then reconnected. Bitbucket removed its issue tracker: track
+  work in Jira instead.
 - \`access_restricted\` means OneCLI already has a credential for this
   service, but this agent is not switched on for it. Do not retry, and do not
   ask the user to connect the service again. Show the user the \`manage_url\`
