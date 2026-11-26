@@ -74,6 +74,7 @@ export const APP_CATEGORIES: Record<string, AppCategory> = {
   postgres: "cloud-data",
   "vertex-ai": "cloud-data",
   tavily: "cloud-data",
+  serply: "cloud-data",
 
   // Communication
   resend: "communication",
