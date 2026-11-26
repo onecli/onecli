@@ -43,12 +43,15 @@ pub struct SecretRow {
     #[sqlx(rename = "type")]
     pub type_: String,
     /// "inline" (value stored in `encrypted_value`) | "onepassword" (value
-    /// resolved from `op_ref` via the 1Password connection at request time).
+    /// resolved from `op_ref` via the 1Password connection at request time) |
+    /// "keepersecurity" (resolved from `keepersecurity_ref` via the Keeper connection).
     pub value_source: String,
     /// Present for inline secrets; `None` for 1Password-sourced ones.
     pub encrypted_value: Option<String>,
     /// `op://vault/item/field` reference, set for 1Password-sourced secrets.
     pub op_ref: Option<String>,
+    /// `keeper://<record-uid>/field/<name>` reference, set for Keeper-Security-sourced secrets.
+    pub keepersecurity_ref: Option<String>,
     pub host_pattern: String,
     pub path_pattern: Option<String>,
     pub injection_config: Option<serde_json::Value>,
@@ -302,7 +305,7 @@ pub async fn find_secrets_by_workspace(
     workspace_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, keepersecurity_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
     )
     .bind(workspace_id)
     .fetch_all(pool)
@@ -313,7 +316,7 @@ pub async fn find_secrets_by_workspace(
 /// Find all organization-level secrets.
 pub async fn find_secrets_by_org(pool: &PgPool, organization_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, keepersecurity_ref, host_pattern, path_pattern, injection_config, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )

@@ -120,6 +120,7 @@ const NOT_LINKED_WORKSPACE = new Set([
   "connections/apps",
   "connections/vaults/bitwarden",
   "connections/vaults/onepassword",
+  "connections/vaults/keepersecurity",
 ]);
 
 describe("route builder unions", () => {

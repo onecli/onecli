@@ -24,6 +24,7 @@ interface Secret {
   typeLabel: string;
   valueSource?: string;
   opRef?: string | null;
+  keepersecurityRef?: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;

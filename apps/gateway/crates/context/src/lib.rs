@@ -19,6 +19,7 @@ use approval::ApprovalStore;
 use ca::CertificateAuthority;
 use cache::CacheStore;
 use crypto::CryptoService;
+use vault::keepersecurity::KeeperSecurityVaultProvider;
 use vault::onepassword::OnePasswordVaultProvider;
 
 pub use refresh_gate::RefreshGate;
@@ -92,6 +93,8 @@ pub struct PolicyEngine {
     /// The same `Arc` is also registered as a `VaultService` provider (where it
     /// acts only as a connection holder — it never races on hostname).
     pub onepassword: Arc<OnePasswordVaultProvider>,
+    /// Resolves `keeper://` references for secrets with `value_source = "keepersecurity"`.
+    pub keepersecurity: Arc<KeeperSecurityVaultProvider>,
     /// Serializes OAuth refreshes of one connection across every instance
     /// sharing the database, on its own small pool (see [`RefreshGate`]).
     pub refresh_gate: Arc<RefreshGate>,
@@ -270,6 +273,7 @@ impl PolicyEngine {
     #[doc(hidden)]
     pub fn test_with_pool(pool: sqlx::PgPool, lock_wait: std::time::Duration) -> Self {
         use crypto::CryptoService;
+        use vault::keepersecurity::KeeperSecurityVaultProvider;
         use vault::onepassword::OnePasswordVaultProvider;
 
         let crypto = Arc::new(
@@ -280,6 +284,10 @@ impl PolicyEngine {
             pool.clone(),
             Arc::clone(&crypto),
         ));
+        let keepersecurity = Arc::new(KeeperSecurityVaultProvider::new(
+            pool.clone(),
+            Arc::clone(&crypto),
+        ));
         let refresh_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
             .connect_lazy_with((*pool.connect_options()).clone());
@@ -287,6 +295,7 @@ impl PolicyEngine {
             pool,
             crypto,
             onepassword,
+            keepersecurity,
             refresh_gate: Arc::new(RefreshGate::with_pool(refresh_pool, lock_wait)),
         }
     }

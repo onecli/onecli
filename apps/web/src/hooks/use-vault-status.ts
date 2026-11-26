@@ -22,7 +22,44 @@ export interface OnePasswordStatusData {
   last_error: string | null;
 }
 
-export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
+/**
+ * Why a paired Keeper connection can't serve credentials:
+ * - `connection_failed`: OneCLI can't use the connection, whatever the cause
+ *   (access expired or revoked, device removed, Keeper unreachable, the stored
+ *   configuration unreadable); the detail is in `last_error`.
+ * - `no_records`: Keeper accepts it but nothing is shared with it any more.
+ */
+export type KeeperSecurityStatusReason = "connection_failed" | "no_records";
+
+export interface KeeperSecurityStatusData {
+  last_error: string | null;
+  /** Absent from gateways that predate it. */
+  reason?: KeeperSecurityStatusReason | null;
+  /** Records shared with the application, from the last successful check. */
+  record_count?: number | null;
+  /** When the application's access expires (ISO 8601), if Keeper set a limit. */
+  expires_on?: string | null;
+  warnings?: string[];
+  /** The last reference an agent request could not resolve. */
+  resolve_error?: { ref: string; message: string } | null;
+}
+
+/** How often an auto-refreshing status re-checks while the page is visible. */
+export const STATUS_REFRESH_INTERVAL_MS = 60_000;
+
+interface UseVaultStatusOptions {
+  /**
+   * Re-check when the tab regains focus and every
+   * {@link STATUS_REFRESH_INTERVAL_MS} while it is visible, so a connection
+   * revoked on the vault's side shows up without a reload.
+   */
+  autoRefresh?: boolean;
+}
+
+export const useVaultStatus = <T = unknown>(
+  provider: string = "bitwarden",
+  { autoRefresh = false }: UseVaultStatusOptions = {},
+) => {
   const [status, setStatus] = useState<VaultStatus<T> | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -49,6 +86,21 @@ export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
   useEffect(() => {
     fetchStatus();
   }, [fetchStatus]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") void fetchStatus();
+    };
+    const interval = setInterval(refreshIfVisible, STATUS_REFRESH_INTERVAL_MS);
+    window.addEventListener("focus", refreshIfVisible);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", refreshIfVisible);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [autoRefresh, fetchStatus]);
 
   const isPaired = status?.connected || status?.status_data != null;
   const isReady = status?.connected ?? false;

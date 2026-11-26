@@ -56,6 +56,7 @@ export const REDIRECT_ONLY_ROUTES = [
   "/w/*/connections/secrets",
   "/w/*/connections/vaults",
   "/w/*/connections/vaults/bitwarden",
+  "/w/*/connections/vaults/keepersecurity",
   "/w/*/connections/vaults/onepassword",
   "/w/*/files",
   "/w/*/overview",

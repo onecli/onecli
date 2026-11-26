@@ -248,7 +248,11 @@ export const hostPatternSchema = z
       "A wildcard can't cover a public suffix like *.com; use a specific domain, e.g. *.example.com",
   });
 
-export const valueSources = ["inline", "onepassword"] as const;
+export const valueSources = [
+  "inline",
+  "onepassword",
+  "keepersecurity",
+] as const;
 
 // 1Password secret reference, op://vault/item/field (>= 3 path segments).
 const opRefSchema = z
@@ -260,6 +264,31 @@ const opRefSchema = z
       v.slice(5).split("/").filter(Boolean).length >= 3,
     { message: "Must be a 1Password reference (op://vault/item/field)" },
   );
+
+// Keeper Secrets Manager notation, keeper://<record-uid>/<selector>/<name>
+// (e.g. keeper://qnXEdB.../field/password): record UID + at least a selector and name.
+const keepersecurityRefSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (v) =>
+      v.startsWith("keeper://") &&
+      v.slice(9).split("/").filter(Boolean).length >= 3,
+    {
+      message:
+        "Must be a keepersecurity reference (keeper://<record-uid>/field/<name>)",
+    },
+  );
+
+// Human-readable labels of the picked Keeper record/field, for display only
+// (the reference itself holds only the record UID).
+const keepersecurityDisplaySchema = z
+  .object({
+    record: z.string().max(500),
+    field: z.string().max(500),
+    folder: z.string().max(1000).optional(),
+  })
+  .optional();
 
 // Human-readable labels of the picked vault/item/field, for display only.
 const opDisplaySchema = z
@@ -273,6 +302,8 @@ export const createSecretSchema = z
     valueSource: z.enum(valueSources).optional(),
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
+    keepersecurityRef: keepersecurityRefSchema.optional(),
+    keepersecurityDisplay: keepersecurityDisplaySchema,
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema,
     pathPattern: z.string().max(1000).optional(),
@@ -285,6 +316,14 @@ export const createSecretSchema = z
           code: "custom",
           path: ["opRef"],
           message: "Select a 1Password field",
+        });
+      }
+    } else if (data.valueSource === "keepersecurity") {
+      if (!data.keepersecurityRef) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["keepersecurityRef"],
+          message: "Enter a keepersecurity reference",
         });
       }
     } else if (!data.value || data.value.length < 1) {
@@ -304,6 +343,8 @@ export const updateSecretSchema = z
     valueSource: z.enum(valueSources).optional(),
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
+    keepersecurityRef: keepersecurityRefSchema.optional(),
+    keepersecurityDisplay: keepersecurityDisplaySchema,
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),
@@ -318,6 +359,13 @@ export const updateSecretSchema = z
         code: "custom",
         path: ["opRef"],
         message: "Select a 1Password field",
+      });
+    }
+    if (data.valueSource === "keepersecurity" && !data.keepersecurityRef) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["keepersecurityRef"],
+        message: "Enter a keepersecurity reference",
       });
     }
     if (

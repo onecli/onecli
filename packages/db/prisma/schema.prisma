@@ -2607,24 +2607,25 @@ model ChannelAdapter {
 }
 
 model Secret {
-  id              String        @id @default(uuid())
-  scope           String        @default("workspace") // "workspace" | "organization"
-  workspaceId     String?       @map("workspace_id")
-  organizationId  String?       @map("organization_id")
-  name            String
-  type            String // "anthropic", "generic"
-  // Value source: "inline" (encryptedValue) or "onepassword" (resolved from opRef at request time)
-  valueSource     String        @default("inline") @map("value_source")
-  encryptedValue  String?       @map("encrypted_value") // AES-256-GCM via CryptoService; null when valueSource = "onepassword"
-  opRef           String?       @map("op_ref") // 1Password reference op://vault/item/field (valueSource = "onepassword")
-  hostPattern     String        @map("host_pattern") // "api.anthropic.com" or "*.example.com"
-  pathPattern     String?       @map("path_pattern") // "/v1/*", null = all paths
-  injectionConfig Json?         @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
-  metadata        Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
-  workspace       Workspace?    @relation(fields: [workspaceId], references: [id])
-  organization    Organization? @relation(fields: [organizationId], references: [id])
+  id                String        @id @default(uuid())
+  scope             String        @default("workspace") // "workspace" | "organization"
+  workspaceId       String?       @map("workspace_id")
+  organizationId    String?       @map("organization_id")
+  name              String
+  type              String // "anthropic", "generic"
+  // Value source: "inline" (encryptedValue), "onepassword" (resolved from opRef) or "keepersecurity" (resolved from keepersecurityRef) at request time
+  valueSource       String        @default("inline") @map("value_source")
+  encryptedValue    String?       @map("encrypted_value") // AES-256-GCM via CryptoService; null when valueSource is "onepassword" or "keepersecurity"
+  opRef             String?       @map("op_ref") // 1Password reference op://vault/item/field (valueSource = "onepassword")
+  keepersecurityRef String?       @map("keepersecurity_ref") // Keeper KSM notation keeper://<record-uid>/field/<name> (valueSource = "keepersecurity")
+  hostPattern       String        @map("host_pattern") // "api.anthropic.com" or "*.example.com"
+  pathPattern       String?       @map("path_pattern") // "/v1/*", null = all paths
+  injectionConfig   Json?         @map("injection_config") // type-specific config (generic: { headerName, valueFormat })
+  metadata          Json? // type-specific metadata (anthropic: { authMode: "api-key" | "oauth" })
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+  workspace         Workspace?    @relation(fields: [workspaceId], references: [id])
+  organization      Organization? @relation(fields: [organizationId], references: [id])
 
   budgets           Budget[] // cloud-only: spend budgets on this secret (inert in OSS)
   policyRuleTargets PolicyRuleTarget[]

@@ -17,6 +17,8 @@
 
 pub mod bitwarden;
 pub mod bitwarden_db;
+pub mod keepersecurity;
+pub mod keepersecurity_api;
 pub mod onepassword;
 pub mod onepassword_api;
 #[cfg(test)]

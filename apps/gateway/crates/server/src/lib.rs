@@ -290,6 +290,15 @@ impl GatewayServer {
                 "/v1/vault/onepassword/items/{vaultId}/{itemId}/fields",
                 axum::routing::get(vault_api::vault_op_fields),
             )
+            // Keeper value picker (browse records → fields)
+            .route(
+                "/v1/vault/keepersecurity/records",
+                axum::routing::get(vault_api::vault_keepersecurity_records),
+            )
+            .route(
+                "/v1/vault/keepersecurity/records/{recordUid}/fields",
+                axum::routing::get(vault_api::vault_keepersecurity_fields),
+            )
             .route(
                 "/v1/cache/invalidate",
                 axum::routing::post(invalidate_cache),
@@ -1398,6 +1407,7 @@ async fn handle_http_proxy(
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
         credential_unavailable: resolved.credential_unavailable,
+        credential_unavailable_vault: resolved.credential_unavailable_vault,
         intercept_token: None,
         plan: resolved.plan,
         rewrite_host: None,

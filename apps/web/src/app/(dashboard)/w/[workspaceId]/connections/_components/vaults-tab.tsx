@@ -14,6 +14,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
 import { useVaultStatus } from "@/hooks/use-vault-status";
+import { vaultStatusBadge, type StatusTone } from "@/lib/vault-status-badge";
 import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
 
 /** A vault provider rendered as a connect/manage card on the Vaults tab. */
@@ -25,7 +26,21 @@ interface VaultProviderMeta {
   iconSize: number;
   /** The provider's setup page, under `/connections`. */
   vaultPath: string;
+  /** Re-check status on focus and periodically (see `useVaultStatus`). */
+  autoRefresh?: boolean;
 }
+
+const DOT_TONE: Record<StatusTone, string> = {
+  ok: "bg-brand",
+  warn: "bg-amber-500",
+  error: "bg-red-500",
+};
+
+const TEXT_TONE: Record<StatusTone, string> = {
+  ok: "text-brand",
+  warn: "text-amber-600 dark:text-amber-400",
+  error: "text-red-600 dark:text-red-400",
+};
 
 const VAULT_PROVIDERS: VaultProviderMeta[] = [
   {
@@ -45,6 +60,16 @@ const VAULT_PROVIDERS: VaultProviderMeta[] = [
     iconSrc: "/icons/onepassword.svg",
     iconSize: 32,
     vaultPath: "/vaults/onepassword",
+  },
+  {
+    provider: "keepersecurity",
+    title: "Keeper Security",
+    description:
+      "Resolve secrets from Keeper Security with a Secrets Manager application. The gateway fetches them at request time. Secret values are never stored.",
+    iconSrc: "/icons/keeper-security.png",
+    iconSize: 32,
+    vaultPath: "/vaults/keepersecurity",
+    autoRefresh: true,
   },
 ];
 
@@ -66,11 +91,13 @@ const VaultProviderCard = ({
   iconSrc,
   iconSize,
   vaultPath,
+  autoRefresh,
 }: VaultProviderMeta) => {
   const href = useConnectionsHref();
   const { loading, isPaired, isReady, status } = useVaultStatus<{
     last_error: string | null;
-  }>(provider);
+    reason?: string | null;
+  }>(provider, { autoRefresh });
 
   if (loading) {
     return (
@@ -95,18 +122,28 @@ const VaultProviderCard = ({
     );
   }
 
-  const hasError = !!status?.status_data?.last_error;
+  const badge = vaultStatusBadge({
+    lastError: status?.status_data?.last_error,
+    reason: status?.status_data?.reason,
+    isReady,
+  });
+  const hasError = badge.tone === "error";
+  const hasWarning = badge.tone === "warn";
 
   return (
     <Card
       className={cn(
         "relative overflow-hidden flex flex-col",
-        isPaired && !hasError && "border-brand/30",
+        isPaired && badge.tone === "ok" && "border-brand/30",
+        isPaired && hasWarning && "border-amber-500/30",
         hasError && "border-red-500/30",
       )}
     >
-      {isPaired && !hasError && (
+      {isPaired && badge.tone === "ok" && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-brand" />
+      )}
+      {isPaired && hasWarning && (
+        <div className="absolute top-0 left-0 right-0 h-0.5 bg-amber-500" />
       )}
       {hasError && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-red-500" />
@@ -135,18 +172,12 @@ const VaultProviderCard = ({
           {isPaired ? (
             <div className="flex items-center gap-1.5">
               <span
-                className={cn(
-                  "size-2 rounded-full",
-                  hasError ? "bg-red-500" : "bg-brand",
-                )}
+                className={cn("size-2 rounded-full", DOT_TONE[badge.tone])}
               />
               <span
-                className={cn(
-                  "text-xs font-medium",
-                  hasError ? "text-red-600 dark:text-red-400" : "text-brand",
-                )}
+                className={cn("text-xs font-medium", TEXT_TONE[badge.tone])}
               >
-                {hasError ? "Error" : isReady ? "Connected" : "Paired"}
+                {badge.label}
               </span>
             </div>
           ) : null}

@@ -1,11 +1,12 @@
 # Vault Integration
 
-Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Two providers are supported, with different models:
+Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Three providers are supported, with two different models:
 
 - **[Bitwarden](https://bitwarden.com)** (via the [Agent Access SDK](https://github.com/bitwarden/agent-access)) — an on-demand fallback: when no server-stored secret matches a request, the gateway asks your vault for a credential by domain.
 - **[1Password](https://1password.com)** (via a Service Account) — a value source for explicit secrets: a secret can reference `op://vault/item/field` instead of storing an encrypted value, and the gateway resolves the reference at request time.
+- **[Keeper Security](https://www.keepersecurity.com)** (via a Keeper Secrets Manager) — a value source for explicit secrets: a secret can reference `keeper://<record-uid>/field/<name>` instead of storing an encrypted value, and the gateway resolves the reference at request time.
 
-Most of this page covers the Bitwarden flow; see [1Password](#1password) below for its setup.
+Most of this page covers the Bitwarden flow; see [1Password](#1password) and [Keeper Security](#keeper-security) below for their setup.
 
 ## How It Works
 
@@ -77,6 +78,12 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 
 Setup: **Connections** > **Vaults** > **1Password**, paste a Service Account token, then create secrets that reference vault items (the UI has a vault/item/field picker backed by `GET /v1/vault/onepassword/{vaults,items,fields}`).
 
+## [Keeper Security](https://docs.keeper.io/keeperpam/secrets-manager/integrations/onecli-external-vault)
+
+Keeper Security connects with a [Secrets Manager](https://docs.keeper.io/keeperpam/secrets-manager/overview) application instead of app pairing, and it is not a hostname-matched fallback: it supplies values for secrets you explicitly point at it. A secret with a `keeper://<record-uid>/field/<name>` reference ([Keeper notation](https://docs.keeper.io/en/keeperpam/secrets-manager/about/keeper-notation)) is resolved through the Keeper Secrets Manager SDK at request time, so the value never sits in the OneCLI database. Only the connection's configuration is stored, encrypted, per workspace.
+
+Setup: **Connections** > **Vaults** > **Keeper Security**, choose how to connect (a one-time access token, a base64 string, or a JSON configuration), paste it, then create secrets that reference records (the UI has a record/field picker backed by `GET /v1/vault/keepersecurity/{records,records/{recordUid}/fields}`). Share the records with the Secrets Manager application first. A one-time token is single-use: OneCLI binds it to a reusable configuration, stores only that, and discards the token.
+
 ## Architecture
 
 The vault system is provider-agnostic: each provider implements the `VaultProvider` trait, and pairing/status/disconnect are served on provider-generic routes.
@@ -85,17 +92,19 @@ The vault system is provider-agnostic: each provider implements the `VaultProvid
 Browser ──► Gateway /v1/vault/:provider/pair   (pairing / connecting)
 Agent   ──► Gateway CONNECT host:443            (credential injection)
               │
-              ├─ DB secrets matched? ──► inject from DB (op:// values resolve via 1Password)
+              ├─ DB secrets matched? ──► inject from DB (op:// and keeper:// values resolve via their vaults)
               └─ No match + Bitwarden paired? ──► ask Bitwarden ──► inject
 ```
 
 Key files:
 
-| File                                               | Role                                                        |
-| -------------------------------------------------- | ----------------------------------------------------------- |
-| `apps/gateway/crates/vault/src/lib.rs`             | `VaultProvider` trait + `VaultService` orchestrator         |
-| `apps/gateway/crates/vault/src/bitwarden.rs`       | Bitwarden provider (sessions, pairing, caching)             |
-| `apps/gateway/crates/vault/src/bitwarden_db.rs`    | DB-backed identity + session storage                        |
-| `apps/gateway/crates/vault/src/onepassword.rs`     | 1Password provider (Service Account session, `op://` cache) |
-| `apps/gateway/crates/vault/src/onepassword_api.rs` | Bridge to the Node 1Password SDK service                    |
-| `apps/gateway/crates/server/src/vault_api.rs`      | REST endpoints for pair/status/disconnect + the 1P picker   |
+| File                                                  | Role                                                                                   |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `apps/gateway/crates/vault/src/lib.rs`                | `VaultProvider` trait + `VaultService` orchestrator                                    |
+| `apps/gateway/crates/vault/src/bitwarden.rs`          | Bitwarden provider (sessions, pairing, caching)                                        |
+| `apps/gateway/crates/vault/src/bitwarden_db.rs`       | DB-backed identity + session storage                                                   |
+| `apps/gateway/crates/vault/src/onepassword.rs`        | 1Password provider (Service Account session, `op://` cache)                            |
+| `apps/gateway/crates/vault/src/onepassword_api.rs`    | Bridge to the Node 1Password SDK service                                               |
+| `apps/gateway/crates/server/src/vault_api.rs`         | REST endpoints for pair/status/disconnect + the 1Password and Keeper pickers           |
+| `apps/gateway/crates/vault/src/keepersecurity.rs`     | Keeper provider (KSM config session, `keeper://` cache)                                |
+| `apps/gateway/crates/vault/src/keepersecurity_api.rs` | Bridge to the Node Keeper Secrets Manager SDK service (bind/validate, resolve, picker) |

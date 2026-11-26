@@ -304,6 +304,7 @@ impl World {
             available_apps: db::AvailableApps::default(),
             access_restricted: None,
             credential_unavailable: None,
+            credential_unavailable_vault: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,

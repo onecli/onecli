@@ -334,6 +334,7 @@ mod tests {
             value_source: "inline".into(),
             encrypted_value: None,
             op_ref: None,
+            keepersecurity_ref: None,
             host_pattern: host_pattern.into(),
             path_pattern: None,
             injection_config: None,

@@ -1779,14 +1779,16 @@ fn auth_failure_guidance(
     }
 
     // 2. A granted secret for this host whose value could not be produced:
-    //    the agent HAS the credential, so the fix is re-entering it, never
-    //    attaching it (`access_restricted` is not even resolved then).
+    //    the agent HAS the credential, so the fix is re-entering it (or, for a
+    //    vault-sourced value, fixing the vault), never attaching it
+    //    (`access_restricted` is not even resolved then).
     if let Some(kind) = rules.credential_unavailable {
         return Some((
             response::ERROR_CREDENTIAL_UNAVAILABLE,
             response::credential_unavailable(
                 status,
                 kind,
+                rules.credential_unavailable_vault,
                 hostname,
                 path,
                 workspace_id,
@@ -2442,6 +2444,7 @@ mod tests {
             available_apps: db::AvailableApps::default(),
             access_restricted: None,
             credential_unavailable: None,
+            credential_unavailable_vault: None,
             intercept_token: None,
             plan: "free".to_string(),
             rewrite_host: None,

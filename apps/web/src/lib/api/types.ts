@@ -121,6 +121,7 @@ export interface Secret {
   typeLabel: string;
   valueSource: string;
   opRef: string | null;
+  keepersecurityRef: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
@@ -357,8 +358,10 @@ export interface CreateSecretInput {
   name: string;
   type: string;
   value?: string;
-  valueSource?: "inline" | "onepassword";
+  valueSource?: "inline" | "onepassword" | "keepersecurity";
   opRef?: string;
+  keepersecurityRef?: string;
+  keepersecurityDisplay?: { record: string; field: string; folder?: string };
   opDisplay?: { vault: string; item: string; field: string };
   hostPattern: string;
   pathPattern?: string;
