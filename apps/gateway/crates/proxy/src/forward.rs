@@ -517,6 +517,22 @@ pub async fn forward_request(
     let default_target = default_intercept_shape
         .filter(|_| content_length_at_most(req.headers(), MAX_DEFAULT_INTERCEPT_BODY));
 
+    // Load policy rules per-request with short TTL cache (5s) so policy changes
+    // propagate to long-lived connections without waiting for the 60s CONNECT cache TTL.
+    let org_id = proxy_ctx.organization_id.as_deref().unwrap_or("");
+    let workspace_id = proxy_ctx.workspace_id.as_deref().unwrap_or("");
+    let policy_rules_v2 = policy_engine::load_policy_rules_v2_per_request(
+        &engine.pool,
+        org_id,
+        workspace_id,
+        cache,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "policy v2: per-request load failed, using empty rules");
+        db::PolicyV2Rules::default()
+    });
+
     // Buffer the request body for condition matching, when the request guard needs
     // to inspect it (e.g. Dropbox folder scoping reads the JSON body), or for a
     // matched default interception. `needs_body_buffer` is host-narrowed (#999):
@@ -525,7 +541,7 @@ pub async fn forward_request(
     // buffer entirely. In OSS, both predicates return false → zero overhead
     // unless a default interception matched.
     let (condition_buffer, req) =
-        if policy_engine::needs_body_buffer(&rules.policy_rules_v2, policy_host, &path)
+        if policy_engine::needs_body_buffer(&policy_rules_v2, policy_host, &path)
             || hooks::needs_request_body(rules, host, method.as_str(), &path)
         {
             let (parts, incoming) = req.into_parts();
@@ -590,7 +606,8 @@ pub async fn forward_request(
 
     // The first-match engine over the published `policy_rules_v2` is authoritative.
     // `policy_host` is the pre-rewrite rule-match host; `is_llm_host(host)` is the
-    // effective host for the deny-default carve.
+    // effective host for the deny-default carve. Policy rules are loaded per-request
+    // with a short TTL cache so changes propagate to long-lived connections.
     let (decision, matched_rule) = policy_engine::evaluate(
         proxy_ctx,
         policy_host,
@@ -601,7 +618,7 @@ pub async fn forward_request(
         policy::is_llm_host(host),
         rules.winning_connection_id.as_deref(),
         cache,
-        &rules.policy_rules_v2,
+        &policy_rules_v2,
     )
     .await;
 
@@ -888,7 +905,7 @@ pub async fn forward_request(
                     has_injections,
                     policy::is_llm_host(host),
                     rules.winning_connection_id.as_deref(),
-                    &rules.policy_rules_v2,
+                    &policy_rules_v2,
                 )
             };
             // The read carries the credential injection set on this request
