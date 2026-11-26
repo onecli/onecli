@@ -40,6 +40,7 @@
     "@aws-sdk/client-s3": "^3.1131.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
     "@aws-sdk/s3-request-presigner": "^3.1131.0",
+    "@keeper-security/secrets-manager-core": "^17.6.0",
     "@onecli/agent-protocol": "workspace:*",
     "@onecli/channels": "workspace:*",
     "@onecli/db": "workspace:*",

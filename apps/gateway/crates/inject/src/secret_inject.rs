@@ -561,6 +561,7 @@ mod tests {
             value_source: "inline".to_string(),
             encrypted_value: Some("enc".to_string()),
             op_ref: None,
+            keepersecurity_ref: None,
             host_pattern: "api.anthropic.com".to_string(),
             path_pattern: None,
             injection_config: None,

@@ -298,6 +298,9 @@ pub struct ResolvedRules {
     /// A granted secret for this host could not be read
     /// (`ConnectResponse::credential_unavailable`).
     pub credential_unavailable: Option<crate::connect::SecretKind>,
+    /// The external vault that unreadable value comes from, when the fix is
+    /// there (`ConnectResponse::credential_unavailable_vault`).
+    pub credential_unavailable_vault: Option<crate::connect::UnavailableVault>,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
@@ -610,6 +613,7 @@ async fn resolve_rules(
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
             credential_unavailable: resp.credential_unavailable,
+            credential_unavailable_vault: resp.credential_unavailable_vault,
             intercept_token,
             plan: resp.plan,
             rewrite_host,

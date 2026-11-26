@@ -14,6 +14,8 @@ import {
   isPathTemplateInjection,
   looksLikeAnthropicKey,
   looksLikeOpenaiKey,
+  updateSecretSchema,
+  valueSources,
   wildcardCoversPublicSuffix,
 } from "./secret";
 
@@ -244,5 +246,119 @@ describe("OpenAI key kinds", () => {
   it("recognizes the Admin key prefix", () => {
     expect(isOpenaiAdminKey(`sk-admin-${body(90)}`)).toBe(true);
     expect(isOpenaiAdminKey(`sk-proj-${body(90)}`)).toBe(false);
+  });
+});
+
+describe("Keeper-sourced secrets", () => {
+  const base = {
+    name: "Keeper token",
+    type: "generic" as const,
+    hostPattern: "api.example.com",
+  };
+  const REF = "keeper://qnXEdBFVi2Gm1UFehAsjew/field/password";
+
+  const create = (extra: Record<string, unknown>) =>
+    createSecretSchema.safeParse({ ...base, ...extra });
+  const update = (extra: Record<string, unknown>) =>
+    updateSecretSchema.safeParse(extra);
+  const issuePaths = (r: {
+    success: boolean;
+    error?: { issues: { path: PropertyKey[] }[] };
+  }) => r.error?.issues.map((i) => i.path.join(".")) ?? [];
+
+  it("registers keepersecurity as a value source", () => {
+    expect(valueSources).toContain("keepersecurity");
+  });
+
+  describe("reference shape", () => {
+    it.each([
+      REF,
+      "keeper://uid/custom_field/API Key",
+      "keeper://uid/field/login",
+      "keeper://uid/field/password/0",
+      // Keeper notation also allows a title, an index, a property and a file
+      "keeper://MySQL Creds/field/password",
+      "keeper://uid/field/password[0]",
+      "keeper://uid/custom_field/phone[1][number]",
+      "keeper://uid/file/credentials.txt",
+      "keeper://Twitter Login \\[Marketing\\]/field/password",
+    ])("accepts %s", (keepersecurityRef) => {
+      expect(
+        create({ valueSource: "keepersecurity", keepersecurityRef }).success,
+      ).toBe(true);
+    });
+
+    it.each([
+      ["", "empty"],
+      ["uid/field/password", "no scheme"],
+      ["op://vault/item/field", "a 1Password reference"],
+      ["http://uid/field/password", "the wrong scheme"],
+      ["keeper://", "no parts"],
+      ["keeper://uid", "record only"],
+      ["keeper://uid/field", "no field name"],
+      ["keeper:////field/password", "empty record"],
+      // Valid Keeper notation, but a two-part form OneCLI does not take
+      ["keeper://uid/title", "a short selector"],
+      ["keeper://uid/notes", "a short selector"],
+    ])("rejects %s (%s)", (keepersecurityRef) => {
+      const r = create({ valueSource: "keepersecurity", keepersecurityRef });
+      expect(r.success).toBe(false);
+    });
+  });
+
+  describe("create", () => {
+    it("accepts a Keeper secret with no stored value", () => {
+      expect(
+        create({ valueSource: "keepersecurity", keepersecurityRef: REF })
+          .success,
+      ).toBe(true);
+    });
+
+    it("requires a reference", () => {
+      const r = create({ valueSource: "keepersecurity" });
+      expect(r.success).toBe(false);
+      expect(issuePaths(r)).toContain("keepersecurityRef");
+    });
+
+    it("does not ask for a value when the source is Keeper", () => {
+      const r = create({
+        valueSource: "keepersecurity",
+        keepersecurityRef: REF,
+      });
+      expect(issuePaths(r)).not.toContain("value");
+    });
+
+    it("still requires a value for an inline secret", () => {
+      const r = create({ valueSource: "inline" });
+      expect(issuePaths(r)).toContain("value");
+    });
+
+    it("does not let a stray keepersecurityRef stand in for an inline value", () => {
+      const r = create({ keepersecurityRef: REF });
+      expect(r.success).toBe(false);
+      expect(issuePaths(r)).toContain("value");
+    });
+  });
+
+  describe("update", () => {
+    it("accepts switching a secret to Keeper with a reference", () => {
+      expect(
+        update({ valueSource: "keepersecurity", keepersecurityRef: REF })
+          .success,
+      ).toBe(true);
+    });
+
+    it("requires a reference when switching to Keeper", () => {
+      const r = update({ valueSource: "keepersecurity" });
+      expect(r.success).toBe(false);
+      expect(issuePaths(r)).toContain("keepersecurityRef");
+    });
+
+    it("rejects a malformed reference", () => {
+      expect(
+        update({ valueSource: "keepersecurity", keepersecurityRef: "nope" })
+          .success,
+      ).toBe(false);
+    });
   });
 });

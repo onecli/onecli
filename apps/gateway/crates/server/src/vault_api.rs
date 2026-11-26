@@ -170,3 +170,34 @@ pub async fn vault_op_fields(
         .await?;
     Ok(Json(fields))
 }
+
+// ── Keeper picker (browse records -> fields) ─────────────────────────────
+// The browser drives the secret dialog's value picker through these; the KSM
+// config and field values never leave the gateway / Node boundary.
+
+/// GET /v1/vault/keepersecurity/records
+pub async fn vault_keepersecurity_records(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+) -> Result<impl IntoResponse, VaultError> {
+    let records = state
+        .policy_engine
+        .keepersecurity
+        .list_records(&auth.workspace_id)
+        .await?;
+    Ok(Json(records))
+}
+
+/// GET /v1/vault/keepersecurity/records/:recordUid/fields
+pub async fn vault_keepersecurity_fields(
+    auth: AuthUser,
+    State(state): State<GatewayState>,
+    Path(record_uid): Path<String>,
+) -> Result<impl IntoResponse, VaultError> {
+    let fields = state
+        .policy_engine
+        .keepersecurity
+        .list_fields(&auth.workspace_id, &record_uid)
+        .await?;
+    Ok(Json(fields))
+}

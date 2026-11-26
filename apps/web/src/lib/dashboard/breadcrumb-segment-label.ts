@@ -1,8 +1,9 @@
 import { getApp } from "@onecli/api/apps/registry";
 
 /**
- * The words the connections tabs render. A crumb over a tab must say what the
- * tab says ("LLMs", not the title-cased slug "Llms").
+ * The words the connections tabs render, plus vaults whose URL slug differs
+ * from their name. A crumb must say what the page says ("LLMs", not the
+ * title-cased slug "Llms"; "Keeper", not "Keepersecurity").
  */
 const CONNECTIONS_SEGMENT_TITLES: Record<string, string> = {
   apps: "Apps",
@@ -10,6 +11,7 @@ const CONNECTIONS_SEGMENT_TITLES: Record<string, string> = {
   llms: "LLMs",
   vaults: "Vaults",
   connected: "Connected",
+  keepersecurity: "Keeper",
 };
 
 const titleCase = (segment: string): string =>

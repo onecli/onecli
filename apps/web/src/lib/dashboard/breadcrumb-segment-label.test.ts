@@ -13,6 +13,12 @@ describe("breadcrumbSegmentLabel", () => {
     );
   });
 
+  it("names the Keeper vault page by its product name, not its slug", () => {
+    expect(breadcrumbSegmentLabel("keepersecurity", inConnections)).toBe(
+      "Keeper",
+    );
+  });
+
   it("names an app by its display name, not its title-cased id", () => {
     expect(breadcrumbSegmentLabel("github", inConnections)).toBe("GitHub");
   });

@@ -30,6 +30,7 @@ use ca::CertificateAuthority;
 use context::{PolicyEngine, RefreshGate};
 use server::{Entrypoint, GatewayServer};
 use vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
+use vault::keepersecurity::KeeperSecurityVaultProvider;
 use vault::onepassword::OnePasswordVaultProvider;
 use vault::{VaultProvider, VaultService};
 
@@ -244,6 +245,11 @@ async fn main() -> Result<()> {
         Arc::clone(&crypto),
     ));
 
+    let keepersecurity = Arc::new(KeeperSecurityVaultProvider::new(
+        pool.clone(),
+        Arc::clone(&crypto),
+    ));
+
     // OAuth refreshes run on their own small, lazily-opened pool so one slow
     // provider can never park the shared pool's connections (see RefreshGate).
     let refresh_gate = Arc::new(RefreshGate::new(&pool));
@@ -253,6 +259,7 @@ async fn main() -> Result<()> {
         pool,
         crypto: Arc::clone(&crypto),
         onepassword: Arc::clone(&onepassword),
+        keepersecurity: Arc::clone(&keepersecurity),
         refresh_gate,
     });
 
@@ -263,7 +270,8 @@ async fn main() -> Result<()> {
         policy_engine.pool.clone(),
         Arc::clone(&crypto),
     );
-    let providers: Vec<Arc<dyn VaultProvider>> = vec![Arc::new(bitwarden), onepassword];
+    let providers: Vec<Arc<dyn VaultProvider>> =
+        vec![Arc::new(bitwarden), onepassword, keepersecurity];
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 

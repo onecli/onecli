@@ -8,7 +8,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use approval::hold::Rejection;
 
-use crate::connect::{InactiveApp, SecretKind};
+use crate::connect::{InactiveApp, SecretKind, UnavailableVault};
 
 /// 407 Proxy Authentication Required — agent token is missing or invalid.
 pub fn proxy_auth_required() -> Response<axum::body::Body> {
@@ -285,9 +285,14 @@ pub fn secret_access_restricted<S>(
 /// `access_restricted`: telling the user to attach a key the agent already
 /// holds sends them to the wrong fix. Keeps the upstream status and links the
 /// same page `secret_access_restricted` would, where the value is re-entered.
+///
+/// A value resolved from an external vault (`vault`) is not re-entered in
+/// OneCLI: the message points at the vault and links its connection page.
+#[allow(clippy::too_many_arguments)]
 pub fn credential_unavailable<S>(
     status: StatusCode,
     kind: SecretKind,
+    vault: Option<UnavailableVault>,
     hostname: &str,
     path: &str,
     workspace_id: Option<&str>,
@@ -296,12 +301,31 @@ pub fn credential_unavailable<S>(
     let (provider, display_name) =
         apps::guidance_provider_for(hostname, path).unwrap_or((hostname, hostname));
     let (page, noun) = secret_page(kind, agent_id);
-    let manage_url = scoped_url(dashboard_url(), &page, workspace_id);
+    let (message, manage_url) = match vault {
+        Some(UnavailableVault::KeeperSecurity) => {
+            let url = scoped_url(
+                dashboard_url(),
+                "/connections/vaults/keepersecurity",
+                workspace_id,
+            );
+            (
+                format!("This agent has a {display_name} {noun} in OneCLI whose value comes from Keeper, but Keeper did not return it, so the request was sent without it. OneCLI could not get it from Keeper: its access may have expired or been revoked, the record may no longer be shared with its Secrets Manager application, or Keeper may be unreachable. Ask the user to check the Keeper connection: {url}"),
+                url,
+            )
+        }
+        None => {
+            let url = scoped_url(dashboard_url(), &page, workspace_id);
+            (
+                format!("This agent has a {display_name} {noun} in OneCLI, but its stored value could not be read, so the request was sent without it. Ask the user to re-enter the {noun}: {url}"),
+                url,
+            )
+        }
+    };
     with_no_retry(json_error(
         status,
         serde_json::json!({
             "error": ERROR_CREDENTIAL_UNAVAILABLE,
-            "message": format!("This agent has a {display_name} {noun} in OneCLI, but its stored value could not be read, so the request was sent without it. Ask the user to re-enter the {noun}: {manage_url}"),
+            "message": message,
             "provider": provider,
             "manage_url": manage_url,
         }),
@@ -1406,6 +1430,7 @@ mod tests {
         let resp: Response<TestBody> = credential_unavailable(
             StatusCode::UNAUTHORIZED,
             SecretKind::LlmKey,
+            None,
             "api.anthropic.com",
             "/v1/messages",
             Some("ws1"),
@@ -1423,6 +1448,36 @@ mod tests {
         let message = json["message"].as_str().unwrap();
         assert!(message.contains("re-enter the key"), "{message}");
         assert!(!message.contains("does not have access"), "{message}");
+    }
+
+    /// A Keeper-sourced key is not re-entered in OneCLI: the message points at
+    /// Keeper (revoked access, unshared record) and links the Keeper
+    /// connection page instead of the key's page.
+    #[tokio::test]
+    async fn credential_unavailable_from_keeper_points_at_keeper() {
+        let resp: Response<TestBody> = credential_unavailable(
+            StatusCode::UNAUTHORIZED,
+            SecretKind::LlmKey,
+            Some(UnavailableVault::KeeperSecurity),
+            "api.anthropic.com",
+            "/v1/messages",
+            Some("ws1"),
+            Some("ag-1"),
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], ERROR_CREDENTIAL_UNAVAILABLE);
+        assert_eq!(
+            json["manage_url"].as_str().unwrap(),
+            format!(
+                "{}/w/ws1/connections/vaults/keepersecurity",
+                dashboard_url()
+            )
+        );
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("Keeper"), "{message}");
+        assert!(message.contains("check the Keeper connection"), "{message}");
+        assert!(!message.contains("re-enter"), "{message}");
     }
 
     #[tokio::test]

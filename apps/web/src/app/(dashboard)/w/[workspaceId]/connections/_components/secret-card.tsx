@@ -42,6 +42,7 @@ interface SecretCardProps {
     typeLabel: string;
     valueSource?: string;
     opRef?: string | null;
+    keepersecurityRef?: string | null;
     hostPattern: string;
     pathPattern: string | null;
     injectionConfig: unknown;
@@ -93,6 +94,12 @@ export const SecretCard = ({
           | { vault: string; item: string; field: string }
           | undefined)
       : undefined;
+  const keepersecurityDisplay =
+    secret.valueSource === "keepersecurity"
+      ? (secret.metadata?.keepersecurityDisplay as
+          | { record: string; field: string; folder?: string }
+          | undefined)
+      : undefined;
 
   return (
     <>
@@ -113,6 +120,17 @@ export const SecretCard = ({
                     height={12}
                   />
                   1Password
+                </Badge>
+              )}
+              {secret.valueSource === "keepersecurity" && (
+                <Badge variant="outline" className="gap-1 text-[10px]">
+                  <Image
+                    src="/icons/keeper-security.png"
+                    alt="Keeper Security logo"
+                    width={12}
+                    height={12}
+                  />
+                  Keeper
                 </Badge>
               )}
               {badge && (
@@ -137,6 +155,27 @@ export const SecretCard = ({
                   </code>
                 </span>
               )}
+              {secret.valueSource === "keepersecurity" &&
+                secret.keepersecurityRef && (
+                  <span className="text-muted-foreground">
+                    Value:{" "}
+                    <code
+                      className="bg-muted rounded px-1 py-0.5 font-mono"
+                      title={secret.keepersecurityRef}
+                    >
+                      {keepersecurityDisplay?.record &&
+                      keepersecurityDisplay?.field
+                        ? [
+                            keepersecurityDisplay.folder,
+                            keepersecurityDisplay.record,
+                            keepersecurityDisplay.field,
+                          ]
+                            .filter(Boolean)
+                            .join(" › ")
+                        : secret.keepersecurityRef}
+                    </code>
+                  </span>
+                )}
               {secret.pathPattern && (
                 <span className="text-muted-foreground">
                   Path:{" "}

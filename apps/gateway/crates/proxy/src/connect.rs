@@ -158,6 +158,27 @@ impl SecretKind {
     }
 }
 
+/// The external vault a granted-but-unreadable secret's value comes from, when
+/// that changes the fix: a vault-sourced value is fixed in the vault (or by
+/// reconnecting it), not by re-entering it in OneCLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableVault {
+    /// Resolved from Keeper Secrets Manager (`value_source = "keepersecurity"`).
+    KeeperSecurity,
+}
+
+impl UnavailableVault {
+    /// The vault for a secret's `value_source`, when it has its own guidance.
+    #[must_use]
+    pub fn of(value_source: &str) -> Option<Self> {
+        match value_source {
+            "keepersecurity" => Some(Self::KeeperSecurity),
+            _ => None,
+        }
+    }
+}
+
 /// An app the agent could use by being switched on for it: a connected
 /// account of `provider` in its workspace or organization that its grants do
 /// not select and that needs no reconnect. One entry per app, and never an
@@ -237,6 +258,9 @@ pub struct SecretInjections {
     /// A granted secret for this host was skipped because its value could not
     /// be produced: its kind (see [`ConnectResponse::credential_unavailable`]).
     pub unavailable: Option<SecretKind>,
+    /// The vault that skipped secret's value comes from, when it has its own
+    /// guidance (see [`ConnectResponse::credential_unavailable_vault`]).
+    pub unavailable_vault: Option<UnavailableVault>,
 }
 
 /// Result of policy resolution for a CONNECT request.
@@ -269,6 +293,12 @@ pub struct ConnectResponse {
     /// reads as `None`, the answer that version gave.
     #[serde(default)]
     pub credential_unavailable: Option<SecretKind>,
+    /// With `credential_unavailable`: the external vault the unreadable value
+    /// comes from, when the fix is there rather than re-entering it. A cache
+    /// entry from a version without the field reads as `None`, which answers
+    /// with the generic re-enter guidance that version gave.
+    #[serde(default)]
+    pub credential_unavailable_vault: Option<UnavailableVault>,
     /// Normalized plan name for quota enforcement ("free", "pro", "team",
     /// "enterprise").
     #[serde(default)]
@@ -739,7 +769,7 @@ pub trait PolicyEngineExt {
     ) -> Result<SecretInjections, ConnectError>;
 
     /// Produce a secret's plaintext value from its source — the encrypted column
-    /// (inline) or a live 1Password reference. Returns `None` (after logging) when
+    /// (inline) or a live 1Password / Keeper reference. Returns `None` (after logging) when
     /// the value can't be produced, so the caller skips the secret exactly as it
     /// always has on a decrypt failure.
     async fn resolve_secret_value(
@@ -925,6 +955,7 @@ impl PolicyEngineExt for PolicyEngine {
             rules: injection_rules,
             budget_bindings,
             unavailable: secret_unavailable,
+            unavailable_vault: secret_unavailable_vault,
         } = self
             .resolve_secret_injections(agent, hostname, &inject_selection)
             .await?;
@@ -951,6 +982,8 @@ impl PolicyEngineExt for PolicyEngine {
         // telling it to attach a key it already holds sends the person to the
         // wrong fix (`credential_unavailable` answers instead).
         let credential_unavailable = secret_unavailable.filter(|_| injection_rules.is_empty());
+        let credential_unavailable_vault =
+            secret_unavailable_vault.filter(|_| credential_unavailable.is_some());
         let access_restricted = if injection_rules.is_empty() && credential_unavailable.is_none() {
             self.restricted_credential(agent, hostname, &inject_selection)
                 .await
@@ -985,6 +1018,7 @@ impl PolicyEngineExt for PolicyEngine {
             agent_identifier: agent.identifier.clone(),
             access_restricted,
             credential_unavailable,
+            credential_unavailable_vault,
             plan,
             budget_bindings,
             policy_rules_v2,
@@ -1078,20 +1112,23 @@ impl PolicyEngineExt for PolicyEngine {
 
         let mut rules = Vec::with_capacity(injectable.len());
         let mut unavailable = None;
+        let mut unavailable_vault = None;
         for secret in injectable {
-            // Resolve the value from its source (inline column or live 1Password
-            // reference); a failure skips the secret, exactly as a decrypt
+            // Resolve the value from its source (inline column, or a live
+            // 1Password / Keeper reference); a failure skips the secret, exactly as a decrypt
             // failure always has, and is remembered so an upstream auth failure
             // is answered with the truth (a granted credential that could not
             // be read) instead of "this agent has no access".
             let Some(value) = self.resolve_secret_value(secret, &agent.workspace_id).await else {
                 unavailable = Some(SecretKind::of(&secret.type_));
+                unavailable_vault = UnavailableVault::of(&secret.value_source);
                 continue;
             };
 
             // OAuth token refresh applies only to inline OpenAI secrets; a
-            // 1Password-sourced value is always a raw API key (api-key metadata).
+            // 1Password- or Keeper-sourced value is always a raw API key (api-key metadata).
             let is_openai_oauth = secret.value_source != "onepassword"
+                && secret.value_source != "keepersecurity"
                 && secret.type_ == "openai"
                 && secret_inject::is_oauth_mode(secret.metadata.as_ref());
 
@@ -1169,10 +1206,11 @@ impl PolicyEngineExt for PolicyEngine {
             rules,
             budget_bindings,
             unavailable,
+            unavailable_vault,
         })
     }
     /// Produce a secret's plaintext value from its source — the encrypted column
-    /// (inline) or a live 1Password reference. Returns `None` (after logging) when
+    /// (inline) or a live 1Password / Keeper reference. Returns `None` (after logging) when
     /// the value can't be produced, so the caller skips the secret exactly as it
     /// always has on a decrypt failure.
     async fn resolve_secret_value(
@@ -1198,6 +1236,32 @@ impl PolicyEngineExt for PolicyEngine {
                             secret_type = %secret.type_,
                             error = %e,
                             "skipping secret: 1Password resolution failed"
+                        );
+                        None
+                    }
+                }
+            }
+            "keepersecurity" => {
+                let Some(keepersecurity_ref) = secret.keepersecurity_ref.as_deref() else {
+                    warn!(
+                        host_pattern = %secret.host_pattern,
+                        secret_type = %secret.type_,
+                        "skipping keepersecurity secret: missing keepersecurity_ref"
+                    );
+                    return None;
+                };
+                match self
+                    .keepersecurity
+                    .resolve_ref(workspace_id, keepersecurity_ref)
+                    .await
+                {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            host_pattern = %secret.host_pattern,
+                            secret_type = %secret.type_,
+                            error = %e,
+                            "skipping secret: keepersecurity resolution failed"
                         );
                         None
                     }
@@ -2651,6 +2715,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: None,
             credential_unavailable: None,
+            credential_unavailable_vault: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2699,6 +2764,7 @@ mod tests {
             agent_identifier: None,
             access_restricted: None,
             credential_unavailable: None,
+            credential_unavailable_vault: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2745,6 +2811,7 @@ mod tests {
                 shared_by_organization: true,
             }])),
             credential_unavailable: Some(SecretKind::LlmKey),
+            credential_unavailable_vault: None,
             plan: "pro".to_string(),
             budget_bindings: vec![],
             policy_rules_v2: db::PolicyV2Rules::default(),
@@ -2794,6 +2861,7 @@ mod tests {
             value_source: "inline".to_string(),
             encrypted_value: None,
             op_ref: None,
+            keepersecurity_ref: None,
             host_pattern: host_pattern.to_string(),
             path_pattern: None,
             injection_config: None,
