@@ -6,7 +6,7 @@ import {
   ExternalLink,
   Gauge,
   Globe,
-  Hand,
+  LayoutGrid,
   Shield,
   Users,
   type LucideIcon,
@@ -24,7 +24,7 @@ import {
   requiredPlanFor,
   type PremiumFeature,
 } from "@onecli/api/ee/billing/plan-features";
-import { generateOrgPrefix } from "@/lib/org-navigation";
+import { useSettingsHref } from "@/lib/settings-modal/use-settings-href";
 import { useGuardedUpgrade } from "../use-guarded-upgrade";
 import { PlanSwitchDialog } from "./plan-switch-dialog";
 import { UpgradeDialogShell } from "@/lib/components/upgrade-dialog-shell";
@@ -37,13 +37,6 @@ interface FeatureContent {
 }
 
 const FEATURE_CONTENT: Record<PremiumFeature, FeatureContent> = {
-  "policy.manual_approval": {
-    icon: Hand,
-    iconClassName: "text-blue-500",
-    title: "Manual approval",
-    description:
-      "Requiring human approval before an agent acts is a paid feature. Upgrade to gate sensitive actions behind approval.",
-  },
   "policy.rate_limit": {
     icon: Gauge,
     iconClassName: "text-amber-500",
@@ -63,7 +56,14 @@ const FEATURE_CONTENT: Record<PremiumFeature, FeatureContent> = {
     iconClassName: "text-brand",
     title: "Verified domains & SSO",
     description:
-      "Claiming email domains and single sign-on are part of the Enterprise plan.",
+      "Claiming email domains, SAML/OIDC single sign-on and SCIM are part of the Scale plan.",
+  },
+  app_availability: {
+    icon: LayoutGrid,
+    iconClassName: "text-brand",
+    title: "App availability",
+    description:
+      "Restricting which apps your workspaces may connect is part of the Scale plan.",
   },
   groups: {
     icon: Users,
@@ -79,14 +79,12 @@ interface PlanPaywallDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Gated feature to present; `null` only before the dialog is first opened. */
   feature: PremiumFeature | null;
-  organizationId: string | null;
 }
 
 export const PlanPaywallDialog = ({
   open,
   onOpenChange,
   feature,
-  organizationId,
 }: PlanPaywallDialogProps) => {
   const {
     startUpgrade,
@@ -95,6 +93,7 @@ export const PlanPaywallDialog = ({
     switchInterval,
     closeSwitchDialog,
   } = useGuardedUpgrade();
+  const billingHref = useSettingsHref()("billing");
 
   if (!feature) return null;
 
@@ -115,7 +114,6 @@ export const PlanPaywallDialog = ({
   // tiers keep their own name: enterprise isn't in PLANS, so unlocking is
   // empty and the pill falls back to the required plan itself.
   const displayPlan = unlocking[0]?.id ?? required;
-  const billingHref = `${generateOrgPrefix(organizationId ?? "")}/billing`;
 
   // Sales-managed tiers (enterprise) have no self-serve upgrade path — route
   // to sales instead of checkout/billing.

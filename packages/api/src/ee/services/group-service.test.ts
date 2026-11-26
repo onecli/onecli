@@ -25,6 +25,8 @@ const state = vi.hoisted(() => ({
     transactionOps: [] as unknown[],
     deleteManyWhere: [] as unknown[],
     createManyArgs: [] as unknown[],
+    /** The group-delete steps, in order: snapshot / policy drop / row delete. */
+    deleteSteps: [] as string[],
   },
   failNextCreateWithDuplicate: false,
 }));
@@ -103,18 +105,21 @@ vi.mock("@onecli/db", () => ({
         return toRecord(g);
       },
       delete: async ({ where }: { where: { id: string } }) => {
+        state.calls.deleteSteps.push(`group.delete:${where.id}`);
         state.groups = state.groups.filter((g) => g.id !== where.id);
         return {};
       },
     },
     groupMember: {
-      findMany: async ({ where }: { where: { groupId: string } }) =>
-        state.groupMembers
+      findMany: async ({ where }: { where: { groupId: string } }) => {
+        state.calls.deleteSteps.push(`members.snapshot:${where.groupId}`);
+        return state.groupMembers
           .filter((m) => m.groupId === where.groupId)
           .map((m) => ({
             ...m,
             user: { email: `${m.userId}@x.com`, name: null },
-          })),
+          }));
+      },
       create: async ({
         data,
       }: {
@@ -180,10 +185,30 @@ vi.mock("@onecli/db", () => ({
             where.userId.in.includes(m.userId),
         ),
     },
-    $transaction: async (ops: unknown[]) => {
-      state.calls.transactionOps.push(ops);
-      return Promise.all(ops as Promise<unknown>[]);
+    // Both forms: the batch array (membership replace-set) and the
+    // interactive callback (group delete), which receives this same client.
+    $transaction: async (arg: unknown[] | ((tx: unknown) => unknown)) => {
+      if (typeof arg === "function") {
+        const { db } = await import("@onecli/db");
+        return arg(db);
+      }
+      state.calls.transactionOps.push(arg);
+      return Promise.all(arg as Promise<unknown>[]);
     },
+  },
+}));
+
+// The rule cleanup itself is proven on real Postgres
+// (policy-principal-delete.pg.test.ts); here only its place in the delete.
+vi.mock("../../services/policy-service", () => ({
+  dropPrincipalFromPolicyInTx: async (
+    _tx: unknown,
+    principal: { kind: string; id: string; organizationId: string },
+  ) => {
+    state.calls.deleteSteps.push(
+      `policy.drop:${principal.kind}:${principal.organizationId}/${principal.id}`,
+    );
+    return [];
   },
 }));
 
@@ -248,6 +273,13 @@ describe("role-mapping reconcile wiring (step 15)", () => {
       ["u1", "u2"],
       "api",
     );
+    // The rules naming only this group go before the row whose cascade would
+    // leave them identity-less (applying to every user).
+    expect(state.calls.deleteSteps).toEqual([
+      "members.snapshot:grp-1",
+      "policy.drop:group:org-1/grp-1",
+      "group.delete:grp-1",
+    ]);
   });
 
   it("a membership add reconciles the affected user", async () => {

@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
+import { grantModelKey } from "../../testing/model-key-grant.js";
 
 /**
  * App conversations, inbound (PR 5a) — proofs against a real DB and a fake
@@ -10,11 +11,12 @@ import { proofDatabaseUrl } from "../../testing/pg-proof.js";
  *
  *  - an app's mention in an APPROVED channel is admitted as a guest turn,
  *    framed `Name (app):`, `userId` null, and the streak counts it;
- *  - in a `members_only` channel an app is ignored SILENTLY (no refusal
- *    text — an answer to an app is a loop seed);
+ *  - in a `blocked` channel an app is ignored SILENTLY (no refusal
+ *    text, since an answer to an app is a loop seed);
  *  - the directory must AGREE the speaker is an app (`is_bot`) — a wire
  *    claim the probe contradicts is dropped, both ways;
- *  - the blocked-person precedence law applies to an app's ref;
+ *  - one setting per surface: a person-level row for the app's ref does
+ *    not reach into the channel (the channel's setting decides);
  *  - THE CHAIN: six app turns admit, the seventh is the pause (one refusal
  *    line + exactly one pending lift approval), the eighth is silence;
  *  - a human turn resets the streak; the next app turn admits again;
@@ -25,8 +27,9 @@ import { proofDatabaseUrl } from "../../testing/pg-proof.js";
  *  - COUNT ON LANDING: a message that never became a turn costs no streak
  *    point; the crossing stays exactly once under two concurrent messages;
  *  - VERIFY AT REPLAY: approving a stale card refuses when the channel
- *    closed or the app was blocked after the card - nothing resumes, no
- *    turn, the approval settles failed with the reason;
+ *    was blocked after the card - nothing resumes, no turn, the approval
+ *    settles failed with the reason (a person-level row for the app is not
+ *    consulted in a channel);
  *  - HEARD WHEN TAGGED: an app's un-tagged thread reply is ignored before
  *    the door (a person's still admits);
  *  - THE ROOM'S APPS ARE TAGGABLE: a new thread is seeded with the channel's
@@ -159,39 +162,6 @@ const scriptDirectory = () => {
 
 // ── Seeds ───────────────────────────────────────────────────────────────────
 
-const grantLlmKey = async (agentId: string, suffix: string) => {
-  const secret = await db.secret.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      name: `${P}${suffix}`,
-      type: "anthropic",
-      encryptedValue: "enc",
-      hostPattern: "api.anthropic.com",
-      metadata: { authMode: "api-key" },
-    },
-    select: { id: true },
-  });
-  await db.policyRuleV2.create({
-    data: {
-      scope: "workspace",
-      workspaceId: WORKSPACE,
-      status: "published",
-      generation: 1,
-      priority: 10,
-      isDefault: false,
-      enabled: true,
-      source: "equipment",
-      logicalId: `${P}${suffix}`,
-      name: `${P}${suffix}`,
-      action: "allow",
-      requireApproval: false,
-      identities: { create: [{ agentId }] },
-      targets: { create: [{ kind: "secret", secretId: secret.id }] },
-    },
-  });
-};
-
 const seedIntegration = async () =>
   (await db.channelIntegration.findFirst({
     where: { organizationId: ORG, provider: "slack" },
@@ -212,7 +182,7 @@ const seedIntegration = async () =>
 /** An agent with an active presence in an APPROVED (or given-state) channel. */
 const seedStage = async (
   suffix: string,
-  channelState: "approved" | "members_only" = "approved",
+  channelState: "approved" | "blocked" = "approved",
 ) => {
   const agent = await db.agent.create({
     data: {
@@ -225,7 +195,11 @@ const seedStage = async (
     },
     select: { id: true },
   });
-  await grantLlmKey(agent.id, suffix);
+  await grantModelKey(db, {
+    workspaceId: WORKSPACE,
+    agentId: agent.id,
+    name: `${P}${suffix}`,
+  });
   const integration = await seedIntegration();
   const presence = await db.agentChannel.create({
     data: {
@@ -413,14 +387,14 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the door", () => {
     expect((await conversationOf(stage.agentId)).appTurnStreak).toBe(1);
   });
 
-  it("ignores an app SILENTLY in a members_only channel — no refusal text, no turn", async () => {
-    const stage = await seedStage("members", "members_only");
+  it("ignores an app SILENTLY in a blocked channel: no refusal text, no turn", async () => {
+    const stage = await seedStage("members", "blocked");
     const result = await send(stage.presenceId, appMention("101.0000", "hi"));
     expect(result.kind).toBe("message");
     if (result.kind !== "message") throw new Error("unreachable");
     expect(result.outcome).toEqual({
       kind: "ignored",
-      reason: "app-members-only",
+      reason: "reach-blocked",
     });
     expect(
       await db.turn.count({
@@ -480,7 +454,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the door", () => {
     ).toBe(0);
   });
 
-  it("a BLOCKED person-level row for the app's ref beats the open channel (the precedence law)", async () => {
+  it("a person-level 'Not allowed' row for the app's ref does NOT reach into an open channel (one setting per surface)", async () => {
     const stage = await seedStage("blocked");
     await reach.ensurePersonGrant({
       agentId: stage.agentId,
@@ -495,10 +469,8 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the door", () => {
     const result = await send(stage.presenceId, appMention("104.0000", "hi"));
     expect(result.kind).toBe("message");
     if (result.kind !== "message") throw new Error("unreachable");
-    expect(result.outcome).toEqual({
-      kind: "ignored",
-      reason: "person-reach-denied",
-    });
+    // Admitted as a guest turn, exactly like an app with no person row.
+    expect(result.outcome.kind).toBe("turn");
   });
 });
 
@@ -689,11 +661,11 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
     });
     // The owner's card went out.
     expect(slackCallsFor("chat.postMessage").length).toBe(postsBefore + 1);
-    // The lift has no always-allow upgrade (it IS the standing decision), so
-    // the Slack card and the bell row both offer approve/reject only.
+    // The lift is a one-off question (it IS the standing decision about the
+    // chain), so the Slack card and the bell row both read Approve / Reject.
     const blocks = slackCallsFor("chat.postMessage").at(-1)?.form.get("blocks");
     expect(blocks).toContain("action_approve");
-    expect(blocks).not.toContain("action_approve_always");
+    expect(blocks).not.toContain("Always allow");
     const bell = await (
       await import("./workspace-approvals-service")
     ).listWorkspacePendingChannelApprovals(WORKSPACE);
@@ -701,7 +673,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       expect.objectContaining({
         kind: "action",
         id: holds[0]!.id,
-        offersAlwaysAllow: false,
+        standingChoice: false,
       }),
     );
 
@@ -763,7 +735,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "executed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
 
     // The replay: the parked 7th message is now a turn, nobody typed - and
     // it is the round's FIRST turn, so the streak reads 1 after it lands.
@@ -888,10 +860,10 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
     const turnsBefore = await db.turn.count({
       where: { conversation: { agentId: stage.agentId } },
     });
-    // The room closes to strangers AFTER the card was posted.
+    // The room is blocked AFTER the card was posted.
     await db.agentReachGrant.updateMany({
       where: { agentId: stage.agentId, subjectKind: "space" },
-      data: { state: "members_only" },
+      data: { state: "blocked" },
     });
 
     const decided = await approvals.decideActionApproval({
@@ -899,7 +871,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "failed" });
+    expect(decided).toMatchObject({ kind: "decided", status: "failed" });
     const row = await db.actionApproval.findUniqueOrThrow({
       where: { id: hold.id },
     });
@@ -915,7 +887,7 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
     ).toBe(turnsBefore);
   });
 
-  it("VERIFY AT REPLAY: a card approved after the app was BLOCKED fails the same way", async () => {
+  it("VERIFY AT REPLAY: a person-level block on the app is NOT consulted in a channel - the card still resumes", async () => {
     const stage = await seedStage("stale-app");
     const thread = "207.0000";
     for (let i = 1; i <= cap.APP_TURN_CAP + 1; i += 1) {
@@ -924,7 +896,9 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
     const hold = await db.actionApproval.findFirstOrThrow({
       where: { agentId: stage.agentId, action: cap.APP_TURN_CONTINUE_ACTION },
     });
-    expect(hold.payload).toMatchObject({ appExternalRef: APP_USER });
+    expect(hold.payload).toMatchObject({
+      speaker: { kind: "app", externalRef: APP_USER },
+    });
     await reach.ensurePersonGrant({
       agentId: stage.agentId,
       integrationId: stage.integrationId,
@@ -941,13 +915,8 @@ describe.skipIf(!PROOF_URL)("app conversations (5a) — the app-turn cap", () =>
       decision: "approve",
       deciderUserId: OWNER,
     });
-    expect(decided).toEqual({ kind: "decided", status: "failed" });
-    const row = await db.actionApproval.findUniqueOrThrow({
-      where: { id: hold.id },
-    });
-    expect(row.reason).toContain("blocked this app");
-    expect((await conversationOf(stage.agentId)).appTurnStreak).toBe(
-      cap.APP_TURN_CAP + 1,
-    );
+    // One setting per surface: the channel is still approved, so the
+    // person row (which governs direct messages only) changes nothing here.
+    expect(decided).toMatchObject({ kind: "decided", status: "executed" });
   });
 });

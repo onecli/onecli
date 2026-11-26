@@ -36,6 +36,9 @@ test("an empty file gets every SECRET_SPECS secret, in valid shapes", () => {
   const again = new EnvFile(env.path);
   assert.match(again.get("RUNNER_TOKEN"), /^rnr_[0-9a-f]{64}$/);
   assert.match(again.get("CHANNEL_ADAPTER_TOKEN"), /^cha_[0-9a-f]{64}$/);
+  // The supervisor-session keyring: `kid.secret`, so a later rotation can
+  // append `,kid2.secret2` without touching the first key's meaning.
+  assert.match(again.get("RUNNER_SESSION_KEY"), /^k1\.[0-9a-f]{64}$/);
   for (const key of [
     "BETTER_AUTH_SECRET",
     "SECRET_ENCRYPTION_KEY",
@@ -46,7 +49,7 @@ test("an empty file gets every SECRET_SPECS secret, in valid shapes", () => {
 
 test("valid existing values are never touched — the file is byte-identical", () => {
   const key = Buffer.alloc(32, 7).toString("base64");
-  const content = `BETTER_AUTH_SECRET=keep-me-exactly\nSECRET_ENCRYPTION_KEY=${key}\nGATEWAY_INTERNAL_SECRET=alive\nRUNNER_TOKEN=rnr_custom\nCHANNEL_ADAPTER_TOKEN=cha_custom\nSSH_TERMINATOR_SECRET=ssh-secret-kept\n`;
+  const content = `BETTER_AUTH_SECRET=keep-me-exactly\nSECRET_ENCRYPTION_KEY=${key}\nGATEWAY_INTERNAL_SECRET=alive\nRUNNER_TOKEN=rnr_custom\nCHANNEL_ADAPTER_TOKEN=cha_custom\nRUNNER_SESSION_KEY=k1.custom\nSSH_TERMINATOR_SECRET=ssh-secret-kept\n`;
   const env = load(content);
   const { generated, replaced } = run(env);
   assert.deepEqual(generated, []);

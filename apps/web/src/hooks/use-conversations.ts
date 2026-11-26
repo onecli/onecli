@@ -8,22 +8,17 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { conversations } from "@/lib/api";
+import { ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/keys";
 import type {
   AttachmentMeta,
   TranscriptPage,
   TurnsPage,
 } from "@/lib/api/types";
-import { hasUnsettledTurn } from "@/lib/chat/turns";
+import { turnsPollInterval } from "@/lib/chat/turns";
 
-/**
- * A staged upload riding a send: the server row's metadata plus the local
- * object URL the optimistic bubble previews with (the settled row swaps to
- * the authenticated blob fetch).
- */
-export interface OutgoingAttachment extends AttachmentMeta {
-  objectUrl?: string;
-}
+/** A staged server upload riding a send. Local preview URLs stay composer-owned. */
+export type OutgoingAttachment = AttachmentMeta;
 
 export interface OutgoingMessage {
   message: string;
@@ -43,8 +38,10 @@ export interface OutgoingMessage {
  * anything is UNSETTLED — an active turn or a `joining` follow-up: a
  * follow-up that promotes and then born-fails emits no stream event either,
  * and a poll that stopped at the active turn's close would leave its bubble
- * reading "received" forever. An errored read stops the loop rather than
- * hammering a 404 (the `use-agents.ts` poll guard).
+ * reading "received" forever. Faster while a turn has not reached the agent
+ * (`turnsPollInterval`): its machine may be booting, and the poll is what
+ * flips the caption the moment it runs. An errored read stops the loop rather
+ * than hammering a 404 (the `use-agents.ts` poll guard).
  *
  * Windowed since the lazy-history change: this is the NEWEST window (the
  * server's default, ~50 turns — the industry chat-open size), not the whole
@@ -56,11 +53,7 @@ export const useTurns = (conversationId: string) =>
     queryFn: () => conversations.turns(conversationId),
     enabled: conversationId.length > 0,
     refetchInterval: (query) =>
-      query.state.error
-        ? false
-        : hasUnsettledTurn(query.state.data?.turns)
-          ? 2_500
-          : false,
+      query.state.error ? false : turnsPollInterval(query.state.data?.turns),
     refetchIntervalInBackground: false,
   });
 
@@ -157,6 +150,25 @@ export const useDirectConversation = (agentId: string | undefined) =>
   });
 
 /**
+ * Open the agent's direct thread AHEAD of the chat page: the onboarding
+ * flow calls it the moment the agent exists, so the greeting the door posts
+ * is dispatched while the person is still on the flow and is on screen when
+ * they arrive. Workspace-scoped (the onboarding URL carries none). Quiet
+ * and fire-and-forget: the chat page's own `useDirectConversation` lands on
+ * the same row either way, so a failure here costs nothing visible.
+ */
+export const useOpenDirectThread = () =>
+  useMutation({
+    mutationFn: ({
+      agentId,
+      workspaceId,
+    }: {
+      agentId: string;
+      workspaceId: string;
+    }) => conversations.ensureDirect(agentId, { workspaceId }),
+  });
+
+/**
  * Send a message WHATEVER the agent is doing — the mid-run door. A busy
  * conversation accepts the message as a follow-up (it steers into the live
  * turn or runs next) instead of 409ing, so the only refusal left is the
@@ -182,7 +194,7 @@ export const useSendMessage = (conversationId: string) => {
         message,
         attachments?.map((attachment) => attachment.id),
       ),
-    onSuccess: (outcome, variables) => {
+    onSuccess: (outcome) => {
       qc.setQueryData<TurnsPage>(
         queryKeys.conversations.turns(conversationId),
         (page) =>
@@ -190,17 +202,6 @@ export const useSendMessage = (conversationId: string) => {
             ? { ...page, turns: [...page.turns, outcome.turn] }
             : page,
       );
-      // Hand the composer's local previews to the blob cache: the SETTLED row
-      // carries metadata only, so without this its chips would re-download
-      // bytes this browser just uploaded. Ownership transfers with them — the
-      // cache revokes each URL when it evicts the entry.
-      for (const attachment of variables.attachments ?? []) {
-        if (!attachment.objectUrl) continue;
-        qc.setQueryData(
-          queryKeys.attachments.blob(conversationId, attachment.id),
-          attachment.objectUrl,
-        );
-      }
     },
     onSettled: () => {
       qc.invalidateQueries({
@@ -220,5 +221,32 @@ export const useAbortTurn = (conversationId: string) => {
       });
     },
     onError: (err) => toast.error(err.message || "Failed to stop"),
+  });
+};
+
+/**
+ * SEND NOW on a waiting mid-run follow-up. The answer comes
+ * back on the stream. A 409 is a state, not a failure: the message was read
+ * or the run ended a moment before the click landed (another tab, a race
+ * with the run itself), so it is said quietly with the server's own words.
+ * Either way the turns list is refreshed, and the bubble catches up with
+ * the row.
+ */
+export const useSendNow = (conversationId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: conversations.sendNow,
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info(err.message);
+        return;
+      }
+      toast.error(err.message || "Failed to send now");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.conversations.turns(conversationId),
+      });
+    },
   });
 };

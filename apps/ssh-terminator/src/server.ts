@@ -18,6 +18,7 @@ import ssh2, {
 const { Server } = ssh2;
 import { authenticate, certificateLineOf } from "./auth";
 import { ResolverRefusedError, type TerminatorBackend } from "./backend/types";
+import { boundedWait } from "./bounded-wait";
 import {
   SessionOpenRefusedError,
   type ControlPlaneClient,
@@ -47,7 +48,7 @@ const log = logger.child({ component: "terminator-server" });
  * backend with the real OpenSSH client dialing in.
  */
 
-/** ssh2 transport keepalives — the NLB idles flows out around 350s, and the
+/** ssh2 transport keepalives — load balancers idle quiet flows out, and the
  * exec side is separately pinged by the backend. */
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 6;
@@ -58,8 +59,8 @@ const KEEPALIVE_COUNT_MAX = 6;
  * with a loaded agent burns one `none` probe plus TWO events per candidate
  * key (publickey query, then the signed attempt), so a ~10-key agent is
  * ~21 events of legitimate traffic. 24 clears that with headroom; anything
- * past it is a probe, and ssh2 itself enforces no cap (step 6 — the
- * auth-failure amplification path).
+ * past it is a probe, and ssh2 itself enforces no cap (the auth-failure
+ * amplification path).
  */
 const MAX_AUTH_ATTEMPTS_PER_CONNECTION = 24;
 
@@ -73,7 +74,7 @@ const MAX_AUTH_ATTEMPTS_PER_CONNECTION = 24;
  * flushing what it buffered — so `ssh <agent> <cmd>`, `scp`, `sftp` and VS
  * Code Remote all reported a bare "Received disconnect … :11:" with an empty
  * description while an interactive shell (which drains differently) showed the
- * reason fine. Measured on the dev live gate, packet-traced with `ssh -vvv`
+ * reason fine. Measured live, packet-traced with `ssh -vvv`
  * ("rcvd ext data 59" arriving, never printed). Draining the channel first
  * puts the DISCONNECT in a later batch, so the reason survives.
  */
@@ -142,25 +143,6 @@ export const createTerminatorServer = <T>(
   const connections = new Set<Connection>();
   const sessions = new Set<ConnectionSession<T>>();
 
-  /** Resolves when `settle` fires or the bound elapses — never rejects, so a
-   * stalled peer cannot pin a refused connection open. */
-  const within = (
-    settle: (done: () => void) => void,
-    timeoutMs: number,
-  ): Promise<void> =>
-    new Promise<void>((resolve) => {
-      let finished = false;
-      const finish = (): void => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        resolve();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      timer.unref();
-      settle(finish);
-    });
-
   /** A short human line; PTY channels get it inline, exec/sftp on stderr.
    * Resolves once the bytes have reached the socket (or the write threw). */
   const writeNotice = (
@@ -168,7 +150,7 @@ export const createTerminatorServer = <T>(
     hasPty: boolean,
     message: string,
   ): Promise<void> =>
-    within((done) => {
+    boundedWait((done) => {
       try {
         if (hasPty) channel.write(`\r\n${message}\r\n`, () => done());
         else channel.stderr.write(`${message}\n`, () => done());
@@ -191,7 +173,7 @@ export const createTerminatorServer = <T>(
     message: string,
   ): Promise<void> => {
     await writeNotice(channel, hasPty, message);
-    const drained = within(
+    const drained = boundedWait(
       (done) => channel.once("close", done),
       REFUSAL_DRAIN_TIMEOUT_MS,
     );
@@ -259,10 +241,10 @@ export const createTerminatorServer = <T>(
         await dial();
       } catch (error) {
         // A PRE-attach dial failure means the cached exec credential is
-        // stale — the GC reaped this session's trio (its 2h age cap, or the
-        // pinned pod churned) and the API server refused the upgrade.
+        // stale — the broker reaped this session's credential (its age cap,
+        // or the sandbox moved) and the upgrade was refused.
         // Invalidate and re-resolve exactly once: resolveSession recreates a
-        // missing trio, so the honest fix is a fresh dial, not an error.
+        // missing credential, so the honest fix is a fresh dial, not an error.
         // Post-attach failures and the classified errors keep their arms.
         if (
           attached ||
@@ -351,7 +333,7 @@ export const createTerminatorServer = <T>(
     const release = deps.limits.admit(info.ip);
     if (!release) {
       // Hint-free by design: capped or rate-limited callers learn nothing.
-      // Counted (drained, step 6): a DoS and a capped developer are
+      // Counted (drained): a DoS and a capped developer are
       // otherwise identical to nothing happening.
       deps.metrics.preauthRefusal();
       client.end();
@@ -374,7 +356,7 @@ export const createTerminatorServer = <T>(
     client.on("authentication", (ctx) => {
       // ssh2 enforces no attempt cap of its own: one admitted connection
       // could otherwise spam auth attempts for the whole pre-auth window,
-      // each one a counted failure (step-6 review — the amplification path).
+      // each one a counted failure (the amplification path).
       authAttempts += 1;
       if (authAttempts > MAX_AUTH_ATTEMPTS_PER_CONNECTION) {
         client.end();

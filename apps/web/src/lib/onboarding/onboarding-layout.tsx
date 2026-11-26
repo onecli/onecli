@@ -18,7 +18,6 @@ import { OnboardingProvider } from "@/lib/onboarding/onboarding-context";
 import { type OnboardingProgress } from "@/lib/onboarding/steps";
 import { FlowChrome } from "@/lib/onboarding/_components/flow-chrome";
 import { OnboardingFooter } from "@/lib/onboarding/_components/onboarding-footer";
-import { OnboardingEscapeHatch } from "@/lib/onboarding/_components/onboarding-escape-hatch";
 
 interface OnboardingBoot {
   progress: OnboardingProgress;
@@ -46,9 +45,9 @@ export default function OnboardingLayout({
     }
 
     const bootFlow = async () => {
-      // Onboarding is the billing editions' install walkthrough — nothing
-      // routes here without billing, so a direct visit bounces home before
-      // any billing action runs.
+      // Onboarding is the billing editions' first-login walkthrough. Nothing
+      // routes here without billing, so a self-hosted direct visit bounces
+      // home before any billing action runs.
       if (!CAPS.billing) {
         router.replace(await getActiveWorkspacePath());
         return;
@@ -142,9 +141,10 @@ export default function OnboardingLayout({
             initialWorkspaceId={boot.workspaceId}
           >
             <FlowChrome>{children}</FlowChrome>
-            <OnboardingFooter>
-              <OnboardingEscapeHatch />
-            </OnboardingFooter>
+            {/* No escape hatch: the first agent is the product's front door,
+                so the only ways out of onboarding are creating one or signing
+                out. Connecting a BYO agent happens from the dashboard after. */}
+            <OnboardingFooter />
           </OnboardingProvider>
         ) : (
           <>

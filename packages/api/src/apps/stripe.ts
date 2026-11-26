@@ -120,8 +120,10 @@ const resolveMetadata = async (
 
 export const stripe: AppDefinition = {
   id: "stripe",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/stripe",
   name: "Stripe",
   icon: "/icons/stripe.svg",
+  apiDocsUrl: "https://docs.stripe.com/api",
   description:
     "Payments, customers, subscriptions, invoices, and refunds on your Stripe account.",
   connectionMethod: {

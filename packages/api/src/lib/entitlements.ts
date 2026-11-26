@@ -35,6 +35,7 @@ export const ENTERPRISE_FEATURES = {
   members_directory: "Members directory API",
   budget: "Spend budgets",
   ha: "Multi-instance operation",
+  attachments_s3: "Object-storage attachments",
 } as const;
 
 export type EnterpriseFeature = keyof typeof ENTERPRISE_FEATURES;

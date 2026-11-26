@@ -1,0 +1,62 @@
+{{- /*
+gateway.networking.k8s.io/v1 HTTPRoute for externalUrl: the same split as the
+Ingress, with the prefix strip expressed natively (URLRewrite
+ReplacePrefixMatch), so it works on every conformant implementation (EKS
+with the AWS Load Balancer Controller's Gateway API support, Envoy Gateway,
+Cilium, Istio, ...). Rules carry no explicit precedence: the spec orders
+Exact before PathPrefix and longer prefixes first.
+*/ -}}
+{{- if .Values.httpRoute.enabled }}
+{{- $web := include "onecli.component" (dict "root" . "component" "web") }}
+{{- $api := include "onecli.component" (dict "root" . "component" "api") }}
+{{- $gateway := include "onecli.component" (dict "root" . "component" "gateway") }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "onecli.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.httpRoute.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  hostnames:
+    - {{ include "onecli.externalHost" . | quote }}
+  rules:
+    - matches:
+        {{- range (include "onecli.routes.webAuthPages" . | fromYamlArray) }}
+        - path: { type: Exact, value: {{ . | quote }} }
+        {{- end }}
+        - path: { type: PathPrefix, value: /auth/login/ }
+      backendRefs:
+        - name: {{ $web }}
+          port: 10254
+    - matches:
+        {{- range (include "onecli.routes.apiPrefixes" . | fromYamlArray) }}
+        - path: { type: PathPrefix, value: {{ . | quote }} }
+        {{- end }}
+      backendRefs:
+        - name: {{ $api }}
+          port: 10256
+    - matches:
+        - path: { type: PathPrefix, value: /gw }
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path: { type: ReplacePrefixMatch, replacePrefixMatch: / }
+      backendRefs:
+        - name: {{ $gateway }}
+          port: 10255
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - name: {{ $web }}
+          port: 10254
+{{- end }}

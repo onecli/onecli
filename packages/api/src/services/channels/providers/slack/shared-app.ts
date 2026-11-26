@@ -64,10 +64,6 @@ export const slackAppManagerApproved = (): boolean => {
  * complete, the dashboard advertises "Add to Slack" (config beats edition,
  * the same posture rule as `publicApiUrl`). All four unset = the app simply
  * doesn't exist, which is the self-host default.
- *
- * Env names use SLACK_SHARED_* to keep clear of the legacy connector's
- * SLACK_CLIENT_ID/SECRET pair (apps/slack.ts), which is a different app with
- * different scopes.
  */
 export interface SlackSharedAppConfig {
   clientId: string;
@@ -139,7 +135,7 @@ export const buildSharedAppManifest = (input: {
         // the app-manager user scopes on a non-enrolled team fails creation
         // with "Illegal user scopes found" — stricter than the authorize URL,
         // which grants the scopes and refuses only at spend time
-        // (invalid_manager_app; live-verified on dev, 2026-08-26).
+        // (invalid_manager_app; verified against Slack, 2026-08-26).
         ...(slackAppManagerApproved() ? { user: [...SHARED_USER_SCOPES] } : {}),
       },
       redirect_urls: [inbound("oauth/callback")],

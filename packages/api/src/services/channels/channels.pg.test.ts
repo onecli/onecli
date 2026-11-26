@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -10,6 +13,7 @@ import {
   vi,
 } from "vitest";
 
+import type { AgentEvent } from "@onecli/agent-protocol";
 import { proofDatabaseUrl } from "../../testing/pg-proof.js";
 
 /**
@@ -44,6 +48,7 @@ type Providers = typeof import("../../providers");
 type Receipts = typeof import("./turn-receipt-service");
 type Validations = typeof import("../../validations/conversation");
 type DecryptCache = typeof import("./channel-decrypt-cache");
+type DueWork = typeof import("../due-work");
 
 let db: Db;
 let integrations: Integrations;
@@ -56,6 +61,7 @@ let apiKeys: ApiKeys;
 let receipts: Receipts;
 let validations: Validations;
 let decryptCache: DecryptCache;
+let dueWork: DueWork;
 let getCrypto: Providers["getCrypto"];
 let initSelfUrl: Providers["initSelfUrl"];
 let initAttachmentStore: Providers["initAttachmentStore"];
@@ -73,6 +79,10 @@ const MEMBER = `${P}member`;
 const OUTSIDER = `${P}outsider`;
 /** A member with status "suspended" — treated as a non-member everywhere. */
 const SUSPENDED = `${P}suspended`;
+/** A runner row for the sandbox the provider-side-removal suite parks under
+ * an agent (the home bump needs a sandbox to move). Sandboxes cascade from
+ * their agent; the runner is reaped by `reset`. */
+const RUNNER = `${P}runner`;
 /** Name carries control chars on purpose — the cleanName test's subject. */
 const CTRL_NAME_USER = `${P}ctrl`;
 
@@ -282,6 +292,11 @@ const startGatewayFake = (): Promise<string> =>
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 const reset = async () => {
+  // No FK: include the deleted-organization fixture, whose snapshot survives
+  // its parent cascade and must not reserve the next test run's app identity.
+  await db.channelCleanup.deleteMany({
+    where: { organizationId: { startsWith: P } },
+  });
   // Prefix-fenced: the proof database is shared with the other pg suites.
   await db.auditLog.deleteMany({ where: { userId: { startsWith: P } } });
   await db.channelAdapter.deleteMany({
@@ -295,6 +310,7 @@ const reset = async () => {
   // Presences, thread links, ingested events and approval prompts cascade
   // from the agents; user links cascade from the integrations.
   await db.agent.deleteMany({ where: { identifier: { startsWith: P } } });
+  await db.runner.deleteMany({ where: { id: RUNNER } });
   await db.channelIntegration.deleteMany({
     where: { organizationId: { in: [ORG, OTHER_ORG] } },
   });
@@ -486,8 +502,8 @@ const linkUser = (
  * A channel's reach grant is a PRECONDITION (agent-reach-service): until a
  * human settles it, the agent answers nobody there - member or stranger.
  * These group-surface arms are about identity, not about reach, so they
- * settle the channel to `members_only` (the historical behavior they were
- * written against) and then assert on the lane they actually test.
+ * settle the channel to `approved` and then assert on the lane they
+ * actually test.
  */
 const settleChannel = (
   agentId: string,
@@ -501,7 +517,7 @@ const settleChannel = (
       provider: "slack",
       subjectKind: "space",
       externalRef,
-      state: "members_only",
+      state: "approved",
       cardRefs: [],
     },
     select: { id: true },
@@ -568,10 +584,10 @@ beforeAll(async () => {
   process.env.DATABASE_URL = PROOF_URL;
   // Pin the edition BEFORE any dynamic import below loads `lib/env`: this
   // suite's assertions are onprem semantics (factory AES crypto, flat-team
-  // access — no roleResolver). Vitest isolates the module graph per file but
-  // `process.env` LEAKS across files in a reused worker, so without this pin
-  // the suite inherits whatever edition the previous file left behind —
-  // green or red by scheduling (CI's ambient NEXT_PUBLIC_EDITION is cloud).
+  // access — no roleResolver). Every file starts from the lane's edition
+  // (the hermetic setup resets env per file), and CI's cloud lane carries
+  // NEXT_PUBLIC_EDITION=cloud, so the pin is what makes this suite onprem in
+  // both lanes.
   process.env.EDITION = "onprem";
   process.env.NEXT_PUBLIC_EDITION = "onprem";
   process.env.SECRET_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -596,6 +612,7 @@ beforeAll(async () => {
   receipts = await import("./turn-receipt-service");
   validations = await import("../../validations/conversation");
   decryptCache = await import("./channel-decrypt-cache");
+  dueWork = await import("../due-work");
   ({ getCrypto, initSelfUrl, initAttachmentStore } =
     await import("../../providers"));
   // This suite imports services directly (never createApiApp), so
@@ -682,11 +699,21 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!PROOF_URL) return;
   await reset();
+  await db.runner.create({
+    data: { id: RUNNER, name: `${P}runner`, token: `rnr_${P}runner` },
+  });
   // Ciphertexts repeat across tests (deterministic fake crypto), so a stale
   // cache entry would make decrypt-count assertions vacuous.
   decryptCache.resetDecryptCacheForTests();
   slackCalls = [];
-  slackHandlers = {};
+  slackHandlers = {
+    // Every socket paste proves its app-level token can open a socket. A
+    // live token is the default; a test that wants a refusal scripts one.
+    "apps.connections.open": () => ({
+      ok: true,
+      url: "wss://wss-primary.slack.com/link/?ticket=t",
+    }),
+  };
   cdnCalls = [];
   cdnHandlers = {};
   gatewayCalls = [];
@@ -1051,9 +1078,10 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
   });
 
   it("a REFUSED rotation clears the credential and surfaces the re-paste state", async () => {
-    await seedIntegration({
+    const rotatedAt = new Date(Date.now() - 60_000);
+    const integration = await seedIntegration({
       credentials: await integrationCredentials(60),
-      rotatedAt: new Date(),
+      rotatedAt,
     });
     slackHandlers["tooling.tokens.rotate"] = () => ({
       ok: false,
@@ -1063,6 +1091,22 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
     await expect(
       integrations.withFreshIntegrationCredentials(ORG, "slack", async () => 1),
     ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+    // A permanent clear keeps the failure timestamp EXACTLY (not a fresh
+    // one), and never rebinds the tenant.
+    expect(
+      await db.channelIntegration.findUniqueOrThrow({
+        where: { id: integration.id },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
+      }),
+    ).toEqual({
+      credentials: null,
+      credentialsRotatedAt: rotatedAt,
+      externalId: "T111",
+    });
 
     // The needs-token derivation: connected once (rotatedAt set) but the
     // credential is now gone → hasCredentials false + needsCredentials true.
@@ -1096,7 +1140,11 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
       slackHandlers["tooling.tokens.rotate"] = () => answer;
       const before = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
 
       const got = await integrations.withFreshIntegrationCredentials(
@@ -1110,10 +1158,16 @@ describe.skipIf(!PROOF_URL)("withFreshIntegrationCredentials", () => {
       expect(slackCallsFor("tooling.tokens.rotate")).toHaveLength(1);
       const after = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
       expect(after.credentials).toBe(before.credentials);
       expect(after.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      // A deferral never rebinds the tenant.
+      expect(after.externalId).toBe(before.externalId);
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
         hasCredentials: true,
@@ -1341,9 +1395,10 @@ describe.skipIf(!PROOF_URL)(
     });
 
     it("a REFUSED sweep rotation clears the credential and counts failed — re-paste surfaces", async () => {
+      const rotatedAt = SEVEN_HOURS_AGO();
       const integration = await seedIntegration({
         credentials: await integrationCredentials(12 * 3600),
-        rotatedAt: SEVEN_HOURS_AGO(),
+        rotatedAt,
       });
       slackHandlers["tooling.tokens.rotate"] = () => ({
         ok: false,
@@ -1355,9 +1410,11 @@ describe.skipIf(!PROOF_URL)(
       expect(result).toEqual({ rotated: 0, failed: 1, deferred: 0 });
       const row = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true },
+        select: { credentials: true, credentialsRotatedAt: true },
       });
       expect(row.credentials).toBeNull();
+      // The failure timestamp is kept exactly, not refreshed.
+      expect(row.credentialsRotatedAt).toEqual(rotatedAt);
       // The needs-token derivation: rotatedAt still set + credentials gone.
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
@@ -1382,7 +1439,11 @@ describe.skipIf(!PROOF_URL)(
       });
       const before = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
 
       expect(await integrations.rotateStaleIntegrations()).toEqual({
@@ -1392,10 +1453,15 @@ describe.skipIf(!PROOF_URL)(
       });
       const kept = await db.channelIntegration.findUniqueOrThrow({
         where: { id: integration.id },
-        select: { credentials: true, credentialsRotatedAt: true },
+        select: {
+          credentials: true,
+          credentialsRotatedAt: true,
+          externalId: true,
+        },
       });
       expect(kept.credentials).toBe(before.credentials);
       expect(kept.credentialsRotatedAt).toEqual(before.credentialsRotatedAt);
+      expect(kept.externalId).toBe(before.externalId);
       const [view] = await integrations.getIntegrationView(ORG);
       expect(view).toMatchObject({
         hasCredentials: true,
@@ -2001,6 +2067,8 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
       clientId: "client-1",
       clientSecret: "client-secret-1",
       signingSecret: "signing-secret-1",
+      // The manifest carried our redirect: a resume can rebuild the URL.
+      oauthRedirect: true,
     });
   });
 
@@ -2078,7 +2146,7 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     expect(slackCalls).toHaveLength(0);
   });
 
-  it("an explicit socket request on events posture stamps socket", async () => {
+  it("an explicit socket request on events posture stamps socket, and installs by consent", async () => {
     initSelfUrl(EVENTS_SELF_URL);
     await seedIntegration({
       credentials: await integrationCredentials(12 * 3600),
@@ -2095,11 +2163,25 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
     );
 
     expect(result.transport).toBe("socket");
-    expect(result.installUrl).toBeNull();
+    // A public HTTPS origin means Slack accepts our redirect, so the socket
+    // app gets the same one-click consent URL as events.
+    expect(result.installUrl).toContain("client_id=client-1");
+    expect(result.installUrl).toContain("&state=");
     const manifest = JSON.parse(
       slackCallsFor("apps.manifest.create")[0]!.form.get("manifest")!,
-    ) as { settings: { socket_mode_enabled: boolean } };
+    ) as {
+      settings: {
+        socket_mode_enabled: boolean;
+        event_subscriptions: { request_url?: string };
+      };
+      oauth_config: { redirect_urls?: string[] };
+    };
     expect(manifest.settings.socket_mode_enabled).toBe(true);
+    // Events still ride the socket: no inbound request URL is baked.
+    expect(manifest.settings.event_subscriptions.request_url).toBeUndefined();
+    expect(manifest.oauth_config.redirect_urls).toEqual([
+      `${EVENTS_SELF_URL}/v1/channels/slack/oauth/callback`,
+    ]);
     const row = await db.agentChannel.findUniqueOrThrow({
       where: { agentId_provider: { agentId, provider: "slack" } },
     });
@@ -2337,11 +2419,18 @@ describe.skipIf(!PROOF_URL)("createPresence (the guided arm)", () => {
       expect(
         await db.apiKey.findUnique({ where: { id: staleKey.id } }),
       ).toBeNull();
-      // ...and the remote uninstall was ATTEMPTED on the stale row's own
-      // decrypted credentials (HTTP no-op here — see the wrap comment above).
-      expect(uninstallCalls).toEqual([
-        { credentialsJson: staleCredentialsJson },
-      ]);
+      // ...and remote cleanup is queued with the stale row's encrypted
+      // credentials, without provider HTTP during this replacement.
+      expect(uninstallCalls).toEqual([]);
+      const queued = await db.channelCleanup.findUniqueOrThrow({
+        where: {
+          provider_externalId: { provider: "slack", externalId: "A-STALE" },
+        },
+      });
+      expect(queued.state).toBe("pending");
+      expect(await getCrypto().decrypt(queued.credentials!)).toBe(
+        staleCredentialsJson,
+      );
       expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
 
       // Exactly ONE presence remains: the fresh pending_setup row.
@@ -2727,6 +2816,799 @@ describe.skipIf(!PROOF_URL)(
         }),
       ).toBe(0);
     });
+
+    describe("the SOCKET arm: Allow, then one app-token paste", () => {
+      const startSocketInstall = async (label: string) => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent(label);
+        scriptManifestCreate();
+        const created = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+          "socket",
+        );
+        const state = new URL(created.installUrl!).searchParams.get("state")!;
+        slackHandlers["oauth.v2.access"] = () => ({
+          ok: true,
+          access_token: "xoxb-socket-bot",
+          bot_user_id: "UBOTS",
+          team: { id: "T111", name: "Acme" },
+        });
+        scriptAuthTest("T111", "Acme", "UBOTS", "donna");
+        return { agentId, state };
+      };
+
+      const callback = (state: string) =>
+        agentChannels.completePresenceFromOAuth({
+          state,
+          code: "slack-consent-code",
+          redirectUri: `${EVENTS_SELF_URL}/v1/channels/slack/oauth/callback`,
+        });
+
+      it("the consent stores the bot token but does NOT go live: no service key, still pending", async () => {
+        const { agentId, state } = await startSocketInstall("socket-oauth");
+
+        const completed = await callback(state);
+
+        expect(completed).toMatchObject({
+          awaitingTransportCredential: true,
+          agentId,
+          workspaceId: WORKSPACE,
+        });
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(completed.presenceId).toBe(row.id);
+        // pending_setup is what keeps the adapter from dialing a socket it
+        // has no app-level token for.
+        expect(row.status).toBe("pending_setup");
+        expect(row.apiKeyId).toBeNull();
+        expect(row.identityRef).toBe("UBOTS");
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({ botToken: "xoxb-socket-bot", clientId: "client-1" });
+        expect(
+          await db.apiKey.count({
+            where: { userId: ADMIN, workspaceId: WORKSPACE, kind: "service" },
+          }),
+        ).toBe(0);
+      });
+
+      it("the app-token paste alone finishes it, after Slack accepts the token", async () => {
+        const { agentId, state } = await startSocketInstall("socket-finish");
+        await callback(state);
+
+        const presence = await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-socket-app" },
+          ADMIN,
+        );
+
+        expect(presence.status).toBe("active");
+        // The probe used the PASTED app token, not the bot token.
+        const [probe] = slackCallsFor("apps.connections.open");
+        expect(probe?.token).toBe("xapp-socket-app");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.apiKeyId).not.toBeNull();
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({
+          botToken: "xoxb-socket-bot",
+          appToken: "xapp-socket-app",
+        });
+      });
+
+      it("a token Slack refuses is NOT stored and the presence stays pending", async () => {
+        const { agentId, state } = await startSocketInstall("socket-badapp");
+        await callback(state);
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "invalid_auth",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-revoked" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).not.toHaveProperty("appToken");
+      });
+
+      it("an app-token-only paste BEFORE the install is refused (no bot token to borrow)", async () => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-premature");
+        scriptManifestCreate();
+        await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+          "socket",
+        );
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-early" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+
+      it("an app-token-only paste on an EVENTS presence is refused", async () => {
+        initSelfUrl(EVENTS_SELF_URL);
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("events-apptoken-only");
+        scriptManifestCreate();
+        await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-x" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "UNPROCESSABLE" });
+      });
+
+      it("the paste door only ever completes the CALLER's agent: another workspace's agent is not found", async () => {
+        const { agentId, state } = await startSocketInstall("socket-fence");
+        await callback(state);
+
+        await expect(
+          agentChannels.completePresence(
+            "ws-foreign-tenant",
+            agentId,
+            "slack",
+            { appToken: "xapp-intruder" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({ code: "NOT_FOUND" });
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+
+      it("no public HTTPS origin: no consent URL and no redirect baked, so the two-token paste stays", async () => {
+        // Default posture: the http self-url Slack refuses as a redirect.
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-no-https");
+        scriptManifestCreate();
+
+        const created = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+        );
+
+        expect(created.transport).toBe("socket");
+        expect(created.installUrl).toBeNull();
+        const manifest = JSON.parse(
+          slackCallsFor("apps.manifest.create")[0]!.form.get("manifest")!,
+        ) as { oauth_config: { redirect_urls?: string[] } };
+        expect(manifest.oauth_config.redirect_urls).toBeUndefined();
+      });
+
+      const awaiting = async (agentId: string) => {
+        const view = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+        return view.presences[0]?.awaitingTransportCredential;
+      };
+
+      it("the view says the install awaits ONLY its app token, and stops once it lands", async () => {
+        const { agentId, state } = await startSocketInstall("socket-view");
+        // Before the Allow: nothing is installed, so nothing is awaited.
+        expect(await awaiting(agentId)).toBe(false);
+
+        await callback(state);
+        expect(await awaiting(agentId)).toBe(true);
+
+        await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-view" },
+          ADMIN,
+        );
+        expect(await awaiting(agentId)).toBe(false);
+      });
+
+      it("a DETACHED socket app is not taken for a waiting install: re-attach is Allow, then one paste", async () => {
+        // The regression: a keep-app detach leaves a pending socket row with
+        // a bot identity, and its cleanup uninstalls the app, so the stored
+        // bot token is dead. It must never be offered the one-field paste.
+        const { agentId, state } = await startSocketInstall("socket-redo");
+        await callback(state);
+        await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-first" },
+          ADMIN,
+        );
+        slackHandlers["apps.uninstall"] = () => ({ ok: true });
+        await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+          deleteRemote: false,
+        });
+        const shell = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(shell.status).toBe("pending_setup");
+        expect(shell.identityRef).toBe("UBOTS");
+
+        expect(await awaiting(agentId)).toBe(false);
+        const opensBefore = slackCallsFor("apps.connections.open").length;
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-stale" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message:
+            "Install the app in Slack first, then paste the app-level token.",
+        });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(
+          opensBefore,
+        );
+
+        // Re-attach: the same app, a fresh consent URL, then one paste.
+        const resumed = await agentChannels.createPresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          ADMIN,
+        );
+        expect(resumed.presenceId).toBe(shell.id);
+        expect(resumed.installUrl).toContain("client_id=client-1");
+        const resumeState = new URL(resumed.installUrl!).searchParams.get(
+          "state",
+        )!;
+        slackHandlers["oauth.v2.access"] = () => ({
+          ok: true,
+          access_token: "xoxb-socket-bot-2",
+          bot_user_id: "UBOTS",
+          team: { id: "T111", name: "Acme" },
+        });
+        await callback(resumeState);
+        // The consent dropped the old app token: one paste is owed again.
+        expect(await awaiting(agentId)).toBe(true);
+        const reconsented = await db.agentChannel.findUniqueOrThrow({
+          where: { id: shell.id },
+        });
+        expect(
+          JSON.parse(await getCrypto().decrypt(reconsented.credentials!)),
+        ).not.toHaveProperty("appToken");
+
+        const presence = await agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          { appToken: "xapp-second" },
+          ADMIN,
+        );
+        expect(presence.status).toBe("active");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { id: shell.id },
+        });
+        expect(
+          JSON.parse(await getCrypto().decrypt(row.credentials!)),
+        ).toMatchObject({
+          botToken: "xoxb-socket-bot-2",
+          appToken: "xapp-second",
+        });
+      });
+
+      it("the two-token paste checks the app token with Slack too, before anything is stored", async () => {
+        // Without HTTPS the guided create gives no consent URL: both tokens
+        // are pasted, and a refused app token must not activate the agent.
+        await seedIntegration({
+          credentials: await integrationCredentials(12 * 3600),
+        });
+        const agentId = await seedAgent("socket-two-paste");
+        scriptManifestCreate();
+        await agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN);
+        scriptAuthTest("T111", "Acme", "UBOTS", "donna");
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "missing_scope",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { botToken: "xoxb-pasted", appToken: "xapp-noscope" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("didn't accept"),
+        });
+        const [probe] = slackCallsFor("apps.connections.open");
+        expect(probe?.token).toBe("xapp-noscope");
+        const row = await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        });
+        expect(row.status).toBe("pending_setup");
+        expect(row.apiKeyId).toBeNull();
+      });
+
+      it("Slack's outage codes read as 'try again', not as a wrong token", async () => {
+        const { agentId, state } = await startSocketInstall("socket-outage");
+        await callback(state);
+        slackHandlers["apps.connections.open"] = () => ({
+          ok: false,
+          error: "service_unavailable",
+        });
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xapp-fine" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("Couldn't reach Slack"),
+        });
+        expect(await awaiting(agentId)).toBe(true);
+      });
+
+      it("a ROTATING app token is refused before any Slack call: it would expire in 12 hours", async () => {
+        const { agentId, state } = await startSocketInstall("socket-rotating");
+        await callback(state);
+
+        await expect(
+          agentChannels.completePresence(
+            WORKSPACE,
+            agentId,
+            "slack",
+            { appToken: "xoxe.xapp-1-rotating" },
+            ADMIN,
+          ),
+        ).rejects.toMatchObject({
+          code: "UNPROCESSABLE",
+          message: expect.stringContaining("rotates"),
+        });
+        expect(slackCallsFor("apps.connections.open")).toHaveLength(0);
+      });
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "completeAgentInstallFromCode (an install begun in Slack, no state)",
+  () => {
+    /** A waiting presence (events unless `transport` says otherwise) whose
+     * stored client creds are `client-<tag>` (or `credentials`, for an app
+     * with no OAuth client). `updatedAt` pins the newest-first order the door
+     * offers the code in. */
+    const seedWaitingApp = async (
+      agentId: string,
+      integrationId: string,
+      tag: string,
+      options: {
+        credentials?: Record<string, string | boolean>;
+        updatedAt?: Date;
+        transport?: "events" | "socket";
+      } = {},
+    ) =>
+      db.agentChannel.create({
+        data: {
+          agentId,
+          integrationId,
+          provider: "slack",
+          externalId: `A-${tag}`,
+          transport: options.transport ?? "events",
+          status: "pending_setup",
+          credentials: await getCrypto().encrypt(
+            JSON.stringify(
+              options.credentials ?? {
+                clientId: `client-${tag}`,
+                clientSecret: `secret-${tag}`,
+                signingSecret: `signing-${tag}`,
+              },
+            ),
+          ),
+          createdByUserId: ADMIN,
+          ...(options.updatedAt && { updatedAt: options.updatedAt }),
+        },
+        select: { id: true },
+      });
+
+    /** Slack's real behavior (verified live 2026-10-08): a code offered to
+     * the WRONG app answers `invalid_code` and stays spendable; only the app
+     * it was minted for gets the token. `refusals` scripts other answers per
+     * client (a deleted app's `invalid_client_id`). */
+    const scriptCodeFor = (
+      tag: string,
+      team = { id: "T111", name: "Acme" },
+      refusals: Record<string, string> = {},
+    ) => {
+      slackHandlers["oauth.v2.access"] = (call) => {
+        const basic = Buffer.from(
+          call.authorization!.slice("Basic ".length),
+          "base64",
+        ).toString("utf8");
+        const refusal = refusals[basic.split(":")[0]!];
+        if (refusal) return { ok: false, error: refusal };
+        return basic === `client-${tag}:secret-${tag}`
+          ? {
+              ok: true,
+              access_token: `xoxb-${tag}`,
+              bot_user_id: `UBOT-${tag}`,
+              team,
+            }
+          : { ok: false, error: "invalid_code" };
+      };
+      scriptAuthTest(team.id, team.name ?? "Acme", `UBOT-${tag}`, tag);
+    };
+
+    const exchangedClients = () =>
+      slackCallsFor("oauth.v2.access").map(
+        (c) =>
+          Buffer.from(c.authorization!.slice("Basic ".length), "base64")
+            .toString("utf8")
+            .split(":")[0],
+      );
+
+    const statusOf = async (agentId: string) =>
+      (
+        await db.agentChannel.findUniqueOrThrow({
+          where: { agentId_provider: { agentId, provider: "slack" } },
+        })
+      ).status;
+
+    const OLDER = new Date(Date.now() - 60_000);
+    const NEWER = new Date();
+
+    it("finishes the ONE waiting agent app the code belongs to, as the signed-in admin, leaving the others untouched", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const first = await seedAgent("stateless-first");
+      const second = await seedAgent("stateless-second");
+      // The miss is offered the code FIRST (newest first), and its finished
+      // keep-app cleanup tombstone must survive the miss untouched.
+      // MUTATION-TESTED: run the reattach before the exchange (the signed
+      // door's order) and the missed app's uninstall proof is voided
+      // (`completed` → `installation_pending`) by a code that was never its.
+      const missedApp = await seedWaitingApp(first, integration.id, "first", {
+        updatedAt: NEWER,
+      });
+      await db.channelCleanup.create({
+        data: {
+          organizationId: ORG,
+          workspaceId: WORKSPACE,
+          integrationId: integration.id,
+          teamId: "T111",
+          sourcePresenceId: missedApp.id,
+          provider: "slack",
+          externalId: "A-first",
+          deleteRemote: false,
+          stage: "completed",
+          state: "completed",
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+      await seedWaitingApp(second, integration.id, "second", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("second");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({
+        agentId: second,
+        workspaceId: WORKSPACE,
+        awaitingTransportCredential: false,
+      });
+      expect(exchangedClients()).toEqual(["client-first", "client-second"]);
+      const won = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: second, provider: "slack" } },
+      });
+      expect(won.status).toBe("active");
+      expect(won.identityRef).toBe("UBOT-second");
+      expect(
+        JSON.parse(await getCrypto().decrypt(won.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-second", clientId: "client-second" });
+      // The approvals key borrows the signed-in caller's authority.
+      expect(
+        await db.apiKey.findUniqueOrThrow({ where: { id: won.apiKeyId! } }),
+      ).toMatchObject({ userId: ADMIN, kind: "service" });
+
+      const missed = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: first, provider: "slack" } },
+      });
+      expect(missed.status).toBe("pending_setup");
+      expect(
+        JSON.parse(await getCrypto().decrypt(missed.credentials!)),
+      ).not.toHaveProperty("botToken");
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({
+          where: {
+            provider_externalId: { provider: "slack", externalId: "A-first" },
+          },
+        }),
+      ).toMatchObject({ stage: "completed", state: "completed" });
+    });
+
+    it("a waiting app Slack refuses outright (deleted) is skipped, and the search goes on to the code's own app", async () => {
+      // MUTATION-TESTED: narrow the miss back to `invalid_code` only and the
+      // deleted app's `invalid_client_id` aborts the whole finish as a 422.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const deleted = await seedAgent("stateless-deleted");
+      const live = await seedAgent("stateless-live");
+      await seedWaitingApp(deleted, integration.id, "deleted", {
+        updatedAt: NEWER,
+      });
+      await seedWaitingApp(live, integration.id, "live", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("live", undefined, {
+        "client-deleted": "invalid_client_id",
+      });
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({ agentId: live });
+      expect(exchangedClients()).toEqual(["client-deleted", "client-live"]);
+      expect(await statusOf(live)).toBe("active");
+      expect(await statusOf(deleted)).toBe("pending_setup");
+    });
+
+    it("a waiting app with no OAuth client (made by hand) is skipped without calling Slack", async () => {
+      // MUTATION-TESTED: let the provider's no-client refusal propagate and
+      // the hand-made app aborts the whole finish as a 422.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const handMade = await seedAgent("stateless-handmade");
+      const live = await seedAgent("stateless-live2");
+      await seedWaitingApp(handMade, integration.id, "handmade", {
+        credentials: { signingSecret: "signing-handmade" },
+        updatedAt: NEWER,
+      });
+      await seedWaitingApp(live, integration.id, "live2", {
+        updatedAt: OLDER,
+      });
+      scriptCodeFor("live2");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({ agentId: live });
+      expect(exchangedClients()).toEqual(["client-live2"]);
+      expect(await statusOf(handMade)).toBe("pending_setup");
+    });
+
+    it("an app reserved for remote cleanup is never offered the code, even one it would match", async () => {
+      // MUTATION-TESTED: drop the reservation check and the reserved app is
+      // offered the code before anything else and comes back to life.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-reserved");
+      const presence = await seedWaitingApp(
+        agentId,
+        integration.id,
+        "reserved",
+      );
+      await db.channelCleanup.create({
+        data: {
+          organizationId: ORG,
+          workspaceId: WORKSPACE,
+          integrationId: integration.id,
+          teamId: "T111",
+          sourcePresenceId: presence.id,
+          provider: "slack",
+          externalId: "A-reserved",
+          deleteRemote: true,
+          expiresAt: new Date(Date.now() + 3_600_000),
+        },
+      });
+      scriptCodeFor("reserved");
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "code-from-slack",
+        }),
+      ).resolves.toBeNull();
+      expect(exchangedClients()).toEqual([]);
+      expect(await statusOf(agentId)).toBe("pending_setup");
+    });
+
+    it("NEVER offers the code to another org's waiting app — even one it would match", async () => {
+      // MUTATION-TESTED (the tenant fence): drop the organization filters on
+      // the candidate query and the foreign app below is offered the code,
+      // matches, and goes live in ITS org from THIS org's session.
+      initSelfUrl(EVENTS_SELF_URL);
+      await seedIntegration();
+      const foreignIntegration = await seedIntegration({
+        organizationId: OTHER_ORG,
+        externalId: "T222",
+      });
+      const foreign = await db.agent.create({
+        data: {
+          workspaceId: OTHER_WORKSPACE,
+          name: "foreign agent",
+          identifier: `${P}stateless-foreign`,
+          accessToken: `aoc_${P}stateless-foreign`,
+          kind: "hosted",
+          harness: "fake",
+        },
+        select: { id: true },
+      });
+      await seedWaitingApp(foreign.id, foreignIntegration.id, "foreign");
+      scriptCodeFor("foreign", { id: "T222", name: "Elsewhere" });
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toBeNull();
+      expect(exchangedClients()).not.toContain("client-foreign");
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId: foreign.id, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+    });
+
+    it("answers null when no waiting app claims the code — nothing changes", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-nomatch");
+      await seedWaitingApp(agentId, integration.id, "mine");
+      scriptCodeFor("somebody-else");
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "shared-app-code",
+        }),
+      ).resolves.toBeNull();
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+    });
+
+    it("refuses a matching app installed into a DIFFERENT Slack workspace — nothing activates", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-wrongteam");
+      await seedWaitingApp(agentId, integration.id, "wrongteam");
+      scriptCodeFor("wrongteam", { id: "T999", name: "Somewhere Else" });
+
+      await expect(
+        agentChannels.completeAgentInstallFromCode({
+          organizationId: ORG,
+          actorUserId: ADMIN,
+          provider: "slack",
+          code: "code-from-slack",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+    });
+
+    it("a waiting SOCKET app installed from Slack's side lands like the signed door: bot token stored, still pending, then the app-token paste finishes it", async () => {
+      // MUTATION-TESTED: restore the events-only candidate filter and the
+      // code finds no waiting app (null); land socket through the events
+      // activation instead and it goes live with no app-level token.
+      initSelfUrl(EVENTS_SELF_URL);
+      const integration = await seedIntegration();
+      const agentId = await seedAgent("stateless-socket");
+      await seedWaitingApp(agentId, integration.id, "socket", {
+        transport: "socket",
+        credentials: {
+          clientId: "client-socket",
+          clientSecret: "secret-socket",
+          signingSecret: "signing-socket",
+          oauthRedirect: true,
+        },
+      });
+      scriptCodeFor("socket");
+
+      const result = await agentChannels.completeAgentInstallFromCode({
+        organizationId: ORG,
+        actorUserId: ADMIN,
+        provider: "slack",
+        code: "code-from-slack",
+      });
+
+      expect(result).toMatchObject({
+        agentId,
+        workspaceId: WORKSPACE,
+        awaitingTransportCredential: true,
+      });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { agentId_provider: { agentId, provider: "slack" } },
+      });
+      expect(row.status).toBe("pending_setup");
+      expect(row.apiKeyId).toBeNull();
+      expect(row.identityRef).toBe("UBOT-socket");
+      expect(
+        JSON.parse(await getCrypto().decrypt(row.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-socket", clientId: "client-socket" });
+      const view = await agentChannels.getAgentChannels(WORKSPACE, agentId);
+      expect(view.presences[0]?.awaitingTransportCredential).toBe(true);
+
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { appToken: "xapp-socket" },
+        ADMIN,
+      );
+      expect(presence.status).toBe("active");
+    });
   },
 );
 
@@ -2851,6 +3733,19 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
       ADMIN,
     );
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: {
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({
+            botToken: "xoxb-d",
+            clientId: "client-1",
+            clientSecret: "client-secret-1",
+          }),
+        ),
+      },
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
     return { agentId, presence };
   };
 
@@ -3077,9 +3972,9 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       ]);
     });
 
-    // Left ALIVE on purpose: better a live app the customer can remove than a
-    // permanent look-alike of a real person.
-    it("REFUSES to delete an app it could not rename", async () => {
+    // Rename is cosmetic. Confirmed uninstall still permits app deletion when
+    // Slack cannot rename the bot.
+    it("deletes after confirmed uninstall even if rename fails", async () => {
       const { agentId, presence } = await seedWithClientCreds("detach-tsfail");
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       slackHandlers["apps.manifest.export"] = () => ({
@@ -3093,17 +3988,16 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
       // The local detach still completes: the platform never stays half-attached.
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
     });
 
-    // Slack accepts the rename but applies it asynchronously (~5s), so a
-    // teardown that raced ahead deleted before it landed. The give-up path
-    // polls its full window, hence the longer timeout.
-    it("REFUSES to delete when the rename never reaches the bot user", async () => {
+    // Slack may apply an accepted rename asynchronously. Cleanup does not poll
+    // for cosmetic propagation before uninstalling and deleting the app.
+    it("does not gate deletion on asynchronous rename propagation", async () => {
       const { agentId, presence } = await seedWithClientCreds("detach-tsslow");
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       slackHandlers["apps.manifest.export"] = () => ({
@@ -3126,13 +4020,13 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.manifest.update")).toHaveLength(1);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
     }, 20_000);
 
-    it("a REFUSED uninstall still deletes the app", async () => {
+    it("a refused uninstall retains a blocked job and never deletes the app", async () => {
       const { agentId, presence } =
         await seedWithClientCreds("detach-unrefuse");
       scriptRenameLands(presence.externalId);
@@ -3147,7 +4041,21 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+      expect(
+        await db.channelCleanup.findUnique({
+          where: {
+            provider_externalId: {
+              provider: "slack",
+              externalId: presence.externalId,
+            },
+          },
+        }),
+      ).toMatchObject({
+        state: "blocked",
+        stage: "uninstall",
+        reason: "uninstall_authorization_required",
+      });
       expect(
         await db.agentChannel.findUnique({ where: { id: presence.id } }),
       ).toBeNull();
@@ -3156,6 +4064,14 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     it("skips the uninstall when we hold no client credentials", async () => {
       // The paste floor: the user made the app, so we never saw its secret.
       const { agentId, presence } = await seedActivated("detach-nocreds");
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-d" }),
+          ),
+        },
+      });
       scriptRenameLands(presence.externalId);
       await db.channelIntegration.updateMany({
         where: { organizationId: ORG, provider: "slack" },
@@ -3171,7 +4087,7 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
       });
 
       expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
-      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
     });
 
     // The regression that shipped: the uninstall used to sit INSIDE the
@@ -3206,6 +4122,323 @@ describe.skipIf(!PROOF_URL)("detachPresence", () => {
     });
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "a presence REMOVED on the provider side (app_uninstalled / tokens_revoked)",
+  () => {
+    const generationOf = async (agentId: string) =>
+      (
+        await db.sandbox.findFirst({
+          where: { agentId },
+          select: { homeDesiredGeneration: true },
+        })
+      )?.homeDesiredGeneration;
+
+    const seedActivated = async (suffix: string) => {
+      const agentId = await seedAgent(suffix);
+      // A RUNNING sandbox, so the home bump has something to move: the
+      // generation counter is how a live agent learns its doc changed.
+      // Created BEFORE the activation on purpose: `completePresence`
+      // re-renders the home fire-and-forget, and with the sandbox already
+      // there that bump always lands (1 → 2). Creating it after left the
+      // order to the scheduler — the bump found no sandbox on an idle
+      // machine and a sandbox under CI load — so a test counting later
+      // bumps against a literal baseline flaked.
+      await db.sandbox.create({
+        data: {
+          agentId,
+          runnerId: RUNNER,
+          status: "running",
+          homeDesiredGeneration: 1,
+        },
+      });
+      scriptAuthTest();
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-d", appToken: "xapp-d", appId: `A-${suffix}` },
+        ADMIN,
+      );
+      // Settle the activation's own bump, so each test starts from a known
+      // generation and measures only the bumps it causes.
+      await vi.waitFor(async () => expect(await generationOf(agentId)).toBe(2));
+      return { agentId, presence };
+    };
+
+    it("ATTACHING to an agent whose sandbox is RUNNING re-renders its home — the attach-while-awake path (dev incident, 2026-09-15)", async () => {
+      // The user's dev walk: the agent's session was awake first, Slack was
+      // attached second. The live sandbox learns its doc changed only if
+      // the ACTIVATION bumps the home generation (the same bump removal
+      // takes below) — without it the supervisor never sees the new
+      // presence and the session keeps its stale "no Slack" doc, whatever
+      // the supervisor's restart law does next. The render view after the
+      // bump must list the new presence, since that is what rides the
+      // sync's final part to the supervisor.
+      // MUTATION-PROOF: drop `rerenderAgentHome` from `activatePresence`
+      // and the generation stays put.
+      const agentId = await seedAgent("attach-awake");
+      await db.sandbox.create({
+        data: {
+          agentId,
+          runnerId: RUNNER,
+          status: "running",
+          homeDesiredGeneration: 1,
+        },
+      });
+      const before = await generationOf(agentId);
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual(
+        [],
+      );
+
+      scriptAuthTest();
+      const presence = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-a", appToken: "xapp-a", appId: "A-attach-awake" },
+        ADMIN,
+      );
+      expect(presence.status).toBe("active");
+
+      await vi.waitFor(async () =>
+        expect(await generationOf(agentId)).toBe((before ?? 0) + 1),
+      );
+      // What the supervisor will receive on that sync's final part.
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual([
+        expect.objectContaining({ provider: "slack", status: "active" }),
+      ]);
+    });
+
+    it("app_uninstalled flips the presence to disabled, drops links + the service key, and re-renders the agent's home", async () => {
+      const { agentId, presence } = await seedActivated("removed-uninstall");
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", direct: true, userId: MEMBER },
+        select: { id: true },
+      });
+      await db.channelThreadLink.create({
+        data: {
+          agentChannelId: presence.id,
+          conversationId: conversation.id,
+          externalThreadId: "D777",
+          kind: "direct",
+          externalUserId: "U111",
+        },
+      });
+      const before = await generationOf(agentId);
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "app_uninstalled" },
+        eventId: "Ev-uninstall-1",
+      });
+      expect(result).toEqual({
+        kind: "ignored",
+        reason: "presence-removed:app_uninstalled",
+      });
+
+      const row = await db.agentChannel.findUnique({
+        where: { id: presence.id },
+        select: { status: true, externalId: true, apiKeyId: true },
+      });
+      // Disabled, NOT deleted: the card stays and says what happened, and
+      // the app id survives so a re-attach resumes THIS app.
+      expect(row?.status).toBe("disabled");
+      expect(row?.externalId).toBe(presence.externalId);
+      expect(row?.apiKeyId).toBeNull();
+      expect(
+        await db.apiKey.findUnique({ where: { id: presence.apiKeyId! } }),
+      ).toBeNull();
+      expect(
+        await db.channelThreadLink.count({
+          where: { agentChannelId: presence.id },
+        }),
+      ).toBe(0);
+      // The conversation is the user's history; it outlives the app.
+      expect(
+        await db.conversation.findUnique({ where: { id: conversation.id } }),
+      ).not.toBeNull();
+      // The live sandbox was told to re-render (fire-and-forget: settle it).
+      await vi.waitFor(async () =>
+        expect(await generationOf(agentId)).toBe((before ?? 0) + 1),
+      );
+    });
+
+    it("tokens_revoked with a BOT entry removes the presence; user-token-only revocation is ignored", async () => {
+      const { presence } = await seedActivated("removed-tokens");
+
+      const userOnly = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "tokens_revoked", tokens: { oauth: ["U999"] } },
+        eventId: "Ev-revoked-user",
+      });
+      expect(userOnly.kind).toBe("ignored");
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("active");
+
+      const botGone = await dispatch.dispatchSlackEvent({
+        presenceId: presence.id,
+        identityRef: "UBOT",
+        event: { type: "tokens_revoked", tokens: { bot: ["UBOT"] } },
+        eventId: "Ev-revoked-bot",
+      });
+      expect(botGone).toEqual({
+        kind: "ignored",
+        reason: "presence-removed:tokens_revoked",
+      });
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: presence.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("disabled");
+    });
+
+    it("is idempotent across Slack's unordered pair, and never touches a presence the owner already detached", async () => {
+      const { agentId, presence } = await seedActivated("removed-twice");
+      const before = await generationOf(agentId);
+      await agentChannels.markPresenceRemoved(presence.id, "tokens_revoked");
+      // Exactly one bump for the first arrival (the fire-and-forget re-render:
+      // settle it before measuring).
+      const generationAfterFirst = await vi.waitFor(async () => {
+        const generation = await generationOf(agentId);
+        expect(generation).toBe((before ?? 0) + 1);
+        return generation;
+      });
+      // The second arrival changes nothing: no second bump, no throw.
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+      expect(await generationOf(agentId)).toBe(generationAfterFirst);
+
+      // A detached shell is the OWNER's decision; a late provider event
+      // must not rewrite it into "disabled".
+      const { agentId: otherAgent, presence: detached } =
+        await seedActivated("removed-detached");
+      await agentChannels.detachPresence(WORKSPACE, otherAgent, "slack", {
+        deleteRemote: false,
+      });
+      await agentChannels.markPresenceRemoved(detached.id, "app_uninstalled");
+      expect(
+        (
+          await db.agentChannel.findUnique({
+            where: { id: detached.id },
+            select: { status: true },
+          })
+        )?.status,
+      ).toBe("pending_setup");
+    });
+
+    it("a disabled presence RESUMES through the GUIDED door too (the dashboard's Re-attach) — no second Slack app, and a foreign agent cannot claim it", async () => {
+      initSelfUrl(EVENTS_SELF_URL);
+      await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("removed-guided");
+      scriptManifestCreate();
+      const first = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      // Finish the attach the events way is a real OAuth round-trip; the
+      // paste door lands the same `active` row for this proof's purposes.
+      scriptAuthTest();
+      await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-g", signingSecret: "s3", transport: "events" },
+        ADMIN,
+      );
+      await agentChannels.markPresenceRemoved(
+        first.presenceId,
+        "app_uninstalled",
+      );
+
+      const creates = slackCallsFor("apps.manifest.create").length;
+      const resumed = await agentChannels.createPresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        ADMIN,
+      );
+      expect(resumed.presenceId).toBe(first.presenceId);
+      expect(slackCallsFor("apps.manifest.create")).toHaveLength(creates);
+      expect(resumed.installUrl).toContain("client_id=");
+
+      // The tenant fence is unchanged by the new status: another workspace's
+      // agent never sees this row, disabled or not.
+      const foreign = await db.agent.create({
+        data: {
+          workspaceId: OTHER_WORKSPACE,
+          name: "foreign",
+          identifier: `${P}foreign-removed`,
+          accessToken: `aoc_${P}foreign-removed`,
+          kind: "hosted",
+          harness: "fake",
+        },
+        select: { id: true },
+      });
+      expect(await agentChannels.channelPresencesForRender(foreign.id)).toEqual(
+        [],
+      );
+    });
+
+    it("a disabled presence RESUMES through the paste door — same row, same app id", async () => {
+      const { agentId, presence } = await seedActivated("removed-resume");
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+
+      scriptAuthTest();
+      const resumed = await agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken: "xoxb-new", appToken: "xapp-new" },
+        ADMIN,
+      );
+      expect(resumed.id).toBe(presence.id);
+      expect(resumed.status).toBe("active");
+      expect(resumed.externalId).toBe(presence.externalId);
+      expect(resumed.apiKeyId).not.toBeNull();
+    });
+
+    it("channelPresencesForRender tells the agent what it holds: live and disabled presences, never pending ones, display facts only", async () => {
+      const { agentId, presence } = await seedActivated("render-view");
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual([
+        {
+          provider: "slack",
+          status: "active",
+          handle: "donna",
+          workspaceName: "Acme",
+        },
+      ]);
+
+      await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+      expect(
+        (await agentChannels.channelPresencesForRender(agentId)).map(
+          (p) => p.status,
+        ),
+      ).toEqual(["disabled"]);
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      expect(await agentChannels.channelPresencesForRender(agentId)).toEqual(
+        [],
+      );
+    });
+  },
+);
 
 describe.skipIf(!PROOF_URL)("the app's own handle", () => {
   // The delete confirmation names the app a human would recognize in Slack
@@ -3309,6 +4542,19 @@ describe.skipIf(!PROOF_URL)(
           credentialsRotatedAt: new Date(),
         },
       });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({
+              botToken: "xoxb-d",
+              clientId: "client-1",
+              clientSecret: "client-secret-1",
+            }),
+          ),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
       return { agentId, presence };
     };
 
@@ -3417,11 +4663,31 @@ describe.skipIf(!PROOF_URL)(
           credentialsRotatedAt: new Date(),
         },
       });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: {
+          credentials: await getCrypto().encrypt(
+            JSON.stringify({
+              botToken: "xoxb-d",
+              clientId: "client-1",
+              clientSecret: "client-secret-1",
+            }),
+          ),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
       scriptRenameLands(presence.externalId);
       slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       const [deleteCall] = slackCallsFor("apps.manifest.delete");
       expect(deleteCall?.form.get("app_id")).toBe(presence.externalId);
@@ -3436,8 +4702,15 @@ describe.skipIf(!PROOF_URL)(
       const agentId = await seedAgent("proj-noapps");
       const before = slackCallsFor("apps.manifest.delete").length;
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       expect(slackCallsFor("apps.manifest.delete")).toHaveLength(before);
       await db.agent.delete({ where: { id: agentId } });
@@ -3476,8 +4749,15 @@ describe.skipIf(!PROOF_URL)(
       slackHandlers["apps.uninstall"] = () => ({ ok: true });
       const deletesBefore = slackCallsFor("apps.manifest.delete").length;
 
-      const channels = await import("./agent-channel-service");
-      await channels.teardownWorkspacePresences(WORKSPACE);
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueWorkspaceCleanup(tx, WORKSPACE);
+        await tx.agentChannel.deleteMany({
+          where: { agent: { workspaceId: WORKSPACE } },
+        });
+        return ids;
+      });
+      await cleanup.processChannelCleanups({ ids });
 
       // The employee's bot leaves the workspace...
       const [uninstall] = slackCallsFor("apps.uninstall");
@@ -3542,10 +4822,10 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
   });
 
   it("REDELIVERY of the same eventId is a no-op duplicate — no second turn", async () => {
-    // MUTATION-TESTED: the dedupe is the insert-FIRST row in
-    // channel_ingested_events. Delete the recordEventOnce insert (or move it
-    // after the turn) and Slack's at-least-once redelivery posts the same
-    // message twice — this test's turn count catches exactly that.
+    // MUTATION-TESTED: the dedupe is the claim row in
+    // channel_ingested_events. Delete the claim (or settle it before the
+    // turn) and Slack's at-least-once redelivery posts the same message
+    // twice. This test's turn count catches exactly that.
     const { agentId, integrationId, presenceId } =
       await seedChannelAgent("dm-dupe");
     await linkUser(integrationId, "U111", MEMBER);
@@ -3570,6 +4850,222 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
       1,
     );
+    // The run settled its claim: nothing is left in flight.
+    expect(
+      await db.channelIngestedEvent.findUniqueOrThrow({
+        where: {
+          agentChannelId_eventId: {
+            agentChannelId: presenceId,
+            eventId: "Ev-dupe",
+          },
+        },
+        select: { claimExpiresAt: true },
+      }),
+    ).toEqual({ claimExpiresAt: null });
+  });
+
+  it("a delivery of an event another run is still processing is retried, not dropped", async () => {
+    // The claim of a LIVE holder: a concurrent delivery must neither run
+    // the door a second time nor read as a settled duplicate (which would
+    // drop the message if the live holder then died).
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-inflight");
+    await linkUser(integrationId, "U111", MEMBER);
+    await db.channelIngestedEvent.create({
+      data: {
+        agentChannelId: presenceId,
+        eventId: "Ev-inflight",
+        claimExpiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    await expect(
+      dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: dmEvent("U111", "D123", "busy"),
+        eventId: "Ev-inflight",
+      }),
+    ).rejects.toBeInstanceOf(ingestion.EventInFlightError);
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a crash BEFORE the turn: the lapsed claim is taken over and the message still lands once", async () => {
+    // The holder died mid-event (files fetching, say): its claim stayed,
+    // unsettled, past its lease. The next delivery takes it over.
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-takeover");
+    await linkUser(integrationId, "U111", MEMBER);
+    await db.channelIngestedEvent.create({
+      data: {
+        agentChannelId: presenceId,
+        eventId: "Ev-takeover",
+        claimExpiresAt: new Date(Date.now() - 1000),
+      },
+    });
+
+    const result = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U111", "D123", "still here?"),
+      eventId: "Ev-takeover",
+    });
+
+    expect(result.kind === "message" && result.outcome.kind).toBe("turn");
+    const turns = await db.turn.findMany({
+      where: { conversation: { agentId } },
+      select: { message: true, sourceEventId: true },
+    });
+    expect(turns).toEqual([
+      { message: "still here?", sourceEventId: "Ev-takeover" },
+    ]);
+  });
+
+  it("a run that throws hands its claim back, so the event is retried at once, never lost as a duplicate", async () => {
+    // MUTATION-TESTED: settle the claim in a `finally` and the failed event
+    // reads as a settled duplicate: the message is silently dropped.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "dm-throws",
+      { presenceCredentials: "not-a-ciphertext" },
+    );
+    await linkUser(integrationId, "U111", MEMBER);
+    const input = {
+      agentChannelId: presenceId,
+      externalUserId: "U111",
+      externalThreadId: "D123",
+      text: "with a file",
+      files: [
+        {
+          id: "F1",
+          name: "a.txt",
+          mimeType: "text/plain",
+          size: 1,
+          url: null,
+          needsInfo: false,
+        },
+      ],
+      eventId: "Ev-throws",
+    };
+    const claimRow = () =>
+      db.channelIngestedEvent.findUniqueOrThrow({
+        where: {
+          agentChannelId_eventId: {
+            agentChannelId: presenceId,
+            eventId: "Ev-throws",
+          },
+        },
+        select: { claimToken: true, claimExpiresAt: true },
+      });
+
+    // The garbled credential fails the run at its file fetch.
+    await expect(ingestion.ingestDirectMessage(input)).rejects.toThrow();
+    const released = await claimRow();
+    expect(released.claimToken).toBeNull();
+    expect(released.claimExpiresAt!.getTime()).toBeLessThanOrEqual(Date.now());
+
+    // The next delivery runs it again right away (here it fails again: the
+    // credential is still garbled), not a duplicate and not in flight.
+    await expect(
+      ingestion.ingestDirectMessage(input),
+    ).rejects.not.toBeInstanceOf(ingestion.EventInFlightError);
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      0,
+    );
+  });
+
+  it("a run that overran its lease never settles the claim of the run that took the event over", async () => {
+    // The fence: a slow first run's late settle must not mark the event
+    // done while the run that took it over is still processing it, or a
+    // crash of that second run would lose the message.
+    const { integrationId, presenceId } = await seedChannelAgent("dm-overran");
+    await linkUser(integrationId, "U111", MEMBER);
+    const { CHANNEL_PROVIDERS } = await import("./registry");
+    const slackProvider = CHANNEL_PROVIDERS.slack;
+    const realDecode = slackProvider.decodeInboundText;
+    const where = { agentChannelId: presenceId, eventId: "Ev-overran" };
+    // The first run stalls inside the door until the takeover happened.
+    let resume!: () => void;
+    let stalled!: () => void;
+    const reached = new Promise<void>((resolve) => (stalled = resolve));
+    slackProvider.decodeInboundText = async (input) => {
+      stalled();
+      await new Promise<void>((resolve) => (resume = resolve));
+      return realDecode ? realDecode.call(slackProvider, input) : input.text;
+    };
+    try {
+      const first = ingestion.ingestDirectMessage({
+        agentChannelId: presenceId,
+        externalUserId: "U111",
+        externalThreadId: "D123",
+        text: "slow",
+        eventId: "Ev-overran",
+      });
+      await reached;
+      // Its lease lapses and another run takes the event over.
+      await db.channelIngestedEvent.updateMany({
+        where,
+        data: { claimExpiresAt: new Date(Date.now() - 1000) },
+      });
+      await db.channelIngestedEvent.updateMany({
+        where,
+        data: {
+          claimToken: "the-taker",
+          claimExpiresAt: new Date(Date.now() + 60_000),
+        },
+      });
+
+      resume();
+      await first;
+      const row = await db.channelIngestedEvent.findFirstOrThrow({
+        where,
+        select: { claimToken: true, claimExpiresAt: true },
+      });
+      expect(row.claimToken).toBe("the-taker");
+      expect(row.claimExpiresAt).not.toBeNull();
+    } finally {
+      slackProvider.decodeInboundText = realDecode;
+    }
+  });
+
+  it("a crash AFTER the turn landed: the taken-over event answers that turn, never a second one", async () => {
+    // MUTATION-TESTED: drop the landed-turn check and the takeover creates
+    // the message's turn twice (the agent answers it twice).
+    const { agentId, integrationId, presenceId } =
+      await seedChannelAgent("dm-landed");
+    await linkUser(integrationId, "U111", MEMBER);
+    const event = dmEvent("U111", "D123", "exactly once");
+    const first = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event,
+      eventId: "Ev-landed",
+    });
+    // Rewind to the moment the first holder died: the turn committed, the
+    // claim never settled, and its lease has lapsed.
+    await db.channelIngestedEvent.updateMany({
+      where: { agentChannelId: presenceId, eventId: "Ev-landed" },
+      data: { claimExpiresAt: new Date(Date.now() - 1000) },
+    });
+
+    const second = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event,
+      eventId: "Ev-landed",
+    });
+
+    expect(await db.turn.count({ where: { conversation: { agentId } } })).toBe(
+      1,
+    );
+    if (first.kind !== "message" || second.kind !== "message") {
+      throw new Error("unreachable");
+    }
+    expect(second.outcome.kind).toBe("turn");
+    expect(second.outcome.kind === "turn" && second.outcome.turn.id).toBe(
+      first.outcome.kind === "turn" && first.outcome.turn.id,
+    );
   });
 
   it("an agent-authored event is refused BEFORE the dedupe row is consumed", async () => {
@@ -3588,8 +5084,8 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     });
 
     expect(outcome).toEqual({ kind: "ignored", reason: "agent-authored" });
-    // The identity check runs BEFORE recordEventOnce: no dedupe row burned,
-    // so a real event reusing the id later is not misread as a duplicate.
+    // The identity check runs BEFORE the event is claimed: no ledger row
+    // burned, so a real event reusing the id later is not misread as one.
     expect(
       await db.channelIngestedEvent.count({
         where: { agentChannelId: presenceId, eventId: "Ev-echo" },
@@ -3897,6 +5393,130 @@ describe.skipIf(!PROOF_URL)("ingestion — direct messages", () => {
     if (result.outcome.kind !== "turn") throw new Error("unreachable");
     expect(result.outcome.turn.status).toBe("failed");
     expect(result.outcome.turn.errorCode).toBe("no_model_key");
+  });
+
+  describe("the queued-behind note (the per-agent cap)", () => {
+    // A DM thread typed while the agent already has its cap of person turns
+    // going is accepted (its loader goes up) but will not START until one
+    // finishes. The person is told so, once, privately, in the thread they
+    // typed in. Under the cap: silence, the loader is the whole signal.
+    const threadedDm = (
+      user: string,
+      channel: string,
+      text: string,
+      threadTs: string,
+      ts: string,
+    ) => ({ ...dmEvent(user, channel, text), thread_ts: threadTs, ts });
+
+    const fillTheCap = async (agentId: string) => {
+      for (let i = 0; i < dueWork.MAX_PERSON_TURNS_PER_AGENT; i += 1) {
+        const conversation = await db.conversation.create({
+          data: { agentId, source: "slack", externalRef: `C-busy-${i}:1.${i}` },
+          select: { id: true },
+        });
+        await db.turn.create({
+          data: {
+            conversationId: conversation.id,
+            message: `busy ${i}`,
+            status: "running",
+            source: "slack",
+            userId: MEMBER,
+          },
+        });
+      }
+    };
+
+    it("a thread opened past the cap gets ONE private note in its thread, naming how many tasks are ahead", async () => {
+      const { agentId, integrationId, presenceId } = await seedChannelAgent(
+        "dm-queued-note",
+        {
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-queued" }),
+          ),
+        },
+      );
+      await linkUser(integrationId, "U111", MEMBER);
+      await fillTheCap(agentId);
+      slackHandlers["chat.postEphemeral"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: threadedDm(
+          "U111",
+          "D123",
+          "and this too",
+          "1000.0001",
+          "1000.0009",
+        ),
+        eventId: "Ev-queued-1",
+      });
+      expect(result.kind).toBe("message");
+      if (result.kind !== "message") throw new Error("unreachable");
+      expect(result.outcome.kind).toBe("turn");
+
+      // Detached, like the receipt: wait for the note to land on the fake.
+      await vi.waitFor(() =>
+        expect(slackCallsFor("chat.postEphemeral")).toHaveLength(1),
+      );
+      const note = slackCallsFor("chat.postEphemeral")[0]!;
+      expect(note.token).toBe("xoxb-queued");
+      expect(note.form.get("channel")).toBe("D123");
+      expect(note.form.get("user")).toBe("U111");
+      // IN the thread the person typed in, not at the DM's top level.
+      expect(note.form.get("thread_ts")).toBe("1000.0001");
+      expect(note.form.get("text")).toBe(
+        dispatch.queuedBehindText(dueWork.MAX_PERSON_TURNS_PER_AGENT),
+      );
+      // The loader still goes up: the note is beside the receipt, never
+      // instead of it.
+      await vi.waitFor(async () =>
+        expect(
+          await db.channelTurnReceipt.findFirst({
+            where: { agentChannelId: presenceId },
+          }),
+        ).not.toBeNull(),
+      );
+    });
+
+    it("under the cap there is no note: the loader is the whole signal", async () => {
+      const { integrationId, presenceId } = await seedChannelAgent(
+        "dm-queued-quiet",
+        {
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-quiet" }),
+          ),
+        },
+      );
+      await linkUser(integrationId, "U111", MEMBER);
+      slackHandlers["chat.postEphemeral"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      const before = slackCallsFor("chat.postEphemeral").length;
+
+      const result = await dispatch.dispatchSlackEvent({
+        presenceId,
+        identityRef: "UBOT",
+        event: threadedDm(
+          "U111",
+          "D123",
+          "quick one",
+          "2000.0001",
+          "2000.0002",
+        ),
+        eventId: "Ev-queued-2",
+      });
+      expect(result.kind).toBe("message");
+      // The receipt lands (so the detached work has run) and no note did.
+      await vi.waitFor(async () =>
+        expect(
+          await db.channelTurnReceipt.findFirst({
+            where: { agentChannelId: presenceId },
+          }),
+        ).not.toBeNull(),
+      );
+      expect(slackCallsFor("chat.postEphemeral")).toHaveLength(before);
+    });
   });
 });
 
@@ -4328,7 +5948,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
   it("MORE than the deliverable cap: the message still lands, surplus files marked failed", async () => {
     // REGRESSION (found in review): the over-cap arm minted a `failed` row per
     // surplus file and pushed every id into the bind, whose guard was the
-    // DELIVERABLE cap — so a 6-file message threw inside the turn-create
+    // DELIVERABLE cap, so an over-cap message threw inside the turn-create
     // transaction and the whole message vanished, text included. The bind now
     // caps only what is actually delivered; byteless rows ride along.
     const { agentId, integrationId, presenceId } = await seedChannelAgent(
@@ -4337,7 +5957,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     );
     await linkUser(integrationId, "U111", MEMBER);
     const slackUrl = process.env.SLACK_API_BASE_URL;
-    const files = Array.from({ length: 7 }, (_, i) => {
+    const files = Array.from({ length: 12 }, (_, i) => {
       scriptFileDownload(
         `files-pri/T1-FC${i}/f${i}.png`,
         PNG_BYTES,
@@ -4355,7 +5975,7 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     const result = await dispatch.dispatchSlackEvent({
       presenceId,
       identityRef: "UBOT",
-      event: fileShareEvent("U111", "D910", "seven files", files),
+      event: fileShareEvent("U111", "D910", "twelve files", files),
       eventId: "Ev-att-overcap",
     });
 
@@ -4366,19 +5986,19 @@ describe.skipIf(!PROOF_URL)("ingestion — attachments (file_share)", () => {
     const turn = await db.turn.findFirstOrThrow({
       where: { conversation: { agentId } },
     });
-    expect(turn.message).toBe("seven files");
+    expect(turn.message).toBe("twelve files");
 
     const rows = await db.conversationAttachment.findMany({
       where: { turnId: turn.id },
       orderBy: { createdAt: "asc" },
     });
-    expect(rows).toHaveLength(7);
-    expect(rows.filter((r) => r.status === "bound")).toHaveLength(5);
+    expect(rows).toHaveLength(12);
+    expect(rows.filter((r) => r.status === "bound")).toHaveLength(10);
     const refused = rows.filter((r) => r.status === "failed");
     expect(refused).toHaveLength(2);
-    expect(refused[0]?.error).toContain("5-file limit");
+    expect(refused[0]?.error).toContain("10-file limit");
     // Only the deliverable ones were fetched.
-    expect(fileDownloadCalls()).toHaveLength(5);
+    expect(fileDownloadCalls()).toHaveLength(10);
   });
 
   it("a Slack Connect stub (check_file_info) resolves through files.info before downloading", async () => {
@@ -4917,6 +6537,202 @@ describe.skipIf(!PROOF_URL)("registerAdapter (the per-instance mint)", () => {
     expect(
       await db.channelAdapter.count({ where: { id: staleAnchor.id } }),
     ).toBe(1);
+  });
+});
+
+describe.skipIf(!PROOF_URL)("approval cards' home (approvalsLinkId)", () => {
+  /** A channel agent whose approvals key belongs to `approver`: the
+   * identity the gateway decides as, so the one whose DM gets the cards.
+   * The presence itself is always created by ADMIN. */
+  const seedApprovedPresence = async (suffix: string, approver: string) => {
+    const seeded = await seedChannelAgent(suffix);
+    const key = await apiKeys.createServiceApiKey(
+      approver,
+      { workspaceId: WORKSPACE },
+      `${P}${suffix}`,
+    );
+    await db.agentChannel.update({
+      where: { id: seeded.presenceId },
+      data: { apiKeyId: key.id },
+    });
+    return seeded;
+  };
+
+  /** A direct link on the presence: a member's own direct conversation
+   * (`dmOwner`), or a guest's sourced, non-direct one (null). `createdAt`
+   * is explicit so creation order never rides a same-millisecond tie. */
+  const seedLink = async (
+    agentId: string,
+    presenceId: string,
+    thread: string,
+    dmOwner: string | null,
+    createdAt?: Date,
+  ) => {
+    const conversation = await db.conversation.create({
+      data: dmOwner
+        ? { agentId, source: "slack", direct: true, userId: dmOwner }
+        : { agentId, source: "slack", externalRef: thread },
+      select: { id: true },
+    });
+    return db.channelThreadLink.create({
+      data: {
+        agentChannelId: presenceId,
+        conversationId: conversation.id,
+        externalThreadId: thread,
+        kind: "direct",
+        externalUserId: dmOwner ? `U-${thread}` : null,
+        ...(createdAt && { createdAt }),
+      },
+      select: { id: true },
+    });
+  };
+
+  /** One adapter caller per test: a second live caller would halve the
+   * fair share and move presences between slices mid-test. */
+  const feedReader = async () => {
+    const caller = await seedAdapterCaller("instance");
+    return async (presenceId: string) => {
+      const cfg = await adapters.getAdapterConfig(caller);
+      if (cfg.notModified) throw new Error("unreachable");
+      const presence = cfg.presences.find((p) => p.presenceId === presenceId);
+      if (!presence) throw new Error("presence missing from the feed");
+      return { presence, etag: cfg.etag };
+    };
+  };
+
+  it("names the approver's own DM, never a guest's or another member's", async () => {
+    // The incident: the owner let a guest talk to the agent, and cards then
+    // followed the link order into the guest's DM, where they expired.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-owner",
+      ADMIN,
+    );
+    await seedLink(agentId, presenceId, "D-guest", null);
+    await seedLink(agentId, presenceId, "D-member", MEMBER);
+    const owner = await seedLink(agentId, presenceId, "D-owner", ADMIN);
+
+    const { presence } = await (await feedReader())(presenceId);
+
+    expect(presence.approvalsLinkId).toBe(owner.id);
+    // The feed's link shape is unchanged (no conversation leaks onto it).
+    expect(Object.keys(presence.links[0]!).sort()).toEqual([
+      "conversationId",
+      "externalThreadId",
+      "externalUserId",
+      "id",
+      "kind",
+      "mirrorCursor",
+    ]);
+  });
+
+  it("keeps links in creation order across a mirror-cursor rewrite, so the instance etag holds", async () => {
+    // MUTATION-TESTED: drop the threadLinks `orderBy` and the rewritten row
+    // comes back last (heap order), which fails both the order and the
+    // unchanged etag.
+    // Thread ids sort against creation order, so the unique index's order
+    // cannot stand in for it either.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-order",
+      ADMIN,
+    );
+    const base = Date.now() - 60_000;
+    const first = await seedLink(
+      agentId,
+      presenceId,
+      "D-3",
+      null,
+      new Date(base),
+    );
+    const second = await seedLink(
+      agentId,
+      presenceId,
+      "D-2",
+      MEMBER,
+      new Date(base + 1_000),
+    );
+    const third = await seedLink(
+      agentId,
+      presenceId,
+      "D-1",
+      ADMIN,
+      new Date(base + 2_000),
+    );
+    const read = await feedReader();
+    const before = await read(presenceId);
+
+    expect(await adapters.advanceMirrorCursor(first.id, null, new Date())).toBe(
+      true,
+    );
+    const after = await read(presenceId);
+
+    expect(after.presence.links.map((l) => l.id)).toEqual([
+      first.id,
+      second.id,
+      third.id,
+    ]);
+    expect(after.etag).toBe(before.etag);
+  });
+
+  it("is null when only a guest has a DM: no card in someone else's thread", async () => {
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-guest-only",
+      ADMIN,
+    );
+    await seedLink(agentId, presenceId, "D-guest-only", null);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBeNull();
+  });
+
+  it("follows the service key's owner, never the presence's creator", async () => {
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-key-owner",
+      MEMBER,
+    );
+    await seedLink(agentId, presenceId, "D-creator", ADMIN);
+    const keyOwner = await seedLink(agentId, presenceId, "D-keyowner", MEMBER);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBe(keyOwner.id);
+  });
+
+  it("is null without a service key, even when the creator has a DM", async () => {
+    // No key means no approvals loop at all, so there is no approver whose
+    // DM could hold a card.
+    const { agentId, presenceId } = await seedChannelAgent("home-no-key");
+    await seedLink(agentId, presenceId, "D-no-key", ADMIN);
+
+    const { presence } = await (await feedReader())(presenceId);
+    expect(presence.approvalsLinkId).toBeNull();
+  });
+
+  it("a guest link repointed onto the approver's DM busts the etag and becomes the home", async () => {
+    // The approver first wrote before their Slack account was linked (a
+    // guest DM); once linked, the ingest door repoints the SAME link row at
+    // their direct conversation. Link ids and the presence row are
+    // unchanged, so only the approvalsLinkId fold can bust the etag.
+    // MUTATION-TESTED: drop that fold and the etag stays the same.
+    const { agentId, presenceId } = await seedApprovedPresence(
+      "home-repoint",
+      ADMIN,
+    );
+    const link = await seedLink(agentId, presenceId, "D-repoint", null);
+    const read = await feedReader();
+    const before = await read(presenceId);
+    expect(before.presence.approvalsLinkId).toBeNull();
+
+    const direct = await db.conversation.create({
+      data: { agentId, source: "slack", direct: true, userId: ADMIN },
+      select: { id: true },
+    });
+    await db.channelThreadLink.update({
+      where: { id: link.id },
+      data: { conversationId: direct.id },
+    });
+    const after = await read(presenceId);
+
+    expect(after.etag).not.toBe(before.etag);
+    expect(after.presence.approvalsLinkId).toBe(link.id);
   });
 });
 
@@ -5662,7 +7478,7 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
       },
       select: { id: true },
     });
-    await db.turn.create({
+    const followUp = await db.turn.create({
       data: {
         conversationId: conversation.id,
         message: "and check the pager",
@@ -5670,7 +7486,9 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
         source: "web",
         userId: ADMIN,
         followUpOfTurnId: asked.id,
+        sourceThreadId: "1700000000.000200",
       },
+      select: { id: true },
     });
 
     const caller = await seedClaimedCaller();
@@ -5683,6 +7501,193 @@ describe.skipIf(!PROOF_URL)("getAdapterWork", () => {
     // identity must not travel there.
     expect(item?.followUps.map((f) => f.userName)).toEqual([null]);
     expect(JSON.stringify(item)).not.toContain(`${ADMIN}@example.com`);
+    // Each follow-up names its own row (where its reply is stored) and the
+    // thread it was asked in (where that reply posts).
+    expect(item?.followUps.map((f) => [f.id, f.sourceThreadId])).toEqual([
+      [followUp.id, "1700000000.000200"],
+    ]);
+  });
+
+  describe("the reply feed (a reply posts while the turn still runs)", () => {
+    /** A running turn with a joined follow-up and, optionally, the reply
+     * `text` stored under the follow-up's id. */
+    const seedLiveExchange = async (
+      suffix: string,
+      options: {
+        reply?: string;
+        targetStatus?: string;
+        source?: string;
+        replyPostedAt?: Date;
+      } = {},
+    ) => {
+      const seeded = await seedLinkedConversation(suffix);
+      const target = await db.turn.create({
+        data: {
+          conversationId: seeded.conversation.id,
+          message: "run the report",
+          status: options.targetStatus ?? "running",
+          source: "slack",
+          userId: MEMBER,
+        },
+        select: { id: true },
+      });
+      const followUp = await db.turn.create({
+        data: {
+          conversationId: seeded.conversation.id,
+          message: "also check the linter",
+          status: "joined",
+          source: options.source ?? "slack",
+          userId: MEMBER,
+          followUpOfTurnId: target.id,
+          sourceThreadId: "1700000000.000300",
+          steerDeliveredAt: new Date(),
+          ...(options.replyPostedAt && {
+            replyPostedAt: options.replyPostedAt,
+          }),
+        },
+        select: { id: true },
+      });
+      if (options.reply !== undefined) {
+        await db.turnEvent.create({
+          data: {
+            conversationId: seeded.conversation.id,
+            turnId: followUp.id,
+            seq: 1,
+            type: "text",
+            payload: { type: "text", text: options.reply },
+          },
+        });
+      }
+      return { ...seeded, target, followUp };
+    };
+
+    it("serves a joined follow-up's stored reply while its turn is RUNNING, with its words and author, addressed to where it was asked", async () => {
+      const { conversation, link, presenceId, target, followUp } =
+        await seedLiveExchange("reply-live", { reply: "Sure, I'll do that." });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      expect(work.finished).toEqual([]);
+      expect(work.replies).toEqual([
+        {
+          linkId: link.id,
+          presenceId,
+          conversationId: conversation.id,
+          externalThreadId: "C-reply-live:1.1",
+          kind: "group",
+          turnId: target.id,
+          followUp: {
+            id: followUp.id,
+            message: "also check the linter",
+            source: "slack",
+            // The author's display name, resolved like a finished turn's:
+            // a web-sourced follow-up posts attributed ahead of its reply.
+            userName: "Morgan Member",
+            sourceThreadId: "1700000000.000300",
+          },
+          reply: "Sure, I'll do that.",
+        },
+      ]);
+    });
+
+    it("serves NOTHING for a follow-up without a reply of its own, a finished turn, an automation, or one already posted", async () => {
+      // Each negative control alone would keep the feed quiet; together they
+      // pin every clause of the query. MUTATION-PROOF: drop any one clause
+      // and its row below appears.
+      await seedLiveExchange("reply-none"); // no `text` under the follow-up
+      await seedLiveExchange("reply-done", {
+        reply: "late",
+        targetStatus: "done", // the completion pass owns it now
+      });
+      await seedLiveExchange("reply-wake", {
+        reply: "a wake's reply",
+        source: "watch", // an automation's reply is its caption body
+      });
+      await seedLiveExchange("reply-posted", {
+        reply: "already there",
+        replyPostedAt: new Date(),
+      });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      expect(work.replies).toEqual([]);
+    });
+
+    it("is fenced to the caller's links: another adapter's conversation never shows", async () => {
+      await seedLiveExchange("reply-foreign", { reply: "not yours" });
+      // A caller that owns NO links (never claimed the config feed).
+      const stranger = await seedAdapterCaller();
+
+      const work = await adapters.getAdapterWork(stranger.adapterId);
+
+      expect(work.replies).toEqual([]);
+    });
+
+    it("the claim is exactly-once: the first caller wins, a twin and a stranger lose", async () => {
+      const { followUp } = await seedLiveExchange("reply-claim", {
+        reply: "mine",
+      });
+      const caller = await seedClaimedCaller();
+      const stranger = await seedAdapterCaller();
+
+      // A stranger (no links) cannot claim what it does not serve.
+      expect(
+        await adapters.claimFollowUpReply(stranger.adapterId, followUp.id),
+      ).toBe(false);
+      expect(
+        await adapters.claimFollowUpReply(caller.adapterId, followUp.id),
+      ).toBe(true);
+      // The twin's identical claim finds the stamp and writes nothing.
+      expect(
+        await adapters.claimFollowUpReply(caller.adapterId, followUp.id),
+      ).toBe(false);
+      const row = await db.turn.findUniqueOrThrow({
+        where: { id: followUp.id },
+        select: { replyPostedAt: true },
+      });
+      expect(row.replyPostedAt).not.toBeNull();
+      // Claimed rows leave the feed.
+      const work = await adapters.getAdapterWork(caller.adapterId);
+      expect(work.replies).toEqual([]);
+    });
+
+    it("a finished turn's follow-ups say whether their reply was already posted", async () => {
+      // The completion pass reads this to post the follow-up's words but
+      // not its reply again. MUTATION-PROOF: derive the flag from anything
+      // but the stamp and the posted one reads as unposted.
+      const { conversation, link, target, followUp } = await seedLiveExchange(
+        "reply-flag",
+        { reply: "posted early", replyPostedAt: new Date() },
+      );
+      await db.$executeRaw`UPDATE channel_thread_links SET created_at = now() - interval '10 minutes' WHERE id = ${link.id}`;
+      const unposted = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "and this",
+          status: "joined",
+          source: "slack",
+          userId: MEMBER,
+          followUpOfTurnId: target.id,
+          steerDeliveredAt: new Date(),
+        },
+        select: { id: true },
+      });
+      await db.turn.update({
+        where: { id: target.id },
+        data: { status: "done", finishedAt: new Date() },
+      });
+      const caller = await seedClaimedCaller();
+
+      const work = await adapters.getAdapterWork(caller.adapterId);
+
+      const item = work.finished.find((w) => w.turn.id === target.id);
+      expect(item?.followUps.map((f) => [f.id, f.replyPosted])).toEqual([
+        [followUp.id, true],
+        [unposted.id, false],
+      ]);
+    });
   });
 });
 
@@ -5898,14 +7903,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     const statusCalls = slackCallsFor("agents.sessions.setStatus").length;
     const addsBefore = slackCallsFor("reactions.add").length;
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C902",
       messageTs: "700.0003",
-      threadTs: "700.0001",
-      text: "and also",
     });
 
     // No provider traffic — the loader on the thread already covers the
@@ -5974,14 +7976,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       threadTs: "701.0001",
       text: "start",
     });
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C903",
       messageTs: "701.0003",
-      threadTs: "701.0001",
-      text: "and also",
     });
     // The turn finishes and the answer posts.
     await db.turn.update({
@@ -6049,14 +8048,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       threadTs: "702.0001",
       text: "start",
     });
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C904",
       messageTs: "702.0003",
-      threadTs: "702.0001",
-      text: "and also",
     });
     // The target closes first, then the unconsumed follow-up PROMOTES to its
     // own queued turn (that order is forced: a partial unique index allows
@@ -6200,8 +8196,9 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
             conversationId: conversation.id,
             message,
             // Terminal on purpose, twice over: the one-active-turn unique
-            // allows a single live turn per conversation, and the sweep is
-            // age-gated, not status-gated — a leaked loader's turn is done.
+            // allows a single live turn per conversation, and a leaked
+            // loader's turn is done — the sweep only ever touches those
+            // (the live-turn cases are the next test's).
             status: "done",
             source: "slack",
           },
@@ -6266,6 +8263,343 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     ).not.toBeNull();
   });
 
+  it("a receipt whose turn FINISHED is cleared by the sweep whatever its age; a just-finished turn keeps its clear window", async () => {
+    // The clear raced an API restart: the turn is done, the card and
+    // loader are still up. Age of the receipt is irrelevant.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-terminal",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-terminal" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["chat.delete"] = () => ({ ok: true });
+    const mk = async (ref: string, finishedAt: Date) => {
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: ref },
+        select: { id: true },
+      });
+      return (
+        await db.turn.create({
+          data: {
+            conversationId: conversation.id,
+            message: ref,
+            source: "slack",
+            status: "done",
+            finishedAt,
+          },
+          select: { id: true },
+        })
+      ).id;
+    };
+    const finishedLongAgo = await mk("C930:1", new Date(Date.now() - 60_000));
+    const finishedNow = await mk("C930:2", new Date());
+    await db.channelTurnReceipt.createMany({
+      data: [finishedLongAgo, finishedNow].map((turnId, index) => ({
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C930",
+        messageTs: `930.000${index}`,
+        kind: "session",
+        workStatusSet: true,
+        cardTs: `930.900${index}`,
+        // Young: the age-only arm would never touch these.
+      })),
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: finishedLongAgo },
+      }),
+    ).toBeNull();
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: finishedNow },
+      }),
+    ).not.toBeNull();
+  });
+
+  it("clearTurnReceiptWithRetry retries a refused clear until the receipt is gone", async () => {
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-clear-retry",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-clear-retry" }),
+        ),
+      },
+    );
+    let calls = 0;
+    // Refused once (the restart blip), then accepted.
+    slackHandlers["agents.sessions.setStatus"] = () =>
+      (calls += 1) === 1
+        ? { ok: false, error: "internal_error" }
+        : { ok: true };
+    const conversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C931:1" },
+      select: { id: true },
+    });
+    const turnId = (
+      await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "x",
+          source: "slack",
+          status: "done",
+          finishedAt: new Date(),
+        },
+        select: { id: true },
+      })
+    ).id;
+    await db.channelTurnReceipt.create({
+      data: {
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C931",
+        messageTs: "931.0001",
+        kind: "session",
+        workStatusSet: true,
+      },
+    });
+    expect(await receipts.clearTurnReceiptWithRetry(turnId, [1, 1, 1])).toBe(
+      true,
+    );
+    expect(calls).toBe(2);
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId } }),
+    ).toBeNull();
+  });
+
+  it("REGRESSION (live 2026-09-15): the stale-session sweep never yanks a LIVE turn's loader", async () => {
+    // A Slack DM turn that legitimately ran 11.5 minutes had its progress
+    // card and seen mark deleted at 10:55 by the age-only sweep. The user,
+    // seeing every "working" signal vanish, pinged "?" 39 seconds before the
+    // answer landed. Liveness is the turn's STATUS, whatever its age.
+    //
+    // MUTATION-PROOF: drop the NOT EXISTS anti-join from the sweep and the
+    // four live rows below are cleared.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-live",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-live" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
+    // One active turn per conversation (the partial unique), so each live
+    // shape gets its own.
+    const mkConversation = async (ref: string) =>
+      (
+        await db.conversation.create({
+          data: { agentId, source: "slack", externalRef: ref },
+          select: { id: true },
+        })
+      ).id;
+    const mkTurn = async (
+      conversationId: string,
+      data: {
+        status: string;
+        lastProgressAt?: Date | null;
+        followUpOfTurnId?: string;
+      },
+    ) =>
+      (
+        await db.turn.create({
+          data: {
+            conversationId,
+            message: data.status,
+            source: "slack",
+            ...data,
+          },
+          select: { id: true },
+        })
+      ).id;
+
+    // Running with a fresh heartbeat: the ordinary long turn.
+    const runningFresh = await mkTurn(await mkConversation("C915:1"), {
+      status: "running",
+      lastProgressAt: new Date(),
+    });
+    // Running with NO heartbeat: an agent image that predates the clock.
+    // Kept — same skew fence `failStalledTurns` honors; only the ceiling
+    // applies to it, and its loader should last as long as its turn does.
+    const runningNoHeartbeat = await mkTurn(await mkConversation("C915:2"), {
+      status: "running",
+      lastProgressAt: null,
+    });
+    // Running with a STALE heartbeat: kept here on purpose. Stall detection
+    // is `failStalledTurns`' job — it fails the turn, and that terminal
+    // status takes the loader down through the ordinary clear. Sweeping on
+    // the clock here would be a second copy of the stall rule.
+    const runningStale = await mkTurn(await mkConversation("C915:3"), {
+      status: "running",
+      lastProgressAt: new Date(Date.now() - 20 * 60 * 1000),
+    });
+    // A joined follow-up under a RUNNING parent: the exchange is live.
+    const liveParentConversation = await mkConversation("C915:4");
+    const liveParent = await mkTurn(liveParentConversation, {
+      status: "running",
+    });
+    const joinedUnderLive = await mkTurn(liveParentConversation, {
+      status: "joined",
+      followUpOfTurnId: liveParent,
+    });
+    // A joined follow-up under a DONE parent: the exchange is over, and a
+    // row still here is the leak.
+    const doneParentConversation = await mkConversation("C915:5");
+    const doneParent = await mkTurn(doneParentConversation, {
+      status: "done",
+    });
+    const joinedUnderDone = await mkTurn(doneParentConversation, {
+      status: "joined",
+      followUpOfTurnId: doneParent,
+    });
+
+    const before = new Date(Date.now() - 11 * 60 * 1000);
+    await db.channelTurnReceipt.createMany({
+      data: [
+        runningFresh,
+        runningNoHeartbeat,
+        runningStale,
+        joinedUnderLive,
+        joinedUnderDone,
+      ].map((turnId, index) => ({
+        turnId,
+        agentChannelId: presenceId,
+        channel: "C915",
+        messageTs: `915.000${index}`,
+        kind: "session",
+        workStatusSet: true,
+        createdAt: before,
+      })),
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    const remaining = new Set(
+      (
+        await db.channelTurnReceipt.findMany({
+          where: { agentChannelId: presenceId },
+          select: { turnId: true },
+        })
+      ).map((row) => row.turnId),
+    );
+    expect(remaining).toEqual(
+      new Set([
+        runningFresh,
+        runningNoHeartbeat,
+        runningStale,
+        joinedUnderLive,
+      ]),
+    );
+    // Exactly one clear went to the provider — the leaked row's.
+    const cleared = slackCallsFor("agents.sessions.setStatus");
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]!.form.get("thread_ts")).toBe("915.0004");
+  });
+
+  it("the stale-session sweep is not STARVED by live turns ahead of a leak", async () => {
+    // The exclusion must live in the query, not after it: a post-filter over
+    // a `take: 20` batch that happens to be twenty old receipts on live long
+    // turns would return nothing to sweep on every pass, and a real leak
+    // just behind them would never be reached.
+    //
+    // MUTATION-PROOF: move the liveness check to a post-filter over the
+    // first 20 rows and the leaked row below survives the pass.
+    const { agentId, presenceId } = await seedChannelAgent(
+      "receipt-sweep-starve",
+      {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-sweep-starve" }),
+        ),
+      },
+    );
+    slackHandlers["agents.sessions.setStatus"] = () => ({ ok: true });
+    const liveTurnIds: string[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: `C916:${index}` },
+        select: { id: true },
+      });
+      liveTurnIds.push(
+        (
+          await db.turn.create({
+            data: {
+              conversationId: conversation.id,
+              message: `live ${index}`,
+              status: "running",
+              source: "slack",
+            },
+            select: { id: true },
+          })
+        ).id,
+      );
+    }
+    const leakedConversation = await db.conversation.create({
+      data: { agentId, source: "slack", externalRef: "C916:leak" },
+      select: { id: true },
+    });
+    const leakedTurnId = (
+      await db.turn.create({
+        data: {
+          conversationId: leakedConversation.id,
+          message: "leaked",
+          status: "done",
+          source: "slack",
+        },
+        select: { id: true },
+      })
+    ).id;
+    // The live rows are OLDER than the leak, so an age-ordered batch of 20
+    // is exactly them.
+    const olderStill = new Date(Date.now() - 30 * 60 * 1000);
+    const older = new Date(Date.now() - 11 * 60 * 1000);
+    await db.channelTurnReceipt.createMany({
+      data: [
+        ...liveTurnIds.map((turnId, index) => ({
+          turnId,
+          agentChannelId: presenceId,
+          channel: "C916",
+          messageTs: `916.${String(index).padStart(4, "0")}`,
+          kind: "session",
+          workStatusSet: true,
+          createdAt: olderStill,
+        })),
+        {
+          turnId: leakedTurnId,
+          agentChannelId: presenceId,
+          channel: "C916",
+          messageTs: "916.9999",
+          kind: "session",
+          workStatusSet: true,
+          createdAt: older,
+        },
+      ],
+    });
+
+    await receipts.sweepStaleSessionReceipts();
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: leakedTurnId },
+      }),
+    ).toBeNull();
+    expect(
+      await db.channelTurnReceipt.count({
+        where: { turnId: { in: liveTurnIds } },
+      }),
+    ).toBe(20);
+  });
+
   /** A conversation with a done target turn and a joining follow-up — the
    * receipt move's real substrate (candidates resolve by conversation). */
   const seedMoveFamily = async (agentId: string, ref: string) => {
@@ -6295,18 +8629,20 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     return { conversationId: conversation.id, target, followUp };
   };
 
-  it("MOVES the mark to a mid-run follow-up: same emoji, new message, old one unmarked", async () => {
-    const { agentId, presenceId } = await seedChannelAgent("receipt-move", {
+  it("a mid-run follow-up gets its OWN waiting mark: no chooser, nothing moved", async () => {
+    // One mark per message, never moved. The first message keeps its
+    // AI-chosen emoji; the follow-up gets the fixed waiting glyph on its
+    // own message, with no model call spent on it. MUTATION-PROOF: move
+    // the parent's mark instead and the parent's row vanishes; call the
+    // chooser and the completions count rises.
+    const { agentId, presenceId } = await seedChannelAgent("receipt-fu", {
       presenceCredentials: await getCrypto().encrypt(
-        JSON.stringify({ botToken: "xoxb-move" }),
+        JSON.stringify({ botToken: "xoxb-fu" }),
       ),
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["reactions.remove"] = () => ({ ok: true });
-    const { conversationId, target, followUp } = await seedMoveFamily(
-      agentId,
-      "D901",
-    );
+    const { target, followUp } = await seedMoveFamily(agentId, "D901");
     await receipts.attachTurnReceipt({
       presenceId,
       turnId: target.id,
@@ -6315,130 +8651,299 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       text: "the first message",
     });
     const addsBefore = slackCallsFor("reactions.add").length;
+    // The chooser's inference lands on the same recording fake.
+    const inferencesBefore = slackCallsFor("v1/messages").length;
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId,
       channel: "D901",
       messageTs: "600.0002",
-      text: "the follow-up",
     });
 
-    // The mark travelled: same reaction (no second chooser inference), new
-    // owner row, new message marked, old message unmarked, old row gone.
-    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
+    const mark = await db.channelTurnReceipt.findUniqueOrThrow({
       where: { turnId: followUp.id },
     });
-    expect(moved.reaction).toBe("eyes");
-    expect(moved.messageTs).toBe("600.0002");
-    expect(
-      await db.channelTurnReceipt.findUnique({
-        where: { turnId: target.id },
-      }),
-    ).toBeNull();
+    expect(mark.kind).toBe("reaction");
+    expect(mark.reaction).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+    expect(mark.messageTs).toBe("600.0002");
+    // The parent's mark is untouched: same row, same emoji, same message.
+    const parent = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: target.id },
+    });
+    expect(parent.reaction).toBe("eyes");
+    expect(parent.messageTs).toBe("600.0001");
     const add = slackCallsFor("reactions.add").at(-1)!;
     expect(add.form.get("timestamp")).toBe("600.0002");
-    expect(add.form.get("name")).toBe("eyes");
+    expect(add.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
     expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
-    const remove = slackCallsFor("reactions.remove").at(-1)!;
-    expect(remove.form.get("timestamp")).toBe("600.0001");
+    expect(slackCallsFor("reactions.remove")).toHaveLength(0);
+    expect(slackCallsFor("v1/messages")).toHaveLength(inferencesBefore);
   });
 
-  it("the move survives a PROMOTION CHAIN — the mark can sit generations away from the direct target", async () => {
-    // t1's follow-up f1 carried the mark, got promoted, and the new message
-    // targets f1 — a one-level sibling walk would miss the mark and attach a
-    // second one. Conversation-wide resolution finds it wherever it sits.
-    const { agentId, presenceId } = await seedChannelAgent("receipt-chain", {
+  it("the pickup flips the follow-up's mark from waiting to read, and is idempotent", async () => {
+    // The live pickup signal (`message.joined`) says the agent has the
+    // message: the waiting glyph comes off, the read glyph goes on, the
+    // ledger says so. A second call finds no waiting mark and does nothing.
+    // MUTATION-PROOF: add the new mark without updating the row and the
+    // answer-post clear removes the wrong emoji (the clear reads the row).
+    const { agentId, presenceId } = await seedChannelAgent("receipt-read", {
       presenceCredentials: await getCrypto().encrypt(
-        JSON.stringify({ botToken: "xoxb-chain" }),
+        JSON.stringify({ botToken: "xoxb-read" }),
       ),
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["reactions.remove"] = () => ({ ok: true });
-    const {
-      conversationId,
-      target: t1,
-      followUp: f1,
-    } = await seedMoveFamily(agentId, "D905");
-    // t1 closed; f1 was promoted and now runs; the mark sits on ITS message.
-    await db.turn.update({
-      where: { id: t1.id },
-      data: { status: "done", finishedAt: new Date() },
-    });
-    await db.turn.update({
-      where: { id: f1.id },
-      data: { status: "running", promotedAt: new Date() },
-    });
-    await receipts.attachTurnReceipt({
+    const { followUp } = await seedMoveFamily(agentId, "D905");
+    await receipts.attachFollowUpReceipt({
       presenceId,
-      turnId: f1.id,
-      channel: "D905",
-      messageTs: "900.0001",
-      text: "promoted predecessor",
-    });
-    const f2 = await db.turn.create({
-      data: {
-        conversationId,
-        message: "newest message",
-        status: "joining",
-        followUpOfTurnId: f1.id,
-        source: "slack",
-      },
-      select: { id: true },
-    });
-
-    await receipts.moveTurnReceipt({
-      presenceId,
-      followUpTurnId: f2.id,
-      conversationId,
+      followUpTurnId: followUp.id,
       channel: "D905",
       messageTs: "900.0002",
-      text: "newest message",
     });
+    const addsBefore = slackCallsFor("reactions.add").length;
 
-    const moved = await db.channelTurnReceipt.findUniqueOrThrow({
-      where: { turnId: f2.id },
+    await receipts.markFollowUpRead(followUp.id);
+
+    const read = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: followUp.id },
     });
-    expect(moved.messageTs).toBe("900.0002");
-    expect(
-      await db.channelTurnReceipt.findUnique({ where: { turnId: f1.id } }),
-    ).toBeNull();
+    expect(read.reaction).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    expect(read.messageTs).toBe("900.0002");
+    const add = slackCallsFor("reactions.add").at(-1)!;
+    expect(add.form.get("timestamp")).toBe("900.0002");
+    expect(add.form.get("name")).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
+    const remove = slackCallsFor("reactions.remove").at(-1)!;
+    expect(remove.form.get("timestamp")).toBe("900.0002");
+    expect(remove.form.get("name")).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+
+    // Idempotent: nothing waiting any more, so nothing changes.
+    await receipts.markFollowUpRead(followUp.id);
+    expect(slackCallsFor("reactions.add")).toHaveLength(addsBefore + 1);
+    expect(slackCallsFor("reactions.remove")).toHaveLength(1);
   });
 
-  it("a move with nothing to move falls back to a plain attach", async () => {
-    // The web-opened case: the target turn never had a mark (web sends get
-    // no receipt), so the follow-up gets a fresh one, chooser and all.
+  it("a clear that lands as the mark flips leaves NO read mark behind", async () => {
+    // The answer posts (and its clear removes the waiting mark and deletes
+    // the row) in the window between the read mark going on and the ledger
+    // flip. The flip finds no row to flip and takes its own read mark back
+    // off, so the message ends the exchange bare. MUTATION-PROOF: flip with
+    // an unconditional update and the read mark stays on the message for
+    // good (the clear already ran, nothing removes it).
     const { agentId, presenceId } = await seedChannelAgent(
-      "receipt-move-fresh",
+      "receipt-read-race",
       {
         presenceCredentials: await getCrypto().encrypt(
-          JSON.stringify({ botToken: "xoxb-move-fresh" }),
+          JSON.stringify({ botToken: "xoxb-read-race" }),
         ),
       },
     );
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
     slackHandlers["reactions.add"] = () => ({ ok: true });
-    const { conversationId, followUp } = await seedMoveFamily(agentId, "D902");
-
-    await receipts.moveTurnReceipt({
+    const { target, followUp } = await seedMoveFamily(agentId, "D906");
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId,
-      channel: "D902",
-      messageTs: "700.0002",
-      text: "hello",
+      channel: "D906",
+      messageTs: "906.0002",
+    });
+    // The clear fires INSIDE the read mark's add: the answer posted at that
+    // exact moment. The follow-up is `joined` by then (the pickup is what
+    // triggered the flip), so the family clear walks it.
+    slackHandlers["reactions.add"] = async () => {
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      await db.turn.update({
+        where: { id: followUp.id },
+        data: { status: "joined" },
+      });
+      await receipts.clearTurnReceipts(target.id);
+      return { ok: true };
+    };
+
+    await receipts.markFollowUpRead(followUp.id);
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
+    const removed = slackCallsFor("reactions.remove")
+      .filter((c) => c.form.get("timestamp") === "906.0002")
+      .map((c) => c.form.get("name"));
+    // The clear took the waiting mark off; the flip took its read mark off.
+    expect(removed).toEqual([
+      receipts.FOLLOW_UP_WAITING_REACTION,
+      receipts.FOLLOW_UP_READ_REACTION,
+    ]);
+  });
+
+  it("the pickup leaves a follow-up with no mark alone (a web-sent message)", async () => {
+    const { agentId } = await seedChannelAgent("receipt-read-none", {
+      presenceCredentials: await getCrypto().encrypt(
+        JSON.stringify({ botToken: "xoxb-read-none" }),
+      ),
+    });
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    const { followUp } = await seedMoveFamily(agentId, "D902");
+
+    await receipts.markFollowUpRead(followUp.id);
+
+    expect(
+      await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUp.id },
+      }),
+    ).toBeNull();
+    expect(slackCallsFor("reactions.add")).toHaveLength(0);
+  });
+
+  it("END TO END through the real doors: a Slack message typed mid-run gets ⏳ on ingest, 👀 on the runner's message.joined, and nothing after the answer posts", async () => {
+    // The whole Slack-side story of per-message marks and live replies on
+    // one message, with every piece the real deployment runs: the Slack
+    // dispatch door accepts a second DM as a follow-up of the running turn
+    // (the ingest-side ⏳);
+    // the runner's event batch carrying `message.joined` settles the row
+    // and flips the mark (the route's hook, `markJoinedFollowUpsRead`);
+    // the completion pass's family clear takes it off. Pinned as one proof
+    // so a change to any door that breaks the chain shows up here, not only
+    // in a real workspace.
+    const { agentId, integrationId, presenceId } = await seedChannelAgent(
+      "receipt-e2e",
+      {
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-e2e" }),
+        ),
+      },
+    );
+    await linkUser(integrationId, "U909", MEMBER);
+    // The reporter the runner route authenticates as: this agent's sandbox.
+    const sandbox = await db.sandbox.create({
+      data: { agentId, runnerId: RUNNER, status: "running" },
+      select: { id: true },
+    });
+    const reporter = { runnerId: RUNNER, sandboxId: sandbox.id };
+    slackHandlers["reactions.add"] = () => ({ ok: true });
+    slackHandlers["reactions.remove"] = () => ({ ok: true });
+    // The first message's own mark is the model's pick; a refused chooser
+    // falls back to a fixed reaction, which is all this proof needs.
+    slackHandlers["v1/messages"] = () => ({ error: "refused" });
+    const turnService = await import("../turn-service");
+
+    // 1. The person's first DM opens a turn; the runner starts it.
+    const first = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: dmEvent("U909", "D909", "run the report"),
+      eventId: "Ev-e2e-1",
+    });
+    if (first.kind !== "message" || first.outcome.kind !== "turn") {
+      throw new Error("unreachable");
+    }
+    const turnId = first.outcome.turn.id;
+    const conversationId = first.outcome.conversationId;
+    await db.turn.update({
+      where: { id: turnId },
+      data: { status: "dispatched" },
+    });
+    expect(
+      await turnService.applyTurnEvents(reporter, conversationId, turnId, [
+        { type: "turn.started" },
+      ]),
+    ).toBe(true);
+
+    // 2. A second DM while the turn runs: a follow-up, marked ⏳ on ITS
+    //    message by the ingest door (detached: poll the ledger).
+    const second = await dispatch.dispatchSlackEvent({
+      presenceId,
+      identityRef: "UBOT",
+      event: { ...dmEvent("U909", "D909", "also the linter"), ts: "1000.0002" },
+      eventId: "Ev-e2e-2",
+    });
+    if (second.kind !== "message" || second.outcome.kind !== "followUp") {
+      throw new Error("unreachable");
+    }
+    const followUpId = second.outcome.turn.id;
+    await vi.waitFor(async () => {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUpId },
+      });
+      expect(row?.reaction).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
+      // attachFollowUpReceipt writes the row BEFORE posting the mark.
+      expect(
+        slackCallsFor("reactions.add")
+          .find((c) => c.form.get("timestamp") === "1000.0002")
+          ?.form.get("name"),
+      ).toBe(receipts.FOLLOW_UP_WAITING_REACTION);
     });
 
-    const row = await db.channelTurnReceipt.findUniqueOrThrow({
-      where: { turnId: followUp.id },
+    // 3. The supervisor delivered it and the daemon confirmed the join: the
+    //    runner's batch settles the row (the control plane's fence) and the
+    //    route's hook flips the mark to 👀.
+    await db.turn.update({
+      where: { id: followUpId },
+      data: { steerDeliveredAt: new Date() },
     });
-    expect(row.messageTs).toBe("700.0002");
+    const events: AgentEvent[] = [
+      { type: "message.joined", followUpId },
+      { type: "text.delta", text: "Sure, " },
+    ];
+    expect(
+      await turnService.applyTurnEvents(
+        reporter,
+        conversationId,
+        turnId,
+        events,
+      ),
+    ).toBe(true);
+    const { markJoinedFollowUpsRead } = await import("../../routes/runner");
+    markJoinedFollowUpsRead(turnId, events);
+    expect(
+      (await db.turn.findUniqueOrThrow({ where: { id: followUpId } })).status,
+    ).toBe("joined");
+    await vi.waitFor(async () => {
+      const row = await db.channelTurnReceipt.findUnique({
+        where: { turnId: followUpId },
+      });
+      expect(row?.reaction).toBe(receipts.FOLLOW_UP_READ_REACTION);
+    });
+    const onSecond = (method: string) =>
+      slackCallsFor(method)
+        .filter((c) => c.form.get("timestamp") === "1000.0002")
+        .map((c) => c.form.get("name"));
+    // `markFollowUpRead` is detached and runs add → ledger flip → remove:
+    // the row reading 👀 does NOT mean the ⏳ came off yet. Wait on the
+    // calls themselves, the last thing the hook does, not on the ledger.
+    await vi.waitFor(() => {
+      expect(onSecond("reactions.add")).toEqual([
+        receipts.FOLLOW_UP_WAITING_REACTION,
+        receipts.FOLLOW_UP_READ_REACTION,
+      ]);
+      expect(onSecond("reactions.remove")).toEqual([
+        receipts.FOLLOW_UP_WAITING_REACTION,
+      ]);
+    });
+
+    // 4. The answer posts: the completion pass's family clear (what the
+    //    adapter's cursor claim triggers) takes the read mark off and the
+    //    row with it. The message ends the exchange bare.
+    await db.turn.update({
+      where: { id: turnId },
+      data: { status: "done", finishedAt: new Date() },
+    });
+    await receipts.clearTurnReceipts(turnId);
+    expect(
+      await db.channelTurnReceipt.findUnique({ where: { turnId: followUpId } }),
+    ).toBeNull();
+    expect(onSecond("reactions.remove")).toEqual([
+      receipts.FOLLOW_UP_WAITING_REACTION,
+      receipts.FOLLOW_UP_READ_REACTION,
+    ]);
   });
 
   it("the answer-post clear takes the WHOLE family off: the turn's mark and its joined follow-ups'", async () => {
-    // The mark may sit on a follow-up's message by post time (it moved
-    // there) — clearing only the finished turn's id would leave a stale
-    // "seen" on the last follow-up forever.
+    // Every message in the exchange carries its own mark by post time (the
+    // follow-up's read glyph, the turn's emoji): clearing only the finished
+    // turn's id would leave a stale mark on each follow-up forever.
     const { agentId, presenceId } = await seedChannelAgent("receipt-family", {
       presenceCredentials: await getCrypto().encrypt(
         JSON.stringify({ botToken: "xoxb-family" }),
@@ -6557,7 +9062,7 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
     });
     slackHandlers["reactions.add"] = () => ({ ok: true });
     slackHandlers["v1/messages"] = () => ({
-      content: [{ type: "text", text: "rocket" }],
+      content: [{ type: "text", text: "bulb" }],
     });
 
     const result = await dispatch.dispatchSlackEvent({
@@ -6577,10 +9082,10 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
       const row = await db.channelTurnReceipt.findUnique({
         where: { turnId },
       });
-      expect(row?.reaction).toBe("rocket");
+      expect(row?.reaction).toBe("bulb");
     });
     const add = slackCallsFor("reactions.add").at(-1)!;
-    expect(add.form.get("name")).toBe("rocket");
+    expect(add.form.get("name")).toBe("bulb");
     expect(add.form.get("timestamp")).toBe("1000.0001");
   });
 
@@ -6622,6 +9127,11 @@ describe.skipIf(!PROOF_URL)("turn receipts (the reaction 'seen' mark)", () => {
 });
 
 describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
+  // A card write deferred to the end of its window must never fire into the
+  // next test's fresh state: each test owns its own clock.
+  afterEach(() => {
+    receipts.takeDeferredCardRefreshesForTests();
+  });
   const seedSessionReceipt = async (
     turnId: string,
     cardThreadTs: string | null = null,
@@ -6898,7 +9408,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     expect(slackCallsFor("chat.update")).toHaveLength(0);
   });
 
-  it("THROTTLES: an agent alternating tools cannot hammer Slack", async () => {
+  it("THROTTLES: an agent alternating tools cannot hammer Slack, and no step is lost", async () => {
     await seedSessionReceipt("turn-card-throttle");
     slackHandlers["chat.postMessage"] = () => ({
       ok: true,
@@ -6909,7 +9419,7 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
 
     // read → bash → read: the step CHANGES every call, so repeat
     // suppression alone would let all three through.
-    // MUTATION-PROOF: remove the interval check and this fails.
+    // MUTATION-PROOF: remove the window check and this fails.
     await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
     await receipts.narrateTurnActivity(
       "turn-card-throttle",
@@ -6917,15 +9427,28 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     );
     await receipts.narrateTurnActivity("turn-card-throttle", "Reading a file");
     expect(slackCallsFor("chat.update")).toHaveLength(0);
+    // The steps inside the window are recorded and owe ONE write at its
+    // end, so the card never sits on a step the agent has moved past.
+    expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+      "turn-card-throttle",
+    ]);
 
-    // ...and once the floor passes, narration resumes: the throttle delays a
-    // step, it never silences the turn.
+    // ...and once the floor passes, the next write shows the latest steps.
     await pastThrottle("turn-card-throttle");
     await receipts.narrateTurnActivity(
       "turn-card-throttle",
       "Searching the web",
     );
     expect(slackCallsFor("chat.update")).toHaveLength(1);
+    const row = await db.channelTurnReceipt.findUniqueOrThrow({
+      where: { turnId: "turn-card-throttle" },
+    });
+    expect(row.cardSteps).toEqual([
+      "Reading a file",
+      "Running a command",
+      "Reading a file",
+      "Searching the web",
+    ]);
   });
 
   it("REMOVES the card when the answer posts — a loader is not a reply", async () => {
@@ -6981,8 +9504,9 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     // put the row out of `narrateTurnActivity`'s reach and it returned
     // silently (no log, no error: it looked exactly like a healthy no-op).
     //
-    // MUTATION-PROOF: re-key the session row in `moveTurnReceipt` and this
-    // fails — no `chat.update` is made and the card stops at "Reading a file".
+    // MUTATION-PROOF: re-key the session row in `attachFollowUpReceipt` (or
+    // mark the follow-up under a session thread) and this fails: no
+    // `chat.update` is made and the card stops at "Reading a file".
     const { agentId, presenceId } = await seedChannelAgent("narrate-followup", {
       appMode: "agent",
       presenceCredentials: await getCrypto().encrypt(
@@ -7033,16 +9557,11 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     await receipts.narrateTurnActivity(target.id, "Reading a file");
     expect(slackCallsFor("chat.postMessage")).toHaveLength(1);
 
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "C960",
       messageTs: "960.0002",
-      threadTs: "960.0001",
-      replyThreadTs: "960.0001",
-      unthreaded: false,
-      text: "the follow-up",
     });
 
     // Wind the card's clock back so the 1.5s narration throttle cannot be
@@ -7120,16 +9639,11 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
       text: "hey",
     });
     // The follow-up arrives before any tool has run.
-    await receipts.moveTurnReceipt({
+    await receipts.attachFollowUpReceipt({
       presenceId,
       followUpTurnId: followUp.id,
-      conversationId: conversation.id,
       channel: "D961",
       messageTs: "961.0002",
-      threadTs: "961.0001",
-      replyThreadTs: null,
-      unthreaded: true,
-      text: "and this too",
     });
 
     const postsBefore = slackCallsFor("chat.postMessage").length;
@@ -7214,8 +9728,9 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     // down — otherwise its list (which never contained the winner's step)
     // overwrites the winner's, and a step silently disappears from the card.
     //
-    // MUTATION-PROOF: drop `if (claimed.count === 0) return;` and this
-    // fails — the card ends up showing only one of the two steps.
+    // MUTATION-PROOF: write the steps AFTER the provider call instead of
+    // before it, and this fails: the card ends up showing only one of the
+    // two steps.
     await seedSessionReceipt("turn-card-lost");
     slackHandlers["chat.postMessage"] = () => ({
       ok: true,
@@ -7289,6 +9804,321 @@ describe.skipIf(!PROOF_URL)("turn narration (the live task card)", () => {
     );
 
     expect(slackCallsFor("chat.postMessage")).toHaveLength(before);
+  });
+
+  describe("the messages waiting on the card (a row each, with Send now)", () => {
+    type Row = {
+      type: string;
+      text?: { text: string };
+      accessory?: { value: string; visible_to_user_ids: string[] };
+    };
+    const rowsOf = (form: URLSearchParams) =>
+      (JSON.parse(form.get("blocks") ?? "[]") as Row[]).filter(
+        (b) => b.type === "section",
+      );
+    const lastCardRows = () => {
+      const writes = [
+        ...slackCallsFor("chat.postMessage"),
+        ...slackCallsFor("chat.update"),
+      ];
+      return rowsOf(writes.at(-1)!.form);
+    };
+
+    /** A running turn with a posted card, and its integration's id. */
+    const seedPostedCard = async (key: string) => {
+      const { agentId, presenceId, integrationId } = await seedChannelAgent(
+        `rows-${key}`,
+        {
+          appMode: "agent",
+          presenceCredentials: await getCrypto().encrypt(
+            JSON.stringify({ botToken: "xoxb-rows" }),
+          ),
+        },
+      );
+      slackHandlers["chat.postMessage"] = () => ({
+        ok: true,
+        channel: "D970",
+        ts: "970.5001",
+      });
+      slackHandlers["chat.update"] = () => ({ ok: true });
+      slackHandlers["reactions.add"] = () => ({ ok: true });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: `D970-${key}` },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D970",
+          messageTs: "970.0001",
+          kind: "session",
+        },
+      });
+      await receipts.narrateTurnActivity(target.id, "Running a command");
+      await db.channelTurnReceipt.update({
+        where: { turnId: target.id },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      return {
+        presenceId,
+        integrationId,
+        conversationId: conversation.id,
+        turnId: target.id,
+      };
+    };
+
+    const seedFollowUp = (
+      card: { conversationId: string; turnId: string },
+      input: { message: string; userId?: string; source?: string },
+    ) =>
+      db.turn.create({
+        data: {
+          conversationId: card.conversationId,
+          followUpOfTurnId: card.turnId,
+          message: input.message,
+          status: "joining",
+          source: input.source ?? "slack",
+          userId: input.userId ?? null,
+        },
+        select: { id: true },
+      });
+
+    it("a message accepted under the card appears as its row, with Send now for its LINKED author only", async () => {
+      const card = await seedPostedCard("appear");
+      await linkUser(card.integrationId, "U0ROWAUTHOR", MEMBER);
+      const followUp = await seedFollowUp(card, {
+        message: "and check the logs",
+        userId: MEMBER,
+      });
+      const guestFollowUp = await seedFollowUp(card, { message: "a guest" });
+
+      await receipts.attachFollowUpReceipt({
+        presenceId: card.presenceId,
+        followUpTurnId: followUp.id,
+        channel: "D970",
+        messageTs: "970.0002",
+      });
+
+      const rows = lastCardRows();
+      expect(rows.map((r) => r.text?.text)).toEqual([
+        expect.stringContaining("\u201cand check the logs\u201d"),
+        expect.stringContaining("\u201ca guest\u201d"),
+      ]);
+      expect(rows[0]?.accessory).toMatchObject({
+        value: followUp.id,
+        visible_to_user_ids: ["U0ROWAUTHOR"],
+      });
+      // Nobody could press a guest's: no control is drawn.
+      expect(rows[1]?.accessory).toBeUndefined();
+      expect(guestFollowUp.id).not.toBe(followUp.id);
+      // The row IS the mark under a loader: no emoji on the message.
+      expect(slackCallsFor("reactions.add")).toHaveLength(0);
+    });
+
+    it("a platform wake joined to the turn is never listed: nobody typed it", async () => {
+      const card = await seedPostedCard("automation");
+      await seedFollowUp(card, {
+        message: "cron: run the report",
+        source: "cron",
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toEqual([]);
+    });
+
+    it("the row leaves the card once the agent reads the message", async () => {
+      const card = await seedPostedCard("leave");
+      const followUp = await seedFollowUp(card, { message: "read me" });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toHaveLength(1);
+
+      await db.turn.update({
+        where: { id: followUp.id },
+        data: { status: "joined" },
+      });
+      await db.channelTurnReceipt.update({
+        where: { turnId: card.turnId },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(lastCardRows()).toEqual([]);
+      // A refresh adds no step: the card still says what the agent does.
+      const row = await db.channelTurnReceipt.findUniqueOrThrow({
+        where: { turnId: card.turnId },
+      });
+      expect(row.cardSteps).toEqual(["Running a command"]);
+    });
+
+    it("a burst of changes inside the rate floor is ONE deferred render, never dropped", async () => {
+      // MUTATION-PROOF: make the in-window branch return without deferring
+      // and this fails: the row would only appear at the next step.
+      const card = await seedPostedCard("burst");
+      await receipts.refreshTurnCard(card.turnId);
+      const updates = slackCallsFor("chat.update").length;
+
+      await seedFollowUp(card, { message: "one" });
+      await receipts.refreshTurnCard(card.turnId);
+      await seedFollowUp(card, { message: "two" });
+      await receipts.refreshTurnCard(card.turnId);
+
+      // Inside the floor: nothing written now, one render owed.
+      expect(slackCallsFor("chat.update")).toHaveLength(updates);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+        card.turnId,
+      ]);
+
+      // Its moment comes: it reads the state as it is THEN (both rows).
+      await db.channelTurnReceipt.update({
+        where: { turnId: card.turnId },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      await receipts.refreshTurnCard(card.turnId);
+      expect(slackCallsFor("chat.update")).toHaveLength(updates + 1);
+      expect(lastCardRows()).toHaveLength(2);
+    });
+
+    it("two refreshes at once write the card ONCE; the other is owed, not lost", async () => {
+      // MUTATION-PROOF: drop the clock compare-and-set and this fails: both
+      // read the same open window and both render (two writes for one).
+      const card = await seedPostedCard("rival");
+      const updates = slackCallsFor("chat.update").length;
+
+      await Promise.all([
+        receipts.refreshTurnCard(card.turnId),
+        receipts.refreshTurnCard(card.turnId),
+      ]);
+
+      expect(slackCallsFor("chat.update")).toHaveLength(updates + 1);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([
+        card.turnId,
+      ]);
+    });
+
+    it("a message accepted while the FIRST post is in flight is shown once the card lands", async () => {
+      // MUTATION-PROOF: drop the poster's landed-revision check, or let an
+      // in-flight refresh return without marking itself owed, and this
+      // fails: the row would wait for the agent's next step to appear.
+      const { agentId, presenceId } = await seedChannelAgent("rows-inflight", {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-rows" }),
+        ),
+      });
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      slackHandlers["chat.postMessage"] = async () => {
+        await held;
+        return { ok: true, channel: "D972", ts: "972.5001" };
+      };
+      slackHandlers["chat.update"] = () => ({ ok: true });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: "D972" },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D972",
+          messageTs: "972.0001",
+          kind: "session",
+        },
+      });
+
+      const firstPost = receipts.narrateTurnActivity(
+        target.id,
+        "Running a command",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // The first post read what was waiting before this message existed.
+      await seedFollowUp(
+        { conversationId: conversation.id, turnId: target.id },
+        { message: "arrived mid-post" },
+      );
+      await receipts.refreshTurnCard(target.id);
+      // A slow post: its write window has passed by the time it lands.
+      await db.channelTurnReceipt.update({
+        where: { turnId: target.id },
+        data: { cardAt: new Date(Date.now() - 10_000) },
+      });
+      release?.();
+      await firstPost;
+
+      expect(rowsOf(slackCallsFor("chat.postMessage")[0]!.form)).toEqual([]);
+      expect(slackCallsFor("chat.update")).toHaveLength(1);
+      expect(lastCardRows().map((r) => r.text?.text)).toEqual([
+        expect.stringContaining("\u201carrived mid-post\u201d"),
+      ]);
+    });
+
+    it("no card posted yet: nothing is rendered, and the first step lists what waits", async () => {
+      const { agentId, presenceId } = await seedChannelAgent("rows-nocard", {
+        appMode: "agent",
+        presenceCredentials: await getCrypto().encrypt(
+          JSON.stringify({ botToken: "xoxb-rows" }),
+        ),
+      });
+      slackHandlers["chat.postMessage"] = () => ({
+        ok: true,
+        channel: "D971",
+        ts: "971.5001",
+      });
+      const conversation = await db.conversation.create({
+        data: { agentId, source: "slack", externalRef: "D971" },
+        select: { id: true },
+      });
+      const target = await db.turn.create({
+        data: {
+          conversationId: conversation.id,
+          message: "the long task",
+          status: "running",
+          source: "slack",
+        },
+        select: { id: true },
+      });
+      await db.channelTurnReceipt.create({
+        data: {
+          turnId: target.id,
+          agentChannelId: presenceId,
+          channel: "D971",
+          messageTs: "971.0001",
+          kind: "session",
+        },
+      });
+      await seedFollowUp(
+        { conversationId: conversation.id, turnId: target.id },
+        { message: "early" },
+      );
+
+      await receipts.refreshTurnCard(target.id);
+      expect(slackCallsFor("chat.postMessage")).toHaveLength(0);
+      expect(receipts.takeDeferredCardRefreshesForTests()).toEqual([]);
+
+      await receipts.narrateTurnActivity(target.id, "Reading a file");
+      expect(rowsOf(slackCallsFor("chat.postMessage")[0]!.form)).toHaveLength(
+        1,
+      );
+    });
   });
 });
 
@@ -7576,4 +10406,1644 @@ describe.skipIf(!PROOF_URL)("decideApprovalFromChannel", () => {
     expect(result.kind).toBe("unavailable");
     expect(gatewayCalls).toHaveLength(0);
   });
+
+  // ── Grouped cards: Approve all / Deny all ────────────────────────────────
+
+  const seedGroup = async (suffix: string, extra: number) => {
+    const seeded = await seedApprovable(suffix);
+    const ids = [seeded.approvalId];
+    for (let i = 0; i < extra; i++) {
+      const approvalId = `ap-${suffix}-${i}`;
+      await db.toolApprovalCard.create({
+        data: {
+          approvalId,
+          agentChannelId: seeded.presenceId,
+          externalThreadId: "D1",
+          externalMessageRef: "169.1",
+        },
+      });
+      ids.push(approvalId);
+    }
+    return { ...seeded, ids };
+  };
+
+  it("Approve all decides EVERY shown id with the service key and audits each", async () => {
+    const { presenceId, ids, agentId } = await seedGroup("grp", 2);
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result).toEqual({
+      kind: "decided",
+      decidedByName: "Morgan Member",
+      decided: ids,
+      alreadySettled: [],
+      failed: [],
+    });
+    expect(gatewayCalls.map((c) => c.path).sort()).toEqual(
+      ids.map((id) => `/v1/approvals/${id}/decision`).sort(),
+    );
+    for (const call of gatewayCalls) {
+      expect(call.auth).toBe(`Bearer ${SERVICE_KEY}`);
+    }
+    // One audit row PER approval, each naming the clicker.
+    const audits = await db.auditLog.findMany({
+      where: { workspaceId: WORKSPACE, service: "channel", action: "approve" },
+    });
+    expect(audits).toHaveLength(ids.length);
+    for (const audit of audits) {
+      expect(audit.userId).toBe(MEMBER);
+      expect(audit.metadata).toMatchObject({
+        agentId,
+        presenceId,
+        groupSize: ids.length,
+      });
+    }
+    const cards = await db.toolApprovalCard.findMany({
+      where: { approvalId: { in: ids } },
+    });
+    expect(cards.every((c) => c.state === "decided")).toBe(true);
+  });
+
+  it("REFUSES the WHOLE click when one id belongs to another agent's or org's presence", async () => {
+    // MUTATION-TESTED: the agentChannelId fence. A signed payload can carry
+    // any id; drop the fence and a click on agent A's card decides agent B's
+    // pending request with A's service key.
+    const { presenceId, ids } = await seedGroup("fence", 1);
+    const other = await seedChannelAgent("fence-other");
+    // The cross-tenant control: a card a FOREIGN org's presence posted.
+    const foreignAgent = await db.agent.create({
+      data: {
+        workspaceId: OTHER_WORKSPACE,
+        name: "foreign",
+        identifier: `${P}fence-foreign`,
+        accessToken: `aoc_${P}fence-foreign`,
+        kind: "hosted",
+        harness: "fake",
+      },
+      select: { id: true },
+    });
+    const foreignIntegration = await seedIntegration({
+      organizationId: OTHER_ORG,
+      externalId: "T999",
+    });
+    const foreignPresence = await seedPresence(
+      foreignAgent.id,
+      foreignIntegration.id,
+    );
+    for (const [approvalId, agentChannelId] of [
+      ["ap-planted", other.presenceId],
+      ["ap-foreign", foreignPresence.id],
+    ] as const) {
+      await db.toolApprovalCard.create({
+        data: {
+          approvalId,
+          agentChannelId,
+          externalThreadId: "D2",
+          externalMessageRef: "170.1",
+        },
+      });
+    }
+
+    for (const planted of ["ap-planted", "ap-foreign", "ap-never-posted"]) {
+      const result = await approvals.decideApprovalsFromChannel({
+        presenceId,
+        approvalIds: [...ids, planted],
+        decision: "approve",
+        clickerExternalUserId: "U111",
+      });
+      expect(result.kind).toBe("refused");
+    }
+    // Nothing was decided: not the planted ids, not even the legitimate ones.
+    expect(gatewayCalls).toHaveLength(0);
+    expect(
+      await db.auditLog.count({
+        where: {
+          workspaceId: { in: [WORKSPACE, OTHER_WORKSPACE] },
+          service: "channel",
+        },
+      }),
+    ).toBe(0);
+    expect(
+      await db.toolApprovalCard.count({
+        where: {
+          approvalId: { in: ["ap-planted", "ap-foreign", ...ids] },
+          state: "decided",
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it("REFUSES an unlinked clicker before the gateway is asked anything", async () => {
+    const { presenceId, ids } = await seedGroup("grp-stranger", 1);
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U999",
+    });
+    expect(result.kind).toBe("refused");
+    expect(gatewayCalls).toHaveLength(0);
+  });
+
+  it("refuses an oversized click outright", async () => {
+    const { presenceId } = await seedGroup("grp-big", 0);
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: Array.from({ length: 51 }, (_, i) => `ap-x${i}`),
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+    expect(result.kind).toBe("refused");
+    expect(gatewayCalls).toHaveLength(0);
+  });
+
+  it("splits settled and FAILED ids; a failed one stays pending", async () => {
+    const { presenceId, ids } = await seedGroup("grp-mixed", 2);
+    const [ok, gone, broken] = ids;
+    gatewayRespond = (call) =>
+      call.path.includes(`/${gone}/`)
+        ? { status: 410, body: {} }
+        : call.path.includes(`/${broken}/`)
+          ? { status: 500, body: {} }
+          : { status: 200, body: { success: true } };
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "deny",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result).toMatchObject({
+      kind: "decided",
+      decided: [ok],
+      alreadySettled: [gone],
+      failed: [broken],
+    });
+    expect(
+      (
+        await db.toolApprovalCard.findUniqueOrThrow({
+          where: { approvalId: broken! },
+        })
+      ).state,
+    ).not.toBe("decided");
+    expect(
+      await db.auditLog.count({
+        where: { workspaceId: WORKSPACE, service: "channel", action: "deny" },
+      }),
+    ).toBe(1);
+  });
+
+  it("a refused service key mid-click still records what the gateway DID decide", async () => {
+    // The gateway answers per id: some may already be decided when another
+    // comes back 401. Those decisions happened, so each keeps its audit row
+    // (the clicker's attribution) and its settled card; only then does the
+    // presence flip and the click answer "unavailable".
+    const { presenceId, ids } = await seedGroup("grp-401", 1);
+    const [ok, refused] = ids;
+    gatewayRespond = (call) =>
+      call.path.includes(`/${refused}/`)
+        ? { status: 401, body: {} }
+        : { status: 200, body: { success: true } };
+
+    const result = await approvals.decideApprovalsFromChannel({
+      presenceId,
+      approvalIds: ids,
+      decision: "approve",
+      clickerExternalUserId: "U111",
+    });
+
+    expect(result.kind).toBe("unavailable");
+    const audits = await db.auditLog.findMany({
+      where: { workspaceId: WORKSPACE, service: "channel", action: "approve" },
+    });
+    expect(audits.map((a) => a.metadata)).toEqual([
+      expect.objectContaining({ approvalId: ok }),
+    ]);
+    expect(audits[0]?.userId).toBe(MEMBER);
+    const cards = await db.toolApprovalCard.findMany({
+      where: { approvalId: { in: ids } },
+      select: { approvalId: true, state: true },
+    });
+    expect(
+      Object.fromEntries(cards.map((c) => [c.approvalId, c.state])),
+    ).toEqual({ [ok!]: "decided", [refused!]: "pending" });
+    expect(
+      (await db.agentChannel.findUniqueOrThrow({ where: { id: presenceId } }))
+        .status,
+    ).toBe("needs_attention");
+  });
 });
+
+describe.skipIf(!PROOF_URL)("durable channel cleanup outbox", () => {
+  const seedCleanup = async (
+    suffix: string,
+    options: { enqueue?: boolean; deleteRemote?: boolean } = {},
+  ) => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent(`cleanup-${suffix}`);
+    const key = await apiKeys.createServiceApiKey(
+      ADMIN,
+      { workspaceId: WORKSPACE },
+      "cleanup-key",
+    );
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({
+        botToken: "xoxb-cleanup-secret",
+        clientId: "cleanup-client",
+        clientSecret: "cleanup-secret",
+      }),
+    );
+    const presence = await seedPresence(agentId, integration.id, {
+      credentials: ciphertext,
+      apiKeyId: key.id,
+      externalId: `A-cleanup-${suffix}`,
+    });
+    const cleanup = await import("./channel-cleanup-service");
+    let ids: string[] = [];
+    if (options.enqueue !== false) {
+      ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          options.deleteRemote ?? true,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+    }
+    return { cleanup, integration, agentId, key, ciphertext, presence, ids };
+  };
+  const unblock = async (id: string) =>
+    db.channelCleanup.update({
+      where: { id },
+      data: { nextAttemptAt: new Date(0) },
+    });
+  const barrier = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  };
+
+  it.each([
+    ["America/Los_Angeles", false],
+    ["America/Los_Angeles", true],
+    ["Asia/Tokyo", false],
+    ["Asia/Tokyo", true],
+  ] as const)(
+    "claims due cleanup and stores a UTC lease in a non-UTC session (%s, expired lease %s)",
+    async (zone, expiredLease) => {
+      const priorLease = expiredLease ? new Date(Date.now() - 60_000) : null;
+      const { cleanup, ids } = await seedCleanup("timezone");
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: {
+          nextAttemptAt: new Date(Date.now() - 60_000),
+          claimToken: priorLease ? "crashed-worker" : null,
+          claimExpiresAt: priorLease,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        },
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
+      slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+      const observed: { lease: Date | null } = { lease: null };
+      // Execute the real processor SQL on one transaction-pinned connection.
+      // SET LOCAL cannot leak into other tests or depend on pool scheduling.
+      // Read the initial lease before ORM renewal can hide a bad CTE timestamp.
+      const originalQuery = db.$queryRaw;
+      const query = vi.fn((...args: Parameters<Db["$queryRaw"]>) => {
+        const [sql, ...values] = args;
+        // Prisma transaction clients inherit root overrides. Restore the real
+        // method before constructing the transaction, avoiding recursive spies.
+        db.$queryRaw = originalQuery;
+        return db.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT set_config('TimeZone', ${zone}, true)`;
+          expect(
+            await tx.$queryRaw`SELECT current_setting('TimeZone') AS zone`,
+          ).toEqual([{ zone }]);
+          const result = await tx.$queryRaw(sql, ...values);
+          observed.lease = (
+            await tx.channelCleanup.findUniqueOrThrow({
+              where: { id: ids[0] },
+            })
+          ).claimExpiresAt;
+          return result;
+        });
+      });
+      db.$queryRaw = query as typeof db.$queryRaw;
+      const started = Date.now();
+      try {
+        expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual(
+          {
+            completed: 1,
+            retained: 0,
+          },
+        );
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(observed.lease).not.toBeNull();
+        expect(observed.lease!.getTime()).toBeGreaterThanOrEqual(
+          started + 10 * 60_000,
+        );
+        expect(observed.lease!.getTime()).toBeLessThanOrEqual(
+          Date.now() + 10 * 60_000,
+        );
+        expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+        expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+      } finally {
+        db.$queryRaw = originalQuery;
+      }
+    },
+  );
+
+  it.each(["completed", "blocked"])(
+    "gives fresh compensation a bounded retention and retry budget over an expired %s tombstone",
+    async (state) => {
+      const { cleanup, ids, presence, integration } = await seedCleanup(
+        `fresh-${state}`,
+      );
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: {
+          state,
+          stage: state === "completed" ? "completed" : "uninstall",
+          credentials: null,
+          attempts: 30,
+          expiresAt: new Date(0),
+          reason: "retention_expired_manual_cleanup_required",
+        },
+      });
+      const credentials = await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-fresh-compensation",
+          clientId: "fresh-client",
+          clientSecret: "fresh-secret",
+        }),
+      );
+      const started = Date.now();
+      await cleanup.preserveUnattachedChannelApp({
+        organizationId: ORG,
+        workspaceId: WORKSPACE,
+        integrationId: integration.id,
+        teamId: integration.externalId,
+        sourcePresenceId: presence.id,
+        provider: "slack",
+        externalId: presence.externalId,
+        credentials,
+      });
+      const fresh = await db.channelCleanup.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      expect(fresh).toMatchObject({
+        credentials,
+        attempts: 0,
+        state: "pending",
+        stage: "uninstall",
+        reason: null,
+        claimToken: null,
+        claimExpiresAt: null,
+        deleteRemote: true,
+      });
+      const retention = 30 * 24 * 60 * 60_000;
+      expect(fresh.expiresAt.getTime()).toBeGreaterThanOrEqual(
+        started + retention,
+      );
+      expect(fresh.expiresAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + retention,
+      );
+      slackHandlers["apps.uninstall"] = () => ({
+        ok: false,
+        error: "temporary_failure",
+      });
+      expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual({
+        completed: 0,
+        retained: 1,
+      });
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+      ).toMatchObject({
+        credentials,
+        state: "retry",
+        attempts: 1,
+        expiresAt: fresh.expiresAt,
+      });
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+      // Maintenance/retry never extends the new snapshot's 30-day deadline.
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: { expiresAt: new Date(0) },
+      });
+      await cleanup.processChannelCleanups({ ids, limit: 1 });
+      expect(
+        await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+      ).toMatchObject({
+        credentials: null,
+        state: "blocked",
+        reason: "retention_expired_manual_cleanup_required",
+      });
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    },
+  );
+
+  it("rolls back snapshot, key revocation and local delete together without HTTP", async () => {
+    const { cleanup, presence, key, ciphertext } = await seedCleanup(
+      "rollback",
+      { enqueue: false },
+    );
+    await expect(
+      db.$transaction(async (tx) => {
+        await cleanup.enqueueChannelCleanup(tx, { id: presence.id });
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        throw new Error("rollback proof");
+      }),
+    ).rejects.toThrow("rollback proof");
+    expect(
+      await db.channelCleanup.count({
+        where: { externalId: presence.externalId },
+      }),
+    ).toBe(0);
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toMatchObject({ credentials: ciphertext });
+    expect(
+      await db.apiKey.findUnique({ where: { id: key.id } }),
+    ).not.toBeNull();
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains encrypted transient failures and resumes manifest phase without a second uninstall", async () => {
+    const { cleanup, ids, ciphertext } = await seedCleanup("retry");
+    slackHandlers["apps.uninstall"] = () => ({
+      ok: false,
+      error: "transient-secret-canary",
+    });
+    expect(await cleanup.processChannelCleanups({ ids })).toEqual({
+      completed: 0,
+      retained: 1,
+    });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      stage: "uninstall",
+      state: "retry",
+      credentials: ciphertext,
+      reason: "uninstall_unavailable",
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    await unblock(ids[0]!);
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({
+      ok: false,
+      error: "temporary_failure",
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      stage: "manifest",
+      state: "retry",
+      credentials: ciphertext,
+    });
+    await unblock(ids[0]!);
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const result = await cleanup.processChannelCleanups({ ids });
+    expect(result).toEqual({ completed: 1, retained: 0 });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({ stage: "completed", credentials: null });
+  });
+
+  it("excludes concurrent processors and blocks reattachment before any remote auth", async () => {
+    const { cleanup, ids, agentId, presence } = await seedCleanup("concurrent");
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const first = cleanup.processChannelCleanups({ ids });
+    await entered.promise;
+    try {
+      expect(await cleanup.processChannelCleanups({ ids })).toEqual({
+        completed: 0,
+        retained: 0,
+      });
+      await expect(
+        agentChannels.completePresence(
+          WORKSPACE,
+          agentId,
+          "slack",
+          {
+            botToken: "xoxb-new",
+            appToken: "xapp-new",
+            appId: presence.externalId,
+          },
+          ADMIN,
+        ),
+      ).rejects.toThrow("reserved for remote cleanup");
+      expect(slackCallsFor("auth.test")).toHaveLength(0);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    } finally {
+      finish.release();
+    }
+    await first;
+  });
+
+  it("a stale worker cannot advance the durable stage or erase ciphertext", async () => {
+    const { cleanup, ids, ciphertext } = await seedCleanup("stale");
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    const first = cleanup.processChannelCleanups({ ids });
+    await entered.promise;
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: {
+        claimToken: "new-owner",
+        claimExpiresAt: new Date(Date.now() + 600_000),
+      },
+    });
+    finish.release();
+    await first;
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      claimToken: "new-owner",
+      stage: "uninstall",
+      credentials: ciphertext,
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+  });
+
+  it("renews a full phase lease after rename consumed the previous budget", async () => {
+    const { cleanup, ids } = await seedCleanup("renew");
+    slackHandlers["apps.manifest.export"] = async () => {
+      await db.channelCleanup.update({
+        where: { id: ids[0] },
+        data: { claimExpiresAt: new Date(Date.now() + 5000) },
+      });
+      return { ok: false, error: "cannot_rename" };
+    };
+    let remaining = 0;
+    slackHandlers["apps.uninstall"] = async () => {
+      const row = await db.channelCleanup.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      remaining = row.claimExpiresAt!.getTime() - Date.now();
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await cleanup.processChannelCleanups({ ids });
+    expect(remaining).toBeGreaterThan(5 * 60_000);
+  });
+
+  it("upgrades an already-uninstalled detached shell without using its revoked token again", async () => {
+    const { agentId, presence } = await seedCleanup("upgrade", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    expect(
+      await db.channelCleanup.findUnique({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({ state: "completed", deleteRemote: false });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: true,
+    });
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+  });
+
+  it("retains an in-flight uninstall-only action upgrade until manifest deletion finishes", async () => {
+    const { agentId, presence } = await seedCleanup("upgrade-race", {
+      enqueue: false,
+    });
+    const entered = barrier();
+    const finish = barrier();
+    slackHandlers["apps.uninstall"] = async () => {
+      entered.release();
+      await finish.promise;
+      return { ok: true };
+    };
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    const first = agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    await entered.promise;
+    try {
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+    } finally {
+      finish.release();
+    }
+    await first;
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+    expect(
+      await db.channelCleanup.findUnique({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({ state: "completed", deleteRemote: true });
+  });
+
+  it("blocks a planted foreign-org live app and the deployment shared app without HTTP", async () => {
+    const { cleanup, ids, presence } = await seedCleanup("foreign");
+    const integration = await seedIntegration({
+      organizationId: OTHER_ORG,
+      externalId: "TOTHER",
+    });
+    const foreign = await db.agent.create({
+      data: {
+        workspaceId: OTHER_WORKSPACE,
+        name: "foreign",
+        identifier: `${P}foreign-cleanup`,
+        accessToken: `aoc_${P}foreign-cleanup`,
+        kind: "hosted",
+        harness: "fake",
+      },
+    });
+    await seedPresence(foreign.id, integration.id, {
+      externalId: presence.externalId,
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(slackCalls).toHaveLength(0);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({ state: "blocked", reason: "app_still_attached" });
+    await db.agentChannel.deleteMany({ where: { agentId: foreign.id } });
+    await db.channelInstallation.create({
+      data: {
+        integrationId: integration.id,
+        provider: "slack",
+        externalId: "TOTHER",
+        appId: presence.externalId,
+        credentials: "encrypted-shared",
+      },
+    });
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "pending", nextAttemptAt: new Date(0) },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains missing bot-token ambiguity and purges blocked ciphertext on next maintenance after 30d", async () => {
+    const { cleanup, ids } = await seedCleanup("retention");
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+    );
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { credentials: ciphertext },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      stage: "uninstall",
+      credentials: ciphertext,
+      reason: "missing_uninstall_credentials",
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { expiresAt: new Date(0) },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      credentials: null,
+      reason: "retention_expired_manual_cleanup_required",
+    });
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "pending", reason: null },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      credentials: null,
+      reason: "retention_expired_manual_cleanup_required",
+    });
+  });
+
+  it("exhausted crashed claims become explicitly blocked instead of pending forever", async () => {
+    const { cleanup, ids } = await seedCleanup("exhausted");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: {
+        attempts: 30,
+        claimToken: "crashed",
+        claimExpiresAt: new Date(0),
+      },
+    });
+    await cleanup.processChannelCleanups({ ids });
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      reason: "retry_limit_manual_cleanup_required",
+      claimToken: null,
+    });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("the low-level workspace deletion snapshots transactionally and survives the organization cascade", async () => {
+    const organizationId = `${P}cleanup-gone`;
+    const workspaceId = `${P}cleanup-gone-workspace`;
+    await db.organization.create({
+      data: { id: organizationId, name: "Gone", slug: organizationId },
+    });
+    await db.workspace.create({
+      data: {
+        id: workspaceId,
+        organizationId,
+        name: "Gone",
+        slug: workspaceId,
+      },
+    });
+    const agent = await db.agent.create({
+      data: {
+        workspaceId,
+        name: "gone",
+        identifier: `${P}cleanup-gone-agent`,
+        accessToken: `aoc_${P}gone`,
+        kind: "hosted",
+        harness: "fake",
+      },
+    });
+    const integration = await seedIntegration({ organizationId });
+    const ciphertext = await getCrypto().encrypt(
+      JSON.stringify({
+        botToken: "xoxb-gone",
+        clientId: "gone-client",
+        clientSecret: "gone-secret",
+      }),
+    );
+    await seedPresence(agent.id, integration.id, {
+      credentials: ciphertext,
+      externalId: "A-cleanup-gone",
+    });
+    const { deleteWorkspaceContent } =
+      await import("../../ee/services/workspace-service");
+    await db.$transaction(async (tx) => {
+      await deleteWorkspaceContent(workspaceId, tx);
+      expect(slackCalls).toHaveLength(0);
+      await tx.organization.delete({ where: { id: organizationId } });
+    });
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: "A-cleanup-gone",
+        },
+      },
+    });
+    expect(job).toMatchObject({
+      organizationId,
+      workspaceId,
+      integrationId: integration.id,
+      teamId: "T111",
+      credentials: ciphertext,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    const cleanup = await import("./channel-cleanup-service");
+    await cleanup.processChannelCleanups({ ids: [job.id] });
+    expect(slackCallsFor("apps.uninstall")[0]?.token).toBe("xoxb-gone");
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    expect(
+      await db.channelCleanup.findUnique({ where: { id: job.id } }),
+    ).toMatchObject({
+      stage: "manifest",
+      state: "blocked",
+      credentials: ciphertext,
+      reason: "integration_gone_manual_manifest_cleanup_required",
+    });
+    await db.channelCleanup.delete({ where: { id: job.id } });
+  });
+  it("refuses deletion during an in-flight OAuth exchange and later snapshots the newly issued bot token", async () => {
+    const { agentId, presence } = await seedCleanup("oauth-race", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: { transport: "events" },
+    });
+    const { signOAuthState } = await import("../../lib/oauth-state");
+    const state = signOAuthState({
+      provider: "slack",
+      nonce: "proof",
+      kind: "channel-install",
+      agentId,
+      workspaceId: WORKSPACE,
+      issuedAt: Date.now(),
+    });
+    const entered = barrier();
+    const finish = barrier();
+    scriptAuthTest();
+    slackHandlers["oauth.v2.access"] = async () => {
+      entered.release();
+      await finish.promise;
+      return {
+        ok: true,
+        access_token: "xoxb-new-install",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      };
+    };
+    const attaching = agentChannels.completePresenceFromOAuth({
+      state,
+      code: "new-code",
+      redirectUri: EVENTS_SELF_URL,
+    });
+    await entered.promise;
+    const { deleteAgent } = await import("../agent-service");
+    try {
+      await expect(deleteAgent(WORKSPACE, agentId)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+      expect(
+        await db.agent.findUnique({ where: { id: agentId } }),
+      ).not.toBeNull();
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(1);
+    } finally {
+      finish.release();
+    }
+    await attaching;
+    await deleteAgent(WORKSPACE, agentId);
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+    expect(slackCallsFor("apps.uninstall")[1]?.token).toBe("xoxb-new-install");
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+  });
+
+  it.each(["key-write", "late-activation"])(
+    "invalidates old uninstall proof when OAuth succeeds but activation fails (%s)",
+    async (failure) => {
+      const { agentId, presence } = await seedCleanup("oauth-key-failure", {
+        enqueue: false,
+      });
+      slackHandlers["apps.uninstall"] = () => ({ ok: true });
+      slackHandlers["apps.manifest.delete"] = () => ({ ok: true });
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      await db.agentChannel.update({
+        where: { id: presence.id },
+        data: { transport: "events" },
+      });
+      const { signOAuthState } = await import("../../lib/oauth-state");
+      const state = signOAuthState({
+        provider: "slack",
+        nonce: "proof-failure",
+        kind: "channel-install",
+        agentId,
+        workspaceId: WORKSPACE,
+        issuedAt: Date.now(),
+      });
+      scriptAuthTest();
+      slackHandlers["oauth.v2.access"] = () => ({
+        ok: true,
+        access_token: "xoxb-new-failed-activation",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      });
+      const realCreateKey = apiKeys.createServiceApiKey;
+      const future = Date.now() + 10 * 60_000;
+      let clock: ReturnType<typeof vi.spyOn> | undefined;
+      const failKey = vi.spyOn(apiKeys, "createServiceApiKey");
+      if (failure === "key-write") {
+        failKey.mockRejectedValueOnce(new Error("key write failed"));
+      } else {
+        failKey.mockImplementationOnce(async (...args) => {
+          const key = await realCreateKey(...args);
+          clock = vi.spyOn(Date, "now").mockReturnValue(future);
+          return key;
+        });
+      }
+      try {
+        await expect(
+          agentChannels.completePresenceFromOAuth({
+            state,
+            code: "new-code",
+            redirectUri: EVENTS_SELF_URL,
+          }),
+        ).rejects.toThrow(
+          failure === "key-write"
+            ? "key write failed"
+            : "Channel setup timed out",
+        );
+      } finally {
+        clock?.mockRestore();
+        failKey.mockRestore();
+      }
+      expect(
+        await db.agentChannel.findUnique({ where: { id: presence.id } }),
+      ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+      const { deleteAgent } = await import("../agent-service");
+      await deleteAgent(WORKSPACE, agentId);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(2);
+      expect(slackCallsFor("apps.uninstall")[1]?.token).toBe(
+        "xoxb-new-failed-activation",
+      );
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(1);
+    },
+  );
+
+  it("compensates a remote create whose local FK disappears with an independent encrypted snapshot", async () => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent("cleanup-create-failure");
+    scriptManifestCreate();
+    const create = slackHandlers["apps.manifest.create"]!;
+    slackHandlers["apps.manifest.create"] = async (call) => {
+      await db.channelIntegration.delete({ where: { id: integration.id } });
+      return create(call);
+    };
+    await expect(
+      agentChannels.createPresence(WORKSPACE, agentId, "slack", ADMIN),
+    ).rejects.toThrow();
+    expect(await db.agentChannel.count({ where: { agentId } })).toBe(0);
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: { provider_externalId: { provider: "slack", externalId: "A100" } },
+    });
+    expect(job).toMatchObject({
+      integrationId: integration.id,
+      organizationId: ORG,
+      workspaceId: WORKSPACE,
+      teamId: "T111",
+      stage: "uninstall",
+      state: "pending",
+    });
+    expect(job.credentials).not.toContain("client-secret-1");
+    expect(
+      JSON.parse(await getCrypto().decrypt(job.credentials!)),
+    ).toMatchObject({ clientId: "client-1", clientSecret: "client-secret-1" });
+  });
+  it("refuses a new provider phase when the lifecycle deadline lacks a full HTTP budget", async () => {
+    const cleanup = await import("./channel-cleanup-service");
+    await cleanup.withChannelLifecycle(WORKSPACE, async () => {
+      const future = Date.now() + 8 * 60_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(future);
+      try {
+        await expect(
+          cleanup.assertChannelLifecycleHeld(),
+        ).rejects.toMatchObject({ code: "CONFLICT" });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+    expect(slackCalls).toHaveLength(0);
+  });
+
+  it("retains a late OAuth response as a blocked ciphertext snapshot without activating it", async () => {
+    const { cleanup, agentId, presence } = await seedCleanup("oauth-late", {
+      enqueue: false,
+    });
+    slackHandlers["apps.uninstall"] = () => ({ ok: true });
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+    // A completed uninstall-only tombstone may legitimately be reattached long
+    // after its previous credential-retention window has ended.
+    await db.channelCleanup.update({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: presence.externalId,
+        },
+      },
+      data: { expiresAt: new Date(0), attempts: 30 },
+    });
+    await db.agentChannel.update({
+      where: { id: presence.id },
+      data: { transport: "events" },
+    });
+    const { signOAuthState } = await import("../../lib/oauth-state");
+    const state = signOAuthState({
+      provider: "slack",
+      nonce: "late-proof",
+      kind: "channel-install",
+      agentId,
+      workspaceId: WORKSPACE,
+      issuedAt: Date.now(),
+    });
+    scriptAuthTest();
+    const now = Date.now();
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    slackHandlers["oauth.v2.access"] = () => {
+      clock = vi.spyOn(Date, "now").mockReturnValue(now + 10 * 60_000);
+      return {
+        ok: true,
+        access_token: "xoxb-late-secret",
+        bot_user_id: "UBOT",
+        team: { id: "T111", name: "Acme" },
+      };
+    };
+    try {
+      await expect(
+        agentChannels.completePresenceFromOAuth({
+          state,
+          code: "late-code",
+          redirectUri: EVENTS_SELF_URL,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      clock?.mockRestore();
+    }
+    const job = await db.channelCleanup.findUniqueOrThrow({
+      where: {
+        provider_externalId: {
+          provider: "slack",
+          externalId: presence.externalId,
+        },
+      },
+    });
+    expect(job).toMatchObject({
+      state: "blocked",
+      stage: "uninstall",
+      reason: "lifecycle_expired_manual_cleanup_required",
+    });
+    expect(
+      JSON.parse(await getCrypto().decrypt(job.credentials!)).botToken,
+    ).toBe("xoxb-late-secret");
+    expect(job.attempts).toBe(0);
+    expect(job.expiresAt.getTime()).toBe(
+      now + 10 * 60_000 + 30 * 24 * 60 * 60_000,
+    );
+    await cleanup.processChannelCleanups({ ids: [job.id] });
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: job.id } }),
+    ).toMatchObject({
+      credentials: job.credentials,
+      expiresAt: job.expiresAt,
+      state: "blocked",
+      reason: "lifecycle_expired_manual_cleanup_required",
+    });
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+  });
+
+  // ── Interaction with provider-side removal (`disabled`, #1096) ──────────
+
+  /** An active presence the WORKSPACE removed on the Slack side: the
+   * `app_uninstalled` webhook flipped it to `disabled`, revoked its service
+   * key, and left the row (same app id) so a re-attach resumes THIS app. */
+  const seedDisabled = async (suffix: string) => {
+    const integration = await seedIntegration({
+      credentials: await integrationCredentials(12 * 3600),
+    });
+    const agentId = await seedAgent(`disabled-${suffix}`);
+    const key = await apiKeys.createServiceApiKey(
+      ADMIN,
+      { workspaceId: WORKSPACE },
+      "disabled-key",
+    );
+    const presence = await seedPresence(agentId, integration.id, {
+      externalId: `A-disabled-${suffix}`,
+      apiKeyId: key.id,
+      credentials: await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-revoked",
+          clientId: "disabled-client",
+          clientSecret: "disabled-secret",
+        }),
+      ),
+    });
+    await agentChannels.markPresenceRemoved(presence.id, "app_uninstalled");
+    expect(
+      await db.agentChannel.findUniqueOrThrow({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "disabled", apiKeyId: null });
+    return { integration, agentId, presence, key };
+  };
+
+  it("detaching a provider-removed (disabled) presence WITHOUT remote deletion enqueues no uninstall, so the same app can be re-attached", async () => {
+    // Before this fence the detach enqueued an uninstall with the revoked
+    // token, Slack refused it, the job went `blocked` and RESERVED the app
+    // id, and the re-attach that `disabled` exists to allow answered 409.
+    const { presence, agentId } = await seedDisabled("keep");
+    slackHandlers["apps.uninstall"] = () => {
+      throw new Error("must not be called");
+    };
+
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: false,
+    });
+
+    expect(
+      await db.channelCleanup.count({
+        where: { externalId: presence.externalId },
+      }),
+    ).toBe(0);
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+    expect(
+      await db.agentChannel.findUniqueOrThrow({ where: { id: presence.id } }),
+    ).toMatchObject({ status: "pending_setup", apiKeyId: null });
+
+    // The resume door stays open: the identity is not reserved.
+    const cleanup = await import("./channel-cleanup-service");
+    await db.$transaction((tx) =>
+      cleanup.assertChannelIdentityAvailable(
+        tx,
+        "slack",
+        presence.externalId,
+        presence.id,
+      ),
+    );
+  });
+
+  it("detaching a disabled presence WITH remote deletion still walks the confirmed-uninstall gate and blocks rather than deleting the record blind", async () => {
+    // `disabled` does not record WHICH removal signal fired (a webhook, or a
+    // dead-credential inference from the same codes the uninstall treats as
+    // non-authoritative), so it is not proof the installation is gone.
+    const { presence, agentId, integration } = await seedDisabled("delete");
+    slackHandlers["apps.uninstall"] = () => ({
+      ok: false,
+      error: "token_revoked",
+    });
+    slackHandlers["apps.manifest.delete"] = () => {
+      throw new Error("must not be called");
+    };
+
+    await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+      deleteRemote: true,
+    });
+
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({
+        where: {
+          provider_externalId: {
+            provider: "slack",
+            externalId: presence.externalId,
+          },
+        },
+      }),
+    ).toMatchObject({
+      integrationId: integration.id,
+      stage: "uninstall",
+      state: "blocked",
+      reason: "uninstall_authorization_required",
+      deleteRemote: true,
+    });
+    expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+    expect(
+      await db.agentChannel.findUnique({ where: { id: presence.id } }),
+    ).toBeNull();
+  });
+
+  it("disconnecting the org credential keeps the integration row while a cleanup job still needs it", async () => {
+    // The job is fenced to the integration id it was minted under. Deleting
+    // the row would strand it blocked, and a later reconnect would mint a
+    // new id the fence rejects. Same disconnect, credential cleared, row kept.
+    const { ids, integration } = await seedCleanup("disconnect");
+    expect(ids).toHaveLength(1);
+
+    await integrations.disconnectIntegration(ORG, "slack");
+
+    expect(
+      await db.channelIntegration.findUnique({
+        where: { id: integration.id },
+      }),
+    ).toMatchObject({ credentials: null, credentialsRotatedAt: null });
+
+    // Once the job lets go, the next disconnect removes the row as before.
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { state: "completed", stage: "completed" },
+    });
+    await integrations.disconnectIntegration(ORG, "slack");
+    expect(
+      await db.channelIntegration.findUnique({
+        where: { id: integration.id },
+      }),
+    ).toBeNull();
+  });
+
+  it("a job for a provider this build does not know is blocked at once, never retried", async () => {
+    // The column is a free string. `channelProvider("teams")` would be
+    // undefined; the old cast let the TypeError surface as a transient
+    // failure and burn all 30 attempts.
+    const { cleanup, ids } = await seedCleanup("unknown-provider");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { provider: "teams", externalId: "A-teams" },
+    });
+
+    expect(await cleanup.processChannelCleanups({ ids, limit: 1 })).toEqual({
+      completed: 0,
+      retained: 1,
+    });
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+    ).toMatchObject({
+      state: "blocked",
+      reason: "unknown_provider",
+      attempts: 1,
+    });
+    expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+  });
+
+  it("processing an EMPTY id list is a no-op (no sweeps, no claims)", async () => {
+    // Every deletion path passes the ids it enqueued; an agent with no
+    // presences passes []. That must not fall through to a full pass.
+    const { cleanup, ids } = await seedCleanup("empty-ids");
+    await db.channelCleanup.update({
+      where: { id: ids[0] },
+      data: { expiresAt: new Date(Date.now() - 1) },
+    });
+
+    expect(await cleanup.processChannelCleanups({ ids: [] })).toEqual({
+      completed: 0,
+      retained: 0,
+    });
+    // The retention sweep did NOT run: the expired job is untouched.
+    expect(
+      await db.channelCleanup.findUniqueOrThrow({ where: { id: ids[0] } }),
+    ).toMatchObject({ state: "pending" });
+  });
+});
+
+describe.skipIf(!PROOF_URL)(
+  "user-created apps (the paste floor) are never reserved",
+  () => {
+    /** The reported shape: socket posture, no org automation token, so the
+     * user created the app at api.slack.com and pasted only its tokens. The
+     * platform never held its client pair, so `apps.uninstall` cannot run. */
+    const pasteUserApp = (agentId: string, appId: string, botToken: string) =>
+      agentChannels.completePresence(
+        WORKSPACE,
+        agentId,
+        "slack",
+        { botToken, appToken: "xapp-user", appId },
+        ADMIN,
+      );
+    const cleanupFor = (externalId: string) =>
+      db.channelCleanup.findUnique({
+        where: { provider_externalId: { provider: "slack", externalId } },
+      });
+
+    it("detach keeps the app, and the SAME app re-attaches with no Slack teardown", async () => {
+      const agentId = await seedAgent("user-app-reattach");
+      scriptAuthTest();
+      const first = await pasteUserApp(agentId, "A-USER-1", "xoxb-first");
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+
+      // Released, not blocked: nothing reserves the app id.
+      expect(await cleanupFor("A-USER-1")).toBeNull();
+      // The user's own app was never touched remotely.
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
+      // The service key went with the attachment.
+      expect(
+        await db.apiKey.findUnique({ where: { id: first.apiKeyId! } }),
+      ).toBeNull();
+
+      const again = await pasteUserApp(agentId, "A-USER-1", "xoxb-fresh");
+      expect(again).toMatchObject({
+        id: first.id,
+        externalId: "A-USER-1",
+        status: "active",
+      });
+      const row = await db.agentChannel.findUniqueOrThrow({
+        where: { id: first.id },
+      });
+      expect(
+        JSON.parse(await getCrypto().decrypt(row.credentials!)),
+      ).toMatchObject({ botToken: "xoxb-fresh" });
+    });
+
+    it("Start over (remote delete) releases the app too: no rename, no uninstall, no record delete", async () => {
+      await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("user-app-start-over");
+      scriptAuthTest();
+      await pasteUserApp(agentId, "A-USER-2", "xoxb-first");
+
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+
+      expect(await cleanupFor("A-USER-2")).toBeNull();
+      // Even with an org token on file, the user's app is theirs: the
+      // tombstone rename and the record delete never run against it.
+      expect(slackCallsFor("apps.manifest.export")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.update")).toHaveLength(0);
+      expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+      expect(slackCallsFor("apps.manifest.delete")).toHaveLength(0);
+
+      // A fresh paste of the same app attaches as a new presence.
+      const again = await pasteUserApp(agentId, "A-USER-2", "xoxb-again");
+      expect(again).toMatchObject({ externalId: "A-USER-2", status: "active" });
+    });
+
+    it("a platform-created app missing its bot token is STILL retained (the gate holds)", async () => {
+      // The control: only positive evidence of a user-created app releases a
+      // job. A pending guided app holds the client pair and no bot token,
+      // which proves nothing about whether it was ever installed.
+      const integration = await seedIntegration({
+        credentials: await integrationCredentials(12 * 3600),
+      });
+      const agentId = await seedAgent("guided-no-bot");
+      const presence = await seedPresence(agentId, integration.id, {
+        status: "pending_setup",
+        externalId: "A-GUIDED-NOBOT",
+        credentials: await getCrypto().encrypt(
+          JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+        ),
+      });
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          false,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+
+      await cleanup.processChannelCleanups({ ids });
+
+      expect(await cleanupFor("A-GUIDED-NOBOT")).toMatchObject({
+        state: "blocked",
+        reason: "missing_uninstall_credentials",
+      });
+    });
+
+    it("a release never erases a snapshot that changed after it was claimed", async () => {
+      // The ciphertext fence: a job re-snapshotted with a platform-created
+      // app's credentials while the worker held the claim is not the one the
+      // worker judged, and must survive for the normal gate.
+      const agentId = await seedAgent("user-app-fence");
+      scriptAuthTest();
+      const presence = await pasteUserApp(agentId, "A-USER-FENCE", "xoxb-u");
+      const cleanup = await import("./channel-cleanup-service");
+      const ids = await db.$transaction(async (tx) => {
+        const ids = await cleanup.enqueueChannelCleanup(
+          tx,
+          { id: presence.id },
+          false,
+        );
+        await tx.agentChannel.delete({ where: { id: presence.id } });
+        return ids;
+      });
+      const managed = await getCrypto().encrypt(
+        JSON.stringify({
+          botToken: "xoxb-m",
+          clientId: "managed",
+          clientSecret: "managed-secret",
+        }),
+      );
+      // Swap the snapshot the instant the worker decrypts the old one.
+      const crypto = getCrypto();
+      const realDecrypt = crypto.decrypt.bind(crypto);
+      const decrypt = vi
+        .spyOn(crypto, "decrypt")
+        .mockImplementationOnce(async (ciphertext: string) => {
+          const plain = await realDecrypt(ciphertext);
+          await db.channelCleanup.update({
+            where: { id: ids[0] },
+            data: { credentials: managed },
+          });
+          return plain;
+        });
+      try {
+        await cleanup.processChannelCleanups({ ids });
+      } finally {
+        decrypt.mockRestore();
+      }
+
+      expect(await cleanupFor("A-USER-FENCE")).toMatchObject({
+        credentials: managed,
+      });
+    });
+
+    it("refuses a DIFFERENT App ID on a detached presence, before any Slack call", async () => {
+      // Before this guard the pasted id was ignored and the new app's tokens
+      // were stored under the shell's id, routing that app through the wrong
+      // record with no warning.
+      const agentId = await seedAgent("user-app-other-id");
+      scriptAuthTest();
+      const first = await pasteUserApp(agentId, "A-USER-OLD", "xoxb-old");
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: false,
+      });
+      const authTests = slackCallsFor("auth.test").length;
+
+      await expect(
+        pasteUserApp(agentId, "A-USER-NEW", "xoxb-new"),
+      ).rejects.toMatchObject({
+        code: "CONFLICT",
+        message: expect.stringContaining("A-USER-OLD"),
+      });
+      expect(slackCallsFor("auth.test")).toHaveLength(authTests);
+      expect(
+        await db.agentChannel.findUniqueOrThrow({ where: { id: first.id } }),
+      ).toMatchObject({ externalId: "A-USER-OLD", status: "pending_setup" });
+
+      // Start over clears the shell; the other app then attaches cleanly.
+      await agentChannels.detachPresence(WORKSPACE, agentId, "slack", {
+        deleteRemote: true,
+      });
+      const other = await pasteUserApp(agentId, "A-USER-NEW", "xoxb-new");
+      expect(other).toMatchObject({
+        externalId: "A-USER-NEW",
+        status: "active",
+      });
+    });
+
+    describe("the requeue migration for jobs a previous build left blocked", () => {
+      const MIGRATION = join(
+        __dirname,
+        "../../../../db/prisma/migrations/20261014142243_requeue_user_created_slack_app_cleanups/migration.sql",
+      );
+      /** Re-applied by hand over seeded rows, in a session whose clock is NOT
+       * UTC: the columns hold UTC wall time, so a bare `now()` would push the
+       * requeued job hours into the future and leave it undue. */
+      const applyMigration = () =>
+        db.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT set_config('TimeZone', 'Asia/Tokyo', true)`;
+          return tx.$executeRawUnsafe(
+            readFileSync(MIGRATION, "utf8")
+              .split("\n")
+              .filter((line) => !line.trim().startsWith("--"))
+              .join("\n"),
+          );
+        });
+
+      /** The exact state the old worker left: the job enqueued with the
+       * presence's credentials, then blocked on its first attempt. */
+      const seedStuckJob = async (
+        suffix: string,
+        credentialsJson: string,
+        options: { expired?: boolean } = {},
+      ) => {
+        const integration = await db.channelIntegration.upsert({
+          where: {
+            organizationId_provider: { organizationId: ORG, provider: "slack" },
+          },
+          create: {
+            organizationId: ORG,
+            provider: "slack",
+            externalId: "T111",
+            name: "Acme",
+            createdByUserId: ADMIN,
+          },
+          update: {},
+          select: { id: true },
+        });
+        const agentId = await seedAgent(`stuck-${suffix}`);
+        const presence = await seedPresence(agentId, integration.id, {
+          externalId: `A-STUCK-${suffix}`,
+          credentials: await getCrypto().encrypt(credentialsJson),
+        });
+        const cleanup = await import("./channel-cleanup-service");
+        const [id] = await db.$transaction(async (tx) => {
+          const ids = await cleanup.enqueueChannelCleanup(
+            tx,
+            { id: presence.id },
+            false,
+          );
+          await tx.agentChannel.update({
+            where: { id: presence.id },
+            data: { status: "pending_setup", apiKeyId: null },
+          });
+          return ids;
+        });
+        await db.channelCleanup.update({
+          where: { id },
+          data: {
+            state: "blocked",
+            reason: "missing_uninstall_credentials",
+            attempts: 1,
+            ...(options.expired && { expiresAt: new Date(Date.now() - 1000) }),
+          },
+        });
+        return { agentId, presence, id: id! };
+      };
+
+      it("frees a stuck user-created app on the next pass, and only that one", async () => {
+        scriptAuthTest();
+        const user = await seedStuckJob(
+          "user",
+          JSON.stringify({ botToken: "xoxb-user", appToken: "xapp-user" }),
+        );
+        const guided = await seedStuckJob(
+          "guided",
+          JSON.stringify({ clientId: "id", clientSecret: "secret" }),
+        );
+        const expired = await seedStuckJob(
+          "expired",
+          JSON.stringify({ botToken: "xoxb-old", appToken: "xapp-old" }),
+          { expired: true },
+        );
+        // The reported symptom, before the migration.
+        await expect(
+          pasteUserApp(user.agentId, user.presence.externalId, "xoxb-again"),
+        ).rejects.toThrow("reserved for remote cleanup");
+
+        expect(await applyMigration()).toBe(2);
+        const requeued = await db.channelCleanup.findUniqueOrThrow({
+          where: { id: user.id },
+        });
+        expect(requeued).toMatchObject({
+          state: "pending",
+          reason: null,
+          claimToken: null,
+        });
+        expect(requeued.nextAttemptAt.getTime()).toBeLessThanOrEqual(
+          Date.now(),
+        );
+        // Past retention: left exactly as it was.
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: expired.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+
+        const cleanup = await import("./channel-cleanup-service");
+        await cleanup.processChannelCleanups({ ids: [user.id, guided.id] });
+
+        expect(
+          await db.channelCleanup.findUnique({ where: { id: user.id } }),
+        ).toBeNull();
+        // The platform-created app keeps its gate: re-blocked, same reason.
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: guided.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+        expect(slackCallsFor("apps.uninstall")).toHaveLength(0);
+
+        // The user's own app re-attaches. A re-run hands back only the
+        // platform-created job, which the worker re-blocks exactly as before.
+        await expect(
+          pasteUserApp(user.agentId, user.presence.externalId, "xoxb-again"),
+        ).resolves.toMatchObject({ status: "active" });
+        expect(await applyMigration()).toBe(1);
+        await cleanup.processChannelCleanups({ ids: [guided.id] });
+        expect(
+          await db.channelCleanup.findUniqueOrThrow({
+            where: { id: guided.id },
+          }),
+        ).toMatchObject({
+          state: "blocked",
+          reason: "missing_uninstall_credentials",
+        });
+      });
+    });
+  },
+);

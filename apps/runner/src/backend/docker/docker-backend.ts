@@ -16,6 +16,7 @@ import {
   type EngineTransport,
 } from "./engine-client";
 import { buildTar, type TarEntry } from "./tar";
+import { createInjectablePathGuard } from "../injectable-path";
 import { log } from "../../log";
 
 /**
@@ -39,6 +40,9 @@ import { log } from "../../log";
 export const LABEL_SANDBOX = "sh.onecli.sandbox-id";
 export const LABEL_RUNNER = "sh.onecli.runner-id";
 export const LABEL_PAYLOAD = "sh.onecli.payload-hash";
+/** "1" when the spawning runner handed out supervisor sessions; absent on
+ * containers spawned before the resumable channel or with the key off. */
+export const LABEL_RESUMABLE = "sh.onecli.resumable";
 export const LABEL_MANAGED = "sh.onecli.managed";
 /** Which installation created it — a hash of the runner token, so the orphan
  * sweep never touches a DIFFERENT install's objects on a shared daemon. */
@@ -52,10 +56,8 @@ const HOME_MOUNT = "/workspace";
  * The agent image's unprivileged user, by NUMBER. The create body pins
  * `User: "node"` by name, but tar headers carry numeric ids and the daemon
  * extracts them verbatim — so injected files are owned by whatever is written
- * here. 1000 is the node base image's uid/gid for that user, the same value
- * the cloud boot phase compares against when it installs these same payload
- * files node-owned on the Kata substrate (apps/sandbox-manager/src/boot/
- * boot-script.ts, NODE_UID).
+ * here. 1000 is the node base image's uid/gid for that user — the same value
+ * every substrate must use when it installs these payload files node-owned.
  */
 const NODE_UID = 1000;
 const NODE_GID = 1000;
@@ -65,49 +67,23 @@ const NODE_GID = 1000;
  * symlink on the volume for the daemon's root-driven extraction to follow —
  * it resolves in-container symlinks) or the system directories the image's
  * own tooling lives in (a control-plane bug must not be able to overwrite
- * /usr/local/bin/node in every sandbox). `/onecli-init/` from the cloud list
- * is omitted: that mount does not exist on this substrate.
+ * /usr/local/bin/node in every sandbox). Mounts that exist only on other
+ * substrates are omitted: they do not exist here. The shared absolute-path
+ * rule matters specifically HERE: a relative path would spin the ancestor
+ * walk forever (`posix.dirname(".") === "."`).
  */
-const FORBIDDEN_PATH_PREFIXES = [
-  `${HOME_MOUNT}/`,
-  "/usr/",
-  "/bin/",
-  "/sbin/",
-  "/proc/",
-  "/sys/",
-  "/dev/",
-];
-
-/**
- * Refuse a payload file path the injection must never touch — the same
- * conservative allowlist the cloud manager enforces on the identical payload
- * (apps/sandbox-manager/src/validations.ts `containerPathSchema`; not
- * importable, that package is cloud-only): one substrate trust model. The
- * wire schema only enforces a non-empty string, and beyond the shared rules
- * one shape is dangerous specifically HERE: a relative path would spin the
- * ancestor walk forever (`posix.dirname(".") === "."`).
- */
-const assertInjectablePath = (containerPath: string): void => {
-  if (
-    containerPath.length > 300 ||
-    !/^\/[A-Za-z0-9._/-]+$/.test(containerPath)
-  ) {
-    throw new Error(
-      `payload file path is not an absolute, conservative path: ${containerPath}`,
-    );
-  }
-  if (containerPath.split("/").includes("..")) {
-    throw new Error(`payload file path contains "..": ${containerPath}`);
-  }
-  if (
-    containerPath === HOME_MOUNT ||
-    FORBIDDEN_PATH_PREFIXES.some((prefix) => containerPath.startsWith(prefix))
-  ) {
-    throw new Error(
-      `payload file path targets the durable home or a system directory: ${containerPath}`,
-    );
-  }
-};
+const assertInjectablePath = createInjectablePathGuard({
+  exact: [HOME_MOUNT],
+  prefixes: [
+    `${HOME_MOUNT}/`,
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+  ],
+});
 
 export interface DockerBackendOptions {
   /** Initial owner label; replaced by `identify()` once registration
@@ -235,8 +211,8 @@ export const createDockerBackend = (
       // an existing directory too (verified against a real daemon), so a
       // blanket ancestor entry would silently chown system paths. The chain
       // is created node-owned — the workload must be able to write its own
-      // config dirs (the cloud boot script does the same with `install -d
-      // -o node -g node`, /home/node/.codex being the motivating case).
+      // config dirs (every substrate keeps this node-owned contract,
+      // /home/node/.codex being the motivating case).
       const chain = missing.map(
         (_, index): TarEntry => ({
           kind: "directory",
@@ -284,6 +260,11 @@ export const createDockerBackend = (
       await ensureNetwork();
     },
 
+    homeRefFor: volumeName,
+
+    // An ensure, not a create: the engine answers a create for a name that
+    // already exists with that existing volume (201, its original labels
+    // kept), so a repeat provision is harmless and never a duplicate.
     async provisionHome(sandboxId) {
       const name = volumeName(sandboxId);
       await engine.post("/volumes/create", {
@@ -349,6 +330,7 @@ export const createDockerBackend = (
               [LABEL_SANDBOX]: spec.sandboxId,
               [LABEL_RUNNER]: owner,
               [LABEL_PAYLOAD]: spec.payloadHash,
+              ...(spec.resumable && { [LABEL_RESUMABLE]: "1" }),
               [LABEL_INSTALLATION]: options.installationId,
             },
             HostConfig: {
@@ -370,7 +352,7 @@ export const createDockerBackend = (
               // syscalls unless CAP_SYS_ADMIN is held, CapDrop:ALL removes that
               // capability, and no-new-privileges neuters the setuid uidmap
               // helpers — so rootless containers cannot set up their user
-              // namespace here (they are a hosted-microVM-only capability; see
+              // namespace here (they need a sandbox that owns its kernel; see
               // apps/runner/README.md). NEVER add a `seccomp=…` SecurityOpt
               // that weakens the default profile: seccomp is the actual syscall
               // gate, and `seccomp=unconfined` would re-open single-uid rootless
@@ -378,6 +360,17 @@ export const createDockerBackend = (
               SecurityOpt: ["no-new-privileges"],
               CapDrop: ["ALL"],
               RestartPolicy: { Name: "no" },
+              // A bounded, rotated container log. The supervisor forwards
+              // the harness's own log onto stderr (about 1 MB in a measured
+              // 35-minute session), and Docker's default json-file driver
+              // never rotates: a long-lived agent would grow the host's
+              // disk without limit. 5 x 10 MB is ample for `docker logs`
+              // debugging. Explicit, so a daemon whose default driver
+              // is not json-file (journald, none) still gets `docker logs`.
+              LogConfig: {
+                Type: "json-file",
+                Config: { "max-size": "10m", "max-file": "5" },
+              },
               ...(options.extraHosts &&
                 options.extraHosts.length > 0 && {
                   ExtraHosts: options.extraHosts,
@@ -477,6 +470,7 @@ export const createDockerBackend = (
             containerRef: container.Id,
             running: container.State === "running",
             payloadHash: container.Labels?.[LABEL_PAYLOAD] ?? null,
+            resumable: container.Labels?.[LABEL_RESUMABLE] === "1",
           },
         ];
       });

@@ -3,10 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * BEHAVIORAL proof that the AWS Marketplace web surface is dark on a
  * self-host — executes the real route handlers, page component, and server
- * actions under the onprem edition and observes the refusals (the
- * source-level pins in edition-gate.test.ts guard the gates' presence;
- * this file proves what they DO). Cloud-arm sanity checks confirm the
- * gates are edition checks, not unconditional dead ends.
+ * actions under the onprem edition and observes the refusals.
+ * edition-gate.cloud.test.ts confirms the gates are edition checks, not
+ * unconditional dead ends.
  */
 
 // Onprem before the module graph loads: NEXT_PUBLIC_EDITION deleted →

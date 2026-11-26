@@ -29,6 +29,16 @@ export const MAX_SYNC_PART_BYTES = 200_000;
  */
 export const MAX_SYNC_PARTS = 256;
 
+/**
+ * A skill file bigger than one frame travels in chunks of this many RAW
+ * bytes (base64 adds 4/3 → 192,000 chars, under MAX_SYNC_PART_BYTES with
+ * room for the envelope). Divisible by 3, so per-chunk base64 decodes
+ * concatenate byte-exactly. The chunk cap bounds one file at ~10 MB, the
+ * imported-skill limit.
+ */
+export const SYNC_FILE_CHUNK_RAW_BYTES = 144_000;
+export const MAX_SYNC_FILE_CHUNKS = 80;
+
 /** The byte measure the packer and the wire refines share. */
 export const syncFrameByteLength = (frame: unknown): number =>
   new TextEncoder().encode(JSON.stringify(frame)).length;

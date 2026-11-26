@@ -7,9 +7,9 @@ import {
 import type { KubeExecTarget } from "./exec-backend";
 
 /**
- * The kube substrate's resolver: a client for the sandbox-manager's session
- * broker (/v1/ssh-sessions on the manager, behind the broker's OWN bearer
- * secret — never the runner↔manager one). The broker independently verifies
+ * The kube substrate's resolver: a client for a remote session
+ * broker (/v1/ssh-sessions, behind the broker's OWN bearer
+ * secret — never the runner's). The broker independently verifies
  * the certificate AND the control-plane grant against its own trust anchor,
  * so this client just carries both through and parses the answer fail-closed,
  * then completes the target with the boot-constant API-server coordinates
@@ -20,7 +20,7 @@ import type { KubeExecTarget } from "./exec-backend";
 const OPEN_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 
-/** The manager's refusal codes — anything else is transport-class. */
+/** The broker's refusal codes — anything else is transport-class. */
 const REFUSAL_CODES = new Set([
   "ssh_not_configured",
   "cert_refused",
@@ -31,7 +31,7 @@ const REFUSAL_CODES = new Set([
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value !== "";
 
-/** The manager envelope's code/message, when the body carries one. */
+/** The broker envelope's code/message, when the body carries one. */
 const refusalOf = (body: unknown): { code: string; message: string } | null => {
   if (typeof body !== "object" || body === null || !("error" in body)) {
     return null;
@@ -50,7 +50,7 @@ const refusalOf = (body: unknown): { code: string; message: string } | null => {
 };
 
 export interface KubeResolverOptions {
-  /** Manager base URL for the session broker (/v1/ssh-sessions). */
+  /** Base URL of the session broker (/v1/ssh-sessions). */
   managerUrl: string;
   /** The broker secret, loaded at boot (null until then — calls refuse). */
   getSecret: () => string | null;

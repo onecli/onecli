@@ -225,6 +225,19 @@ describe("the swarm roster mirror", () => {
     expect(tasks.map((t) => t.ref)).toEqual(["session_a"]);
   });
 
+  it("a lead the daemon lists as headless is still the lead (a relaunched runtime, before the reattach)", async () => {
+    // A relaunched daemon restores every persisted session as a detached
+    // member, `is_headless: true` until its conversation reattaches it.
+    const { socketPath } = await startFakeDaemon((req) =>
+      members(req.id, [
+        helper("lead-1", "ready"),
+        helper("session_a", "running"),
+      ]),
+    );
+    const tasks = await makeTasks(() => socketPath).poll();
+    expect(tasks.map((t) => t.ref)).toEqual(["session_a"]);
+  });
+
   it("the no-swarm refusal is an empty roster, not a failure", async () => {
     const { socketPath } = await startFakeDaemon((req) =>
       errorReply(

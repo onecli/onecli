@@ -9,11 +9,15 @@ import { apiFetch } from "@/lib/api-fetch";
  */
 export class ApiError extends Error {
   readonly status: number;
+  /** The refusal's structured `error.details`, when the server sent any
+   * (e.g. what a refused switch would remove). */
+  readonly details: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, details?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -57,6 +61,14 @@ export const refusal = async (res: Response): Promise<ApiError> => {
   return new ApiError(
     refusalMessage(body) ?? `Request failed: ${res.status}`,
     res.status,
+    typeof body === "object" &&
+      body !== null &&
+      "error" in body &&
+      typeof body.error === "object" &&
+      body.error !== null &&
+      "details" in body.error
+      ? body.error.details
+      : undefined,
   );
 };
 
@@ -92,19 +104,42 @@ export const apiPost = async <T>(
   return res.json();
 };
 
-export const apiPatch = async <T>(path: string, body: unknown): Promise<T> => {
+/** A POST whose success is `204 No Content` (a hint, an idempotent verb):
+ * nothing to parse, so nothing is. */
+export const apiPostNoContent = async (
+  path: string,
+  body: unknown = {},
+): Promise<void> => {
+  const res = await apiFetch(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await refusal(res);
+};
+
+export const apiPatch = async <T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> => {
   const res = await apiFetch(path, {
     method: "PATCH",
     body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
   return res.json();
 };
 
-export const apiPut = async <T>(path: string, body: unknown): Promise<T> => {
+export const apiPut = async <T>(
+  path: string,
+  body: unknown,
+  init?: RequestInit,
+): Promise<T> => {
   const res = await apiFetch(path, {
     method: "PUT",
     body: JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) throw await refusal(res);
   return res.json();

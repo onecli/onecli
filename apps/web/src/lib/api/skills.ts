@@ -1,4 +1,5 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from "./client";
+import { apiDelete, apiGet, apiPatch, apiPost, refusal } from "./client";
+import { apiUpload } from "@/lib/api-fetch";
 
 /**
  * The skills client (step 9): /v1/skills (workspace door, header-fenced) and
@@ -11,12 +12,41 @@ export interface SkillFileInput {
   content: string;
 }
 
+/** One file as the detail view returns it. Files the editor can't show
+ *  (binary, or larger than one editor file) arrive with empty `content`
+ *  and `editable: false`; saving the skill keeps them. */
+export interface SkillFile extends SkillFileInput {
+  bytes: number;
+  binary: boolean;
+  executable: boolean;
+  editable: boolean;
+}
+
+/** What a zip import did, per skill (the server's ImportedSkillOutcome). */
+export interface ImportedSkill {
+  /** The saved skill (the same one when a name was replaced). */
+  id: string;
+  name: string;
+  description: string;
+  files: number;
+  bytes: number;
+  groups: Record<string, number>;
+  skipped: { path: string; reason: string }[];
+  /** sha256 over the imported files: what the check command recomputes. */
+  fingerprint: string;
+  replaced: boolean;
+}
+
+export interface SkillImportResult {
+  imported: ImportedSkill[];
+  problems: { folder: string; reason: string }[];
+}
+
 export interface SkillSummary {
   id: string;
-  /** "agent" | "workspace" | "organization" */
+  /** "agent" | "organization" */
   scope: string;
   agentId: string | null;
-  workspaceId: string | null;
   organizationId: string | null;
   name: string;
   description: string;
@@ -29,7 +59,7 @@ export interface SkillSummary {
 
 export interface Skill extends Omit<SkillSummary, "fileCount"> {
   content: string;
-  files: SkillFileInput[];
+  files: SkillFile[];
 }
 
 export interface SkillInput {
@@ -37,8 +67,9 @@ export interface SkillInput {
   description: string;
   content: string;
   enabled?: boolean;
-  /** Present = agent tier (a hosted agent of this workspace); absent = workspace tier. */
-  agentId?: string;
+  /** The owning agent (a hosted agent of this workspace). Required: skills
+   *  created through /v1/skills always belong to one agent. */
+  agentId: string;
   files?: SkillFileInput[];
 }
 
@@ -81,3 +112,16 @@ export const orgUpdate = (skillId: string, patch: SkillPatch) =>
   apiPatch<Skill>(orgSkillPath(skillId), patch);
 
 export const orgRemove = (skillId: string) => apiDelete(orgSkillPath(skillId));
+
+/** Upload a skill zip: into one agent, or (no agentId) the organization. */
+export const importZip = async (
+  file: File,
+  agentId?: string,
+): Promise<SkillImportResult> => {
+  const path = agentId
+    ? `/v1/skills/import?agentId=${encodeURIComponent(agentId)}`
+    : "/v1/org/skills/import";
+  const res = await apiUpload(path, file, { contentType: "application/zip" });
+  if (!res.ok) throw await refusal(res);
+  return (await res.json()) as SkillImportResult;
+};

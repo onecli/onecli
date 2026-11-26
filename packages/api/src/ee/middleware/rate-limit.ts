@@ -67,9 +67,8 @@ export const rateLimit = <E extends Env = ApiEnv>(
   });
 
 /**
- * Best-effort client IP behind the CloudFront → ALB chain. Prefer the
- * CloudFront-set viewer address (not client-forgeable; the distribution
- * already forwards CloudFront-Viewer-* headers) and fall back to the
+ * Best-effort client IP behind a CDN → load balancer chain. Prefer the
+ * CDN-set viewer address header (not client-forgeable) and fall back to the
  * leftmost x-forwarded-for hop — client-controlled in principle, which is
  * acceptable for abuse-throttling (not for auth decisions).
  */

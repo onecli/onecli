@@ -8,7 +8,9 @@ import {
 
 export const youtube: AppDefinition = {
   id: "youtube",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/youtube",
   name: "YouTube",
+  apiDocsUrl: "https://developers.google.com/youtube/v3/docs",
   icon: "/icons/youtube.svg",
   description: "Manage playlists, videos, and channel content on YouTube.",
   connectionMethod: {
@@ -58,6 +60,7 @@ export const youtube: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

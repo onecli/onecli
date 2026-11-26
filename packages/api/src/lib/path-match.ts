@@ -5,8 +5,10 @@
 /**
  * Port of `apps/gateway/crates/inject/src/lib.rs::path_matches`. Query strings are
  * stripped first, then five rules in order:
- *   "*" ; mid-path segment glob ; "/p/*" (prefix + "/" boundary, also matches
- *   bare "/p") ; "/p*" (raw prefix) ; exact.
+ *   "*" ; mid-path segment glob (a pattern ending in "/" also matches the
+ *   slashless path at the same depth) ; "/p/*" (prefix + "/" boundary, also
+ *   matches bare "/p") ; "/p*" (raw prefix) ; exact.
+ * Both ports are pinned to one corpus: `path-match-cases.json`.
  */
 export const pathMatches = (requestPath: string, pattern: string): boolean => {
   const path = requestPath.split("?")[0] ?? requestPath;
@@ -32,11 +34,25 @@ const hasMidPathWildcard = (pattern: string): boolean =>
 /**
  * Port of `segment_wildcard_matches`. Each `*` matches within one segment
  * (never crossing `/`), except a trailing standalone `*` which matches 1+
- * remaining segments.
+ * remaining segments. A pattern ending in `/` also matches the same path
+ * without that trailing slash, at the SAME depth (`/sobjects/*\/` matches
+ * `/sobjects/Contact`, never `/sobjects/Contact/003xx`).
  */
 const segmentWildcardMatches = (path: string, pattern: string): boolean => {
   const pathSegs = path.split("/");
   const patSegs = pattern.split("/");
+
+  // Slash-optional: see the Rust doc. Match as if the empty last segment were
+  // there; the depth check below stays exact.
+  if (
+    patSegs.length > 1 &&
+    patSegs[patSegs.length - 1] === "" &&
+    pathSegs[pathSegs.length - 1] !== "" &&
+    pathSegs.length + 1 === patSegs.length
+  ) {
+    pathSegs.push("");
+  }
+
   const trailingWild = patSegs[patSegs.length - 1] === "*";
   const fixedPats = trailingWild ? patSegs.slice(0, -1) : patSegs;
 

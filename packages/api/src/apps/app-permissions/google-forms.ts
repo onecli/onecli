@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleFormsPermissions: AppPermissionDefinition = {
   provider: "google-forms",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
-import { Source_Serif_4 } from "next/font/google";
+import { Inter } from "next/font/google";
 import { headers } from "next/headers";
 import "@onecli/ui/globals.css";
 import "./globals.css";
@@ -12,17 +12,14 @@ import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@onecli/ui/components/sonner";
 import { ThemeColorSync } from "./_components/theme-color-sync";
 
-const geistSans = localFont({
-  src: "./fonts/GeistVF.woff",
-  variable: "--font-geist-sans",
+// Inter, as on onecli.sh, for the whole interface.
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
 });
 const geistMono = localFont({
   src: "./fonts/GeistMonoVF.woff",
   variable: "--font-geist-mono",
-});
-const sourceSerif = Source_Serif_4({
-  subsets: ["latin"],
-  variable: "--font-serif",
 });
 
 // The API/gateway origins are runtime decisions (env-derived), not build-time
@@ -88,7 +85,7 @@ export default async function RootLayout({
         </head>
       )}
       <body
-        className={`${geistSans.variable} ${geistMono.variable} ${sourceSerif.variable}`}
+        className={`${inter.variable} ${geistMono.variable} font-sans`}
         suppressHydrationWarning
       >
         <AuthProvider>

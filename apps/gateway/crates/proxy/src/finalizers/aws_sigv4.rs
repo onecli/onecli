@@ -222,7 +222,7 @@ pub async fn finalize_request(
     tracing::info!(
         method = %method,
         host = %host,
-        path = %path,
+        path = %crate::log_redact::redact_for_log(path),
         "AWS SigV4 signed"
     );
 

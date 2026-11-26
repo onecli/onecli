@@ -14,22 +14,29 @@ import {
   workspaceAccessBindingArms,
 } from "./authorization-service";
 import { invalidateGatewayCacheForKeys } from "../../lib/gateway-invalidate";
-import { teardownWorkspacePresences } from "../../services/channels/agent-channel-service";
+import { requestWorkspaceSandboxRespawn } from "../../services/sandbox-service";
+import {
+  enqueueWorkspaceCleanup,
+  processChannelCleanups,
+} from "../../services/channels/channel-cleanup-service";
 import type { OrgRole } from "../../providers";
 
 /**
  * Delete all child resources of a workspace inside an existing transaction.
- * Caller is responsible for wrapping in `db.$transaction`.
+ * Caller is responsible for wrapping in `db.$transaction` and, after it
+ * commits, for handing the returned cleanup job ids to
+ * `processChannelCleanups` so the remote half of any channel teardown runs
+ * right away rather than waiting for the maintenance sweep.
  */
 export const deleteWorkspaceContent = async (
   workspaceId: string,
   tx: Parameters<Parameters<typeof db.$transaction>[0]>[0],
-) => {
+): Promise<{ cleanupIds: string[] }> => {
+  // Channel presences hold state outside our database (a provider app and a
+  // service key): snapshot and revoke BEFORE the agent cascade drops our end.
+  const cleanupIds = await enqueueWorkspaceCleanup(tx, workspaceId);
   await tx.requestLog.deleteMany({ where: { workspaceId } });
-  // Workspace-tier skills: the FK is Restrict on purpose — this explicit line
-  // is the deletion path, and forgetting it fails the delete loudly.
-  // (Agent-tier skills cascade with their agents on the next line.)
-  await tx.skill.deleteMany({ where: { workspaceId } });
+  // Skills cascade with their agents on the next line.
   await tx.agent.deleteMany({ where: { workspaceId } });
   await tx.appConnection.deleteMany({ where: { workspaceId } });
   await tx.secret.deleteMany({ where: { workspaceId } });
@@ -39,6 +46,7 @@ export const deleteWorkspaceContent = async (
   await tx.auditLog.deleteMany({ where: { workspaceId } });
   await tx.apiKey.deleteMany({ where: { workspaceId } });
   await tx.workspace.delete({ where: { id: workspaceId } });
+  return { cleanupIds };
 };
 
 /**
@@ -368,23 +376,16 @@ export const createWorkspace = async (
  * when a member or whole org is removed) and the `deleteOrgWorkspace` API route.
  */
 const deleteWorkspaceAndFlushCache = async (workspaceId: string) => {
-  // Provider-side teardown FIRST, outside the transaction: a presence holds a
-  // Slack app installed in the customer's workspace and a service key, and
-  // the row cascade below would drop our end and leave both alive with
-  // nothing pointing at them. Network calls must not sit inside
-  // `db.$transaction`, and it is best-effort inside — a refusing provider
-  // must never block the deletion.
-  await teardownWorkspacePresences(workspaceId);
-
-  const keys = await db.$transaction(async (tx) => {
-    const apiKeys = await tx.apiKey.findMany({
+  const { keys, cleanupIds } = await db.$transaction(async (tx) => {
+    const keys = await tx.apiKey.findMany({
       where: { workspaceId },
       select: { key: true },
     });
-    await deleteWorkspaceContent(workspaceId, tx);
-    return apiKeys;
+    const { cleanupIds } = await deleteWorkspaceContent(workspaceId, tx);
+    return { keys, cleanupIds };
   });
   invalidateGatewayCacheForKeys(keys.map((k) => k.key));
+  await processChannelCleanups({ ids: cleanupIds }).catch(() => undefined);
 };
 
 /**
@@ -402,6 +403,7 @@ const API_WORKSPACE_SELECT = {
   id: true,
   name: true,
   slug: true,
+  timezone: true,
   createdAt: true,
 } as const;
 
@@ -501,15 +503,15 @@ export const createOrgWorkspace = async (
 export const updateOrgWorkspace = async (
   organizationId: string,
   targetId: string,
-  input: { name?: string },
+  input: { name?: string; timezone?: string | null },
 ) => {
   const workspace = await db.workspace.findFirst({
     where: { id: targetId, organizationId },
-    select: { id: true },
+    select: { id: true, timezone: true },
   });
   if (!workspace) throw new ServiceError("NOT_FOUND", "Workspace not found");
 
-  const data: Record<string, unknown> = {};
+  const data: { name?: string; slug?: string; timezone?: string | null } = {};
   if (input.name !== undefined) {
     const name = input.name.trim();
     const slug = slugify(name) || "workspace";
@@ -528,12 +530,22 @@ export const updateOrgWorkspace = async (
     data.name = name;
     data.slug = slug;
   }
+  // The zone is baked into every hosted agent's container environment at
+  // create, so a live sandbox keeps running the old one until it is
+  // replaced: the same treatment a model change gets (`updateAgent`), and
+  // under the same no-op guard. A settings form that re-sends the stored
+  // value must not cost every agent in the workspace its container.
+  const timezoneChanged =
+    input.timezone !== undefined && input.timezone !== workspace.timezone;
+  if (timezoneChanged) data.timezone = input.timezone;
 
-  return db.workspace.update({
+  const updated = await db.workspace.update({
     where: { id: targetId },
     data,
     select: API_WORKSPACE_SELECT,
   });
+  if (timezoneChanged) await requestWorkspaceSandboxRespawn(targetId);
+  return updated;
 };
 
 export const deleteOrgWorkspace = async (

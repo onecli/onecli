@@ -1,21 +1,14 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useTransition,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import {
-  WORKSPACE_PATH_RE,
-  ORG_PATH_RE,
-  connectionsPath,
-} from "@/lib/navigation";
+import { WORKSPACE_PATH_RE, ORG_PATH_RE } from "@/lib/navigation";
+import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
+import { useReplaceParam } from "@/lib/settings-modal/use-replace-param";
+import { useSettingsModal } from "@/lib/settings-modal/modal-context";
 import { openConnectPopup } from "@/lib/connect-popup";
 import { ChevronRight, Search, X } from "lucide-react";
+import { createPortal } from "react-dom";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Skeleton } from "@onecli/ui/components/skeleton";
@@ -44,21 +37,42 @@ import {
 import { AppIcon } from "@/lib/components/app-icon";
 import { ConnectAppDialog } from "./connect-app-dialog";
 import { ConfigureCredentialsDialog } from "./configure-credentials-dialog";
+import { GitHubAppConnectDialog } from "./github-app-connect-dialog";
+import {
+  GITHUB_APP_PROVIDER,
+  useSharedGitHubInstallations,
+} from "@/hooks/use-github-app-share";
+import type { ConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useVerifiedConnectLinkAgent } from "@/hooks/use-verified-connect-link-agent";
 import { useConnectParam } from "./use-connect-param";
+import dynamic from "next/dynamic";
+import { useInstance } from "@/hooks/use-instance";
+
+// Licensed (granular_access): the Slack read-access finder. Lazy so the free
+// build never evaluates it; rendered only when the instance is entitled.
+const SlackReadTile = dynamic(() =>
+  import("@/ee/slack-read/slack-read-tile").then((m) => m.SlackReadTile),
+);
 
 interface AppsTabProps {
   pageScope?: PageScope;
   basePath?: string;
+  /** Where the search box renders, when the page has a better spot for it
+   * than the filter row (the settings modal puts it in its tab strip, above
+   * the strip's line). Omitted: the filter row keeps it. */
+  searchSlot?: HTMLElement | null;
 }
 
 export const AppsTab = ({
   pageScope = "workspace",
   basePath,
+  searchSlot,
 }: AppsTabProps) => {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [, startTransition] = useTransition();
+  const href = useConnectionsHref(basePath);
+  const modal = useSettingsModal();
   const searchQuery = searchParams.get("q") ?? "";
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -87,26 +101,29 @@ export const AppsTab = ({
   const activeCategory =
     (searchParams.get("category") as AppCategory | null) ?? "all";
   const [configApp, setConfigApp] = useState<AppDefinition | null>(null);
-  const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
-  const [connectAgentName, setConnectAgentName] = useState<
-    string | undefined
+  // The agent a connect link named, held across the credentials setup a
+  // not-yet-configured app needs first, so the connect after it is the
+  // agent's too.
+  const [linkConfigAgent, setLinkConfigAgent] = useState<
+    ConnectLinkAgent | undefined
   >();
+  const configAgent = useVerifiedConnectLinkAgent(linkConfigAgent);
+  const [connectApp, setConnectApp] = useState<AppDefinition | null>(null);
+  // The agent a connect link named: shown in the dialog, and the connect it
+  // starts switches the new account on for it.
+  const [linkAgent, setLinkAgent] = useState<ConnectLinkAgent | undefined>();
+  // Shown and granted as the workspace's own record for the link's id.
+  const connectAgent = useVerifiedConnectLinkAgent(linkAgent);
+  // GitHub App: same as the app's own page, an installation already
+  // connected elsewhere in the org is offered before a GitHub install.
+  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
+  const { data: sharedInstallations = [] } =
+    useSharedGitHubInstallations(pageScope);
   const [requestOpen, setRequestOpen] = useState(false);
   const [requestHostname, setRequestHostname] = useState("");
   const [requestAppName, setRequestAppName] = useState<string | undefined>();
 
-  const updateParam = useCallback(
-    (key: string, value: string | null) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (value) params.set(key, value);
-      else params.delete(key);
-      const qs = params.toString();
-      startTransition(() => {
-        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-      });
-    },
-    [searchParams, router, pathname, startTransition],
-  );
+  const updateParam = useReplaceParam();
 
   const queryClient = useQueryClient();
   const connectionsQuery = useConnections(pageScope);
@@ -144,40 +161,41 @@ export const AppsTab = ({
       });
       queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
       if (provider) {
-        const path = connectionsPath(
-          { pathname, basePath },
-          `/apps/${provider}`,
-        );
         // Hand a brand-new account to the detail page so it can offer agent
-        // access on arrival — the popup's message is long gone by the time
+        // access on arrival: the popup's message is long gone by the time
         // that page mounts. A reconnect carries no id and just navigates.
         router.push(
-          connectionId
-            ? `${path}?connected=${encodeURIComponent(connectionId)}`
-            : path,
+          href(
+            connectionId
+              ? `/apps/${provider}?connected=${encodeURIComponent(connectionId)}`
+              : `/apps/${provider}`,
+          ),
         );
       }
     },
-    [queryClient, pageScope, router, basePath, pathname],
+    [queryClient, pageScope, router, href],
   );
 
   useAppMessages({
     onConnected: handleConnected,
     onConfigure: (provider) => {
-      router.push(connectionsPath({ pathname, basePath }, `/apps/${provider}`));
+      router.push(href(`/apps/${provider}`));
     },
   });
 
   const openPopup = (
     provider: string,
-    options?: { agentName?: string; height?: number },
+    options?: { agentName?: string; agentId?: string; height?: number },
   ) =>
     openConnectPopup(provider, {
       ...options,
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
+      // An org connect names its org. On the org routes the URL does; in
+      // the Settings modal the URL beneath may name a workspace instead,
+      // so the modal's resolved org is the source.
       orgId:
         pageScope === "organization"
-          ? pathname.match(ORG_PATH_RE)?.[1]
+          ? (modal?.organizationId ?? pathname.match(ORG_PATH_RE)?.[1])
           : undefined,
     });
 
@@ -198,11 +216,14 @@ export const AppsTab = ({
     connectedProviders,
     configuredProviders,
     envDefaultProviders,
-    onConnect: useCallback((app: AppDefinition, agentName?: string) => {
+    onConnect: useCallback((app: AppDefinition, agent?: ConnectLinkAgent) => {
       setConnectApp(app);
-      setConnectAgentName(agentName);
+      setLinkAgent(agent);
     }, []),
-    onConfigure: setConfigApp,
+    onConfigure: useCallback((app: AppDefinition, agent?: ConnectLinkAgent) => {
+      setConfigApp(app);
+      setLinkConfigAgent(agent);
+    }, []),
     onRequestApp: useCallback((hostname: string, appName?: string) => {
       setRequestHostname(hostname);
       setRequestAppName(appName);
@@ -238,7 +259,15 @@ export const AppsTab = ({
     return apps;
   }, [connectionCounts, activeCategory, localSearch, availableApps]);
 
-  const hasActiveFilter = localSearch.trim() !== "" || activeCategory !== "all";
+  const instance = useInstance();
+  // Slack is not a registry app (the gateway never injects Slack creds), so
+  // its tile is composed here: workspace scope, entitled, and only when the
+  // current filter would show a Communication app named like it.
+  const showSlackRead =
+    pageScope === "workspace" &&
+    instance?.entitled === true &&
+    (activeCategory === "all" || activeCategory === "communication") &&
+    (!localSearch.trim() || "slack".includes(localSearch.trim().toLowerCase()));
 
   const handleConnect = (
     e: React.MouseEvent | undefined,
@@ -247,12 +276,23 @@ export const AppsTab = ({
     e?.stopPropagation();
     const hasCredentials =
       envDefaultProviders.has(app.id) || configuredProviders.has(app.id);
+    // Apps with an API-key alternate (Attio, Apollo, PostHog) can always
+    // connect: the popup offers the key form when OAuth isn't configured or
+    // isn't on the org's plan, so don't dead-end in the OAuth setup dialog.
+    const hasApiKeyAlternate = (app.additionalMethods ?? []).some(
+      (m) => m.type === "api_key",
+    );
     if (
       app.configurable?.fields &&
       !hasCredentials &&
+      !hasApiKeyAlternate &&
       (connectionCounts.get(app.id) ?? 0) === 0
     ) {
       setConfigApp(app);
+      return;
+    }
+    if (app.id === GITHUB_APP_PROVIDER && sharedInstallations.length > 0) {
+      setGithubDialogOpen(true);
       return;
     }
     const popupHeight =
@@ -260,62 +300,70 @@ export const AppsTab = ({
     openPopup(app.id, { height: popupHeight });
   };
 
+  const searchBox = (
+    <div className="relative sm:shrink-0">
+      <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+      <Input
+        ref={searchInputRef}
+        placeholder="Search apps…"
+        value={localSearch}
+        onChange={(e) => {
+          setLocalSearch(e.target.value);
+          updateParam("q", e.target.value || null);
+        }}
+        className="h-8 w-full bg-card pl-9 text-sm sm:w-52"
+      />
+      {localSearch && (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => {
+            setLocalSearch("");
+            updateParam("q", null);
+          }}
+          className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
+        >
+          <X className="size-3" />
+        </button>
+      )}
+    </div>
+  );
+
   return (
     <>
-      <div className="flex items-center gap-2">
-        <div className="flex flex-1 flex-wrap gap-1.5">
+      {searchSlot && createPortal(searchBox, searchSlot)}
+      <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:gap-2">
+        {/* One line, scrolling sideways when the page is narrow: a wrapped
+            category reads as a second, separate filter. */}
+        <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {CATEGORY_LABELS.map(({ id, label }) => (
             <button
               key={id}
               type="button"
               onClick={() => updateParam("category", id === "all" ? null : id)}
               className={cn(
-                "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors",
+                "shrink-0 rounded-md px-2.5 py-1 text-xs whitespace-nowrap transition-colors",
                 activeCategory === id
-                  ? "border-foreground bg-foreground text-background"
-                  : "border-border text-muted-foreground hover:border-foreground/50 hover:text-foreground",
+                  ? "bg-brand-wash text-brand-ink font-medium"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
               )}
             >
               {label}
             </button>
           ))}
         </div>
-        <div className="relative shrink-0">
-          <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-          <Input
-            ref={searchInputRef}
-            placeholder="Search..."
-            value={localSearch}
-            onChange={(e) => {
-              setLocalSearch(e.target.value);
-              updateParam("q", e.target.value || null);
-            }}
-            className="h-9 w-52 bg-card pl-9 text-sm"
-          />
-          {localSearch && (
-            <button
-              type="button"
-              onClick={() => {
-                setLocalSearch("");
-                updateParam("q", null);
-              }}
-              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
-            >
-              <X className="size-3" />
-            </button>
-          )}
-        </div>
+        {searchSlot === undefined && searchBox}
       </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {!hasActiveFilter && (
-          <RequestAppSlot
-            requestOpen={requestOpen}
-            onRequestOpenChange={setRequestOpen}
-            initialName={requestAppName}
-            initialUrl={requestHostname}
-          />
-        )}
+      <div className="mt-4 grid auto-rows-fr gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Always present, searching included: a search that finds nothing
+            is exactly when someone wants to ask for the app. */}
+        <RequestAppSlot
+          requestOpen={requestOpen}
+          onRequestOpenChange={setRequestOpen}
+          initialName={requestAppName ?? (localSearch.trim() || undefined)}
+          initialUrl={requestHostname}
+        />
         {loading ? (
           Array.from({ length: 12 }, (_, i) => (
             <div
@@ -329,7 +377,7 @@ export const AppsTab = ({
               <Skeleton className="h-7 w-16 rounded-md" />
             </div>
           ))
-        ) : filteredApps.length === 0 ? (
+        ) : filteredApps.length === 0 && !showSlackRead ? (
           <div className="col-span-full flex flex-col items-center justify-center py-12 text-center">
             <p className="text-muted-foreground text-sm">
               No apps match your search.
@@ -338,15 +386,8 @@ export const AppsTab = ({
               type="button"
               onClick={() => {
                 setLocalSearch("");
-                const params = new URLSearchParams(searchParams.toString());
-                params.delete("q");
-                params.delete("category");
-                const qs = params.toString();
-                startTransition(() => {
-                  router.replace(qs ? `${pathname}?${qs}` : pathname, {
-                    scroll: false,
-                  });
-                });
+                updateParam("q", null);
+                updateParam("category", null);
               }}
               className="text-brand mt-2 text-sm font-medium hover:underline"
             >
@@ -354,24 +395,25 @@ export const AppsTab = ({
             </button>
           </div>
         ) : (
-          filteredApps.map((app) => {
-            const count = connectionCounts.get(app.id) ?? 0;
-            return (
-              <AppRow
-                key={app.id}
-                name={app.name}
-                icon={app.icon}
-                darkIcon={app.darkIcon}
-                connectionCount={count}
-                onConnect={(e) => handleConnect(e, app)}
-                onClick={() =>
-                  router.push(
-                    connectionsPath({ pathname, basePath }, `/apps/${app.id}`),
-                  )
-                }
-              />
-            );
-          })
+          <>
+            {showSlackRead && <SlackReadTile />}
+            {filteredApps.map((app) => {
+              const count = connectionCounts.get(app.id) ?? 0;
+              return (
+                <AppRow
+                  key={app.id}
+                  name={app.name}
+                  icon={app.icon}
+                  darkIcon={app.darkIcon}
+                  description={app.description}
+                  category={categoryLabel(app.id)}
+                  connectionCount={count}
+                  onConnect={(e) => handleConnect(e, app)}
+                  onClick={() => router.push(href(`/apps/${app.id}`))}
+                />
+              );
+            })}
+          </>
         )}
       </div>
 
@@ -380,23 +422,37 @@ export const AppsTab = ({
           appName={connectApp.name}
           appIcon={connectApp.icon}
           appDarkIcon={connectApp.darkIcon}
-          agentName={connectAgentName}
+          agentName={connectAgent?.name}
           open={!!connectApp}
           onOpenChange={(open) => {
             if (!open) {
               setConnectApp(null);
-              setConnectAgentName(undefined);
+              setLinkAgent(undefined);
             }
           }}
           onConnect={() => {
             const provider = connectApp.id;
-            const agent = connectAgentName;
+            const agent = connectAgent;
             setConnectApp(null);
-            setConnectAgentName(undefined);
-            openPopup(provider, { agentName: agent });
+            setLinkAgent(undefined);
+            openPopup(provider, { agentName: agent?.name, agentId: agent?.id });
           }}
         />
       )}
+
+      <GitHubAppConnectDialog
+        open={githubDialogOpen}
+        onOpenChange={setGithubDialogOpen}
+        agentId={connectAgent?.id}
+        pageScope={pageScope}
+        onInstallNew={() =>
+          openPopup(GITHUB_APP_PROVIDER, {
+            agentId: connectAgent?.id,
+            agentName: connectAgent?.name,
+          })
+        }
+        onConnected={() => router.push(href(`/apps/${GITHUB_APP_PROVIDER}`))}
+      />
 
       {configApp?.configurable && (
         <ConfigureCredentialsDialog
@@ -406,15 +462,21 @@ export const AppsTab = ({
           appDarkIcon={configApp.darkIcon}
           fields={configApp.configurable.fields}
           hint={configApp.configurable.hint}
+          setupGuideUrl={configApp.setupGuideUrl}
           open={!!configApp}
           onOpenChange={(open) => {
-            if (!open) setConfigApp(null);
+            if (!open) {
+              setConfigApp(null);
+              setLinkConfigAgent(undefined);
+            }
           }}
           pageScope={pageScope}
           onConfigured={() => {
             const provider = configApp.id;
+            const agent = configAgent;
             setConfigApp(null);
-            openPopup(provider);
+            setLinkConfigAgent(undefined);
+            openPopup(provider, { agentName: agent?.name, agentId: agent?.id });
           }}
         />
       )}
@@ -422,10 +484,16 @@ export const AppsTab = ({
   );
 };
 
+/** The chip label of the category an app is filed under, if any. */
+const categoryLabel = (appId: string) =>
+  CATEGORY_LABELS.find(({ id }) => id === APP_CATEGORIES[appId])?.label;
+
 interface AppRowProps {
   name: string;
   icon: string;
   darkIcon?: string;
+  description?: string;
+  category?: string;
   connectionCount: number;
   onConnect: (e: React.MouseEvent) => void;
   onClick: () => void;
@@ -435,6 +503,8 @@ const AppRow = ({
   name,
   icon,
   darkIcon,
+  description,
+  category,
   connectionCount,
   onConnect,
   onClick,
@@ -443,41 +513,50 @@ const AppRow = ({
   return (
     <div
       className={cn(
-        "group flex items-center gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors cursor-pointer hover:bg-accent/50 has-[button:hover]:bg-card!",
+        "group flex cursor-pointer flex-col gap-2 rounded-lg border bg-card px-3.5 py-3 transition-colors hover:border-foreground/20 has-[button:hover]:border-border!",
         connected && "border-brand/30",
       )}
       onClick={onClick}
     >
-      <div className="flex flex-1 items-center gap-3 min-w-0">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted dark:bg-white/10 dark:border-white/10">
+      <div className="flex items-center gap-2.5">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-background dark:border-white/10 dark:bg-white/10">
           <AppIcon icon={icon} darkIcon={darkIcon} name={name} />
         </div>
-        <div className="min-w-0">
-          <span className="text-sm font-medium">{name}</span>
-          <p className="text-[11px] text-muted-foreground group-hover:underline group-hover:text-foreground group-has-[button:hover]:no-underline group-has-[button:hover]:text-muted-foreground transition-colors">
-            View details
-          </p>
-        </div>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {name}
+        </span>
+        {category && (
+          <span className="bg-secondary text-muted-foreground shrink-0 rounded-md px-1.5 py-0.5 text-[11px]">
+            {category}
+          </span>
+        )}
       </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        <ChevronRight className="size-4 text-muted-foreground transition-all group-hover:text-foreground group-hover:translate-x-0.5 group-has-[button:hover]:text-muted-foreground group-has-[button:hover]:translate-x-0" />
-        <div className="border-l pl-2 min-w-20 flex justify-center">
-          {connected ? (
-            <div className="flex flex-col items-center">
-              <span className="text-xs font-medium text-brand">Connected</span>
-              {connectionCount > 1 && (
-                <span className="text-[11px] text-muted-foreground">
-                  {connectionCount} accounts
-                </span>
-              )}
-            </div>
-          ) : (
-            <Button size="xs" onClick={onConnect}>
-              Connect
-            </Button>
-          )}
-        </div>
+      {description && (
+        <p className="text-muted-foreground line-clamp-2 text-xs leading-snug">
+          {description}
+        </p>
+      )}
+      <div className="mt-auto flex items-center justify-between gap-2">
+        {connected ? (
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-brand-ink text-xs font-medium">
+              Connected
+            </span>
+            {connectionCount > 1 && (
+              <span className="text-[11px] text-muted-foreground">
+                {connectionCount} accounts
+              </span>
+            )}
+          </div>
+        ) : (
+          <Button size="xs" variant="outline" onClick={onConnect}>
+            Connect
+          </Button>
+        )}
+        <span className="text-muted-foreground flex items-center gap-0.5 text-[11px] transition-colors group-hover:text-foreground group-has-[button:hover]:text-muted-foreground">
+          View details
+          <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5 group-has-[button:hover]:translate-x-0" />
+        </span>
       </div>
     </div>
   );

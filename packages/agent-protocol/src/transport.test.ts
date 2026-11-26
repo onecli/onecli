@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { supervisorMessageSchema, workItemSchema } from "./transport";
+import {
+  MAX_AGENT_CONNECTION_API_HOST_CHARS,
+  MAX_AGENT_CONNECTION_API_HOSTS,
+  MAX_AGENT_CONNECTION_DOCS_URL_CHARS,
+  MAX_AGENT_CONNECTION_ENDPOINT_CHARS,
+  MAX_AGENT_CONNECTION_ENDPOINTS,
+  MAX_AGENT_CONNECTION_LABEL_CHARS,
+  MAX_AGENT_CONNECTION_NAME_CHARS,
+  MAX_AGENT_CONNECTIONS,
+  MAX_SYNC_PART_BYTES,
+  SESSION_RESUME_BUDGET,
+  SESSION_RESUME_GRACE_MS,
+  agentConnectionSchema,
+  sequencedFrameSchema,
+  supervisorMessageSchema,
+  syncFrameByteLength,
+  workItemSchema,
+} from "./transport";
+import { MAX_SYNC_PARTS } from "./sync-budget";
+import { runnerWorkItemSchema } from "./runner-wire";
+import { MAX_HOSTNAME_CHARS } from "./text";
+import {
+  ATTACHMENT_CHUNK_BASE64_CHARS,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_OUTBOUND_CAPTION_CHARS,
+} from "./attachments";
 
 /**
  * The tool-channel wire pair (step 7). The compat law matters more than the
@@ -141,6 +166,129 @@ describe("turn.deliver context", () => {
 });
 
 /**
+ * The conversation's context size on the supervisor wire: a ladder size
+ * passes, and anything that is not a sane whole token count is refused, so
+ * a corrupt value can never ask the harness for an absurd budget. On the
+ * runner wire it is the same schema, forwarded verbatim.
+ */
+describe("turn.deliver contextTokens", () => {
+  const base = {
+    kind: "turn.deliver",
+    turnId: "t-1",
+    conversationId: "conv-1",
+    message: "hello",
+  };
+
+  it("carries a size, and is absent when the platform chose none", () => {
+    for (const contextTokens of [100_000, 200_000, 1_000_000]) {
+      const parsed = workItemSchema.parse({ ...base, contextTokens });
+      expect(parsed).toMatchObject({ contextTokens });
+    }
+    expect(workItemSchema.parse(base)).not.toHaveProperty("contextTokens");
+  });
+
+  it("refuses a size outside the sane bounds or not a whole number", () => {
+    for (const contextTokens of [9_999, 10_000_001, 150_000.5, -1, "1000000"]) {
+      expect(workItemSchema.safeParse({ ...base, contextTokens }).success).toBe(
+        false,
+      );
+      expect(
+        runnerWorkItemSchema.safeParse({
+          ...base,
+          sandboxId: "sb-1",
+          contextTokens,
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      workItemSchema.safeParse({ ...base, contextTokens: 10_000 }).success,
+    ).toBe(true);
+    expect(
+      workItemSchema.safeParse({ ...base, contextTokens: 10_000_000 }).success,
+    ).toBe(true);
+    // The runner refusals above are the size's, not a malformed item's.
+    expect(
+      runnerWorkItemSchema.safeParse({
+        ...base,
+        sandboxId: "sb-1",
+        contextTokens: 1_000_000,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+/**
+ * SEND NOW on the supervisor wire: the follow-up and the run
+ * it waits on, nothing else.
+ */
+describe("turn.send_now", () => {
+  it("parses the ids, and refuses one without its target", () => {
+    const item = {
+      kind: "turn.send_now",
+      turnId: "f-1",
+      targetTurnId: "t-1",
+      conversationId: "conv-1",
+    };
+    expect(workItemSchema.parse(item)).toEqual(item);
+    expect(
+      workItemSchema.safeParse({ ...item, targetTurnId: undefined }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * The steer's context: the "a new message arrived while you were working"
+ * frame a person's follow-up carries, under the same law as the turn's.
+ */
+describe("turn.message context", () => {
+  const base = {
+    kind: "turn.message",
+    turnId: "f-1",
+    targetTurnId: "t-1",
+    conversationId: "conv-1",
+    message: "also check the linter",
+  };
+
+  it("parses without context (an old control plane, an automation's follow-up)", () => {
+    expect(workItemSchema.parse(base)).not.toHaveProperty("context");
+  });
+
+  it("round-trips with context", () => {
+    const parsed = workItemSchema.parse({
+      ...base,
+      context: "[A new message arrived while you were working.]",
+    });
+    expect(parsed.kind === "turn.message" && parsed.context).toContain(
+      "new message",
+    );
+  });
+
+  it("carries the follow-up's attachment manifest", () => {
+    const attachments = [
+      {
+        id: "a1",
+        path: "attachments/f-1/photo.png",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 10,
+        sha256: "a".repeat(64),
+      },
+    ];
+    const parsed = workItemSchema.parse({ ...base, attachments });
+    expect(parsed.kind === "turn.message" && parsed.attachments).toEqual(
+      attachments,
+    );
+  });
+
+  it("rejects a context past its cap", () => {
+    expect(
+      workItemSchema.safeParse({ ...base, context: "x".repeat(16_001) })
+        .success,
+    ).toBe(false);
+  });
+});
+
+/**
  * The supervisor side of the home sync (step 9): the per-part frame the
  * runner fans out, and the ack. An OLD supervisor image must DROP the arm
  * (safeParse fails → warn + discard) — the desired degrade.
@@ -162,8 +310,17 @@ describe("skills.changed + home.synced (supervisor wire)", () => {
       prune: [".agents/skills/deploy/SKILL.md"],
       instructions: "brief",
       agentName: "andy",
+      channels: [
+        {
+          provider: "slack",
+          status: "needs_attention",
+          handle: "andy",
+          workspaceName: null,
+        },
+      ],
     });
     expect(final.kind === "skills.changed" && final.prune).toHaveLength(1);
+    expect(final.kind === "skills.changed" && final.channels).toHaveLength(1);
   });
 
   it("rejects traversal paths and non-positive part numbers", () => {
@@ -245,5 +402,267 @@ describe("process.state (supervisor wire, step 10)", () => {
     const fired = structuredClone(full);
     (fired.process.watches[0] as { status: string }).status = "fired";
     expect(supervisorMessageSchema.safeParse(fired).success).toBe(false);
+  });
+});
+
+/**
+ * Outbound files (`send_file`, Tier 3): the supervisor's chunk frame and the
+ * runner's one-per-upload answer. The belts here are what keep a 25 MB file
+ * from ever producing a frame the runner WS drops whole.
+ */
+describe("file.part + file.result (send_file wire)", () => {
+  const part = {
+    kind: "file.part",
+    uploadId: "up-1",
+    conversationId: "cv-1",
+    turnId: "t-1",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    sizeBytes: 3 * 144_000 + 7,
+    sha256: "a".repeat(64),
+    caption: "The quarterly report",
+    part: 1,
+    of: 4,
+    dataBase64: "QUJD",
+  };
+
+  it("round-trips a part with and without a caption", () => {
+    expect(supervisorMessageSchema.parse(part).kind).toBe("file.part");
+    const bare: Record<string, unknown> = { ...part };
+    delete bare.caption;
+    expect(supervisorMessageSchema.parse(bare).kind).toBe("file.part");
+  });
+
+  it("requires the calling turn: a file belongs to the reply that made it", () => {
+    const noTurn: Record<string, unknown> = { ...part };
+    delete noTurn.turnId;
+    expect(supervisorMessageSchema.safeParse(noTurn).success).toBe(false);
+    const noConversation: Record<string, unknown> = { ...part };
+    delete noConversation.conversationId;
+    expect(supervisorMessageSchema.safeParse(noConversation).success).toBe(
+      false,
+    );
+  });
+
+  it("refuses the outbound size cap, an oversized chunk, and a bad sha", () => {
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        sizeBytes: MAX_OUTBOUND_ATTACHMENT_BYTES + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        dataBase64: "A".repeat(ATTACHMENT_CHUNK_BASE64_CHARS + 4),
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({ ...part, sha256: "not-hex" }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({
+        ...part,
+        caption: "c".repeat(MAX_OUTBOUND_CAPTION_CHARS + 1),
+      }).success,
+    ).toBe(false);
+    expect(
+      supervisorMessageSchema.safeParse({ ...part, part: 0 }).success,
+    ).toBe(false);
+  });
+
+  it("carries an optional purpose (send = staged), and refuses any other", () => {
+    expect(
+      supervisorMessageSchema.parse({ ...part, purpose: "send" }),
+    ).toMatchObject({
+      purpose: "send",
+    });
+    for (const purpose of ["reply", "elsewhere"]) {
+      expect(
+        supervisorMessageSchema.safeParse({ ...part, purpose }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("a legal chunk frame stays under the runner WS's 256KB ceiling", () => {
+    const maxFrame = {
+      ...part,
+      name: "n".repeat(100),
+      caption: "c".repeat(MAX_OUTBOUND_CAPTION_CHARS),
+      dataBase64: "A".repeat(ATTACHMENT_CHUNK_BASE64_CHARS),
+    };
+    expect(supervisorMessageSchema.safeParse(maxFrame).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(maxFrame))).toBeLessThan(
+      256 * 1024,
+    );
+  });
+
+  it("round-trips both file.result outcomes", () => {
+    expect(
+      workItemSchema.parse({
+        kind: "file.result",
+        uploadId: "up-1",
+        ok: true,
+        attachmentId: "att-1",
+      }).kind,
+    ).toBe("file.result");
+    const refused = workItemSchema.parse({
+      kind: "file.result",
+      uploadId: "up-1",
+      ok: false,
+      retryable: true,
+      error: "Too many uploads in flight — retry shortly.",
+    });
+    expect(refused.kind === "file.result" && refused.retryable).toBe(true);
+  });
+});
+
+/**
+ * The connections list rides the home-sync FINAL part beside the brief and
+ * the prune manifest. Its catalog fields (apiHosts, endpoints, docsUrl,
+ * specUrl) are capped so the WORST case at MAX_AGENT_CONNECTIONS still fits
+ * the frame: raising a cap without re-checking the budget fails here, not as
+ * a silently dropped frame in production.
+ */
+describe("the connections list on the sync frame", () => {
+  // Hosts must be bare hostnames (main hardened `host`; `apiHosts` follows),
+  // so the worst case is the longest VALID hostname, not 253 bare letters.
+  const longHost = (chars: number): string => {
+    const labels: string[] = [];
+    let left = chars;
+    while (left > 0) {
+      const take = Math.min(63, left - (labels.length ? 1 : 0));
+      labels.push("h".repeat(Math.max(1, take)));
+      left -= take + (labels.length > 1 ? 1 : 0);
+    }
+    return labels.join(".");
+  };
+  const worst = {
+    provider: "p".repeat(64),
+    name: "n".repeat(MAX_AGENT_CONNECTION_NAME_CHARS),
+    label: "l".repeat(MAX_AGENT_CONNECTION_LABEL_CHARS),
+    host: longHost(MAX_HOSTNAME_CHARS),
+    apiHosts: Array.from({ length: MAX_AGENT_CONNECTION_API_HOSTS }, () =>
+      longHost(MAX_AGENT_CONNECTION_API_HOST_CHARS),
+    ),
+    endpoints: Array.from({ length: MAX_AGENT_CONNECTION_ENDPOINTS }, () =>
+      "e".repeat(MAX_AGENT_CONNECTION_ENDPOINT_CHARS),
+    ),
+    docsUrl: `https://${"d".repeat(MAX_AGENT_CONNECTION_DOCS_URL_CHARS - "https://".length)}`,
+    specUrl: `https://${"s".repeat(MAX_AGENT_CONNECTION_DOCS_URL_CHARS - "https://".length)}`,
+  };
+
+  it("the worst-case entry is valid, and one field past a cap is not", () => {
+    expect(agentConnectionSchema.safeParse(worst).success).toBe(true);
+    expect(
+      agentConnectionSchema.safeParse({
+        ...worst,
+        apiHosts: [...worst.apiHosts, "x"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("the full worst-case list fits the part budget beside a maximal brief", () => {
+    const bytes = syncFrameByteLength({
+      kind: "skills.changed",
+      generation: Number.MAX_SAFE_INTEGER,
+      part: MAX_SYNC_PARTS,
+      of: MAX_SYNC_PARTS,
+      files: [],
+      instructions: "i".repeat(20_000),
+      agentName: "x".repeat(255),
+      connections: Array(MAX_AGENT_CONNECTIONS).fill(worst),
+    });
+    expect(bytes).toBeLessThan(MAX_SYNC_PART_BYTES * 0.8);
+  });
+
+  it("an older frame without the catalog fields still parses", () => {
+    const legacy = {
+      provider: worst.provider,
+      name: worst.name,
+      label: worst.label,
+      host: worst.host,
+    };
+    expect(agentConnectionSchema.safeParse(legacy).success).toBe(true);
+  });
+});
+
+/**
+ * The resumable channel (runner restart survival). Three wire additions, each
+ * shaped so a STALE peer degrades to today's behaviour: an old supervisor
+ * never receives `session` (it drops the unknown kind), an old runner never
+ * receives an envelope (a supervisor only wraps frames once it HOLDS a
+ * session, which only a new runner hands out).
+ */
+describe("resumable channel wire", () => {
+  it("round-trips the session hand-off and the standalone ack", () => {
+    const session = workItemSchema.parse({
+      kind: "session",
+      credential: "v1.k1.deadbeef",
+      ack: 0,
+    });
+    expect(session).toEqual({
+      kind: "session",
+      credential: "v1.k1.deadbeef",
+      ack: 0,
+    });
+    expect(workItemSchema.parse({ kind: "ack", seq: 42 })).toEqual({
+      kind: "ack",
+      seq: 42,
+    });
+  });
+
+  it("refuses an empty credential and a negative or fractional ack", () => {
+    expect(
+      workItemSchema.safeParse({ kind: "session", credential: "", ack: 0 })
+        .success,
+    ).toBe(false);
+    expect(
+      workItemSchema.safeParse({ kind: "session", credential: "x", ack: -1 })
+        .success,
+    ).toBe(false);
+    expect(workItemSchema.safeParse({ kind: "ack", seq: 1.5 }).success).toBe(
+      false,
+    );
+  });
+
+  it("wraps a supervisor message in a sequenced envelope, and unwraps it", () => {
+    const inner = { kind: "ready", harness: "claude" } as const;
+    const envelope = sequencedFrameSchema.parse({ seq: 7, message: inner });
+    expect(envelope).toEqual({ seq: 7, message: inner });
+  });
+
+  it("an envelope is NOT a supervisor message: an old runner drops it whole rather than half-reading it", () => {
+    expect(
+      supervisorMessageSchema.safeParse({
+        seq: 7,
+        message: { kind: "ready", harness: "claude" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("refuses an envelope whose seq is not a positive integer or whose message is not a frame", () => {
+    expect(
+      sequencedFrameSchema.safeParse({
+        seq: 0,
+        message: { kind: "ready", harness: "x" },
+      }).success,
+    ).toBe(false);
+    expect(
+      sequencedFrameSchema.safeParse({ seq: 1, message: { kind: "nope" } })
+        .success,
+    ).toBe(false);
+  });
+
+  it("derives the reconcile grace from the supervisor's own retry budget, so the two ends cannot drift", () => {
+    // 60 attempts, backoff doubling from 500 ms and capped at 15 s: the
+    // budget is dominated by the cap, so it is ~60 × 15 s. The grace must
+    // cover the WHOLE budget (a reconnect still inside it is not a death) and
+    // no more than one extra minute (past it, the supervisor has given up and
+    // the sandbox really is channelless).
+    const budgetMs =
+      SESSION_RESUME_BUDGET.maxAttempts * SESSION_RESUME_BUDGET.maxBackoffMs;
+    expect(SESSION_RESUME_GRACE_MS).toBeGreaterThanOrEqual(budgetMs);
+    expect(SESSION_RESUME_GRACE_MS).toBeLessThanOrEqual(budgetMs + 60_000);
   });
 });

@@ -13,7 +13,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::fmt;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::connect::PolicyEngineExt as _;
 use crate::connect::{self, AppConnectionResult, ConnectionChoice, PolicyEngine};
@@ -95,6 +95,13 @@ pub async fn mitm(
                     let is_ws = super::websocket::is_websocket_upgrade(&req);
                     let connection_id = connect::extract_connection_id(req.headers());
                     let request_path = req.uri().path_and_query().map(|pq| pq.to_string());
+                    // Kept for a transport failure, which answers after `req`
+                    // has been consumed by the forward.
+                    let failed = FailedRequest {
+                        method: req.method().clone(),
+                        path: request_path.clone().unwrap_or_else(|| "/".to_string()),
+                        start: std::time::Instant::now(),
+                    };
 
                     // Re-resolve rules from cache on each request so that
                     // secret/rule changes take effect without a reconnect.
@@ -113,6 +120,7 @@ pub async fn mitm(
                         Ok(ResolveResult::Resolved {
                             rules,
                             app_connections,
+                            secret_choices,
                         }) => {
                             let effective_host = rules.rewrite_host.as_deref().unwrap_or(&host);
                             if is_ws {
@@ -132,12 +140,13 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
                                     Err(e) => {
                                         warn!(host = %host, error = ?e, "WebSocket handler failed");
-                                        Ok(response::resolution_failed())
+                                        Ok(transport_failure_response(&rules, &ctx, hostname, &failed, &e))
                                     }
                                 }
                             } else {
@@ -159,12 +168,13 @@ pub async fn mitm(
                                         connect::inject_connections_header(
                                             &mut resp,
                                             &app_connections,
+                                            &secret_choices,
                                         );
                                         Ok(resp)
                                     }
                                     Err(e) => {
                                         warn!(host = %host, error = ?e, "request forwarding failed");
-                                        Ok::<_, anyhow::Error>(response::resolution_failed())
+                                        Ok::<_, anyhow::Error>(transport_failure_response(&rules, &ctx, hostname, &failed, &e))
                                     }
                                 }
                             }
@@ -179,6 +189,22 @@ pub async fn mitm(
                             connection_id: cid,
                             connections,
                         }) => Ok(response::connection_not_found(&cid, &connections)),
+                        // Answered here, before policy and any approval hold:
+                        // approving the request could only forward a dead token.
+                        Ok(ResolveResult::NeedsReconnect(connection)) => {
+                            info!(host = %host, connection_id = %connection.id, provider = %connection.provider, "connection needs reconnect; request not forwarded");
+                            super::hooks::record_needs_reconnect(
+                                &ctx,
+                                hostname,
+                                failed.method.as_str(),
+                                &failed.path,
+                                failed.start,
+                            );
+                            Ok(response::connection_needs_reconnect(
+                                &connection,
+                                ctx.workspace_id.as_deref(),
+                            ))
+                        }
                         Err(e) => {
                             warn!(host = %host, error = ?e, "rule resolution failed mid-session");
                             Ok(response::resolution_failed())
@@ -210,6 +236,53 @@ pub struct InterceptToken {
     pub expires_in: i64,
 }
 
+/// What a transport-failure answer needs to know about the request it
+/// answers, captured before the forward consumes it.
+struct FailedRequest {
+    method: hyper::Method,
+    path: String,
+    start: std::time::Instant,
+}
+
+/// The response for a request that could not be delivered upstream at all
+/// (DNS, connect, TLS, or an in-flight transport error).
+///
+/// When the request went to a host none of the agent's granted host-gated
+/// connections is bound to, THAT is the explanation the agent needs — the
+/// #1137 shape is a placeholder hostname that does not resolve — so answer
+/// with the bound host(s), and record it in the activity feed like every
+/// other guidance answer. Otherwise, a failure to reach the upstream says so
+/// (`upstream_unreachable`); anything else keeps the generic 502.
+fn transport_failure_response<S>(
+    rules: &ResolvedRules,
+    proxy_ctx: &ProxyContext,
+    hostname: &str,
+    request: &FailedRequest,
+    error: &anyhow::Error,
+) -> hyper::Response<response::ForwardBody<S>> {
+    match rules.host_mismatch.as_deref() {
+        Some(connections) => {
+            super::hooks::record_host_mismatch_failure(
+                proxy_ctx,
+                hostname,
+                request.method.as_str(),
+                &request.path,
+                request.start,
+            );
+            response::connection_host_mismatch(hostname, &request.path, connections)
+        }
+        None if is_upstream_send_failure(error) => response::upstream_unreachable(hostname),
+        None => response::resolution_failed(),
+    }
+}
+
+/// Whether `error` is the upstream client failing to deliver the request
+/// (the `reqwest` send), as opposed to a local failure before it (buffering
+/// the request body, preparing a condition match).
+fn is_upstream_send_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.is::<reqwest::Error>())
+}
+
 /// Per-request resolved rules, bundled for passing to `forward_request`.
 #[derive(Debug)]
 pub struct ResolvedRules {
@@ -219,7 +292,12 @@ pub struct ResolvedRules {
     /// `injection_rules`, so use [`Self::injects`] — never
     /// `injection_rules.is_empty()` — to ask whether a credential is in play.
     pub pending_injections: Vec<crate::connect::PendingInjection>,
-    pub access_restricted: bool,
+    /// The kind of credential the workspace holds for this host but this agent
+    /// was not granted (`ConnectResponse::access_restricted`).
+    pub access_restricted: Option<crate::connect::RestrictedCredential>,
+    /// A granted secret for this host could not be read
+    /// (`ConnectResponse::credential_unavailable`).
+    pub credential_unavailable: Option<crate::connect::SecretKind>,
     /// Ready-to-use interception data when the resolved connection has a
     /// cached token that should be served instead of forwarding.
     pub intercept_token: Option<InterceptToken>,
@@ -244,6 +322,16 @@ pub struct ResolvedRules {
     /// non-serving wipe, or a swallowed escalation). Same attribution law as
     /// `session_policy`. `Target::Connection` policy decisions bind to it.
     pub winning_connection_id: Option<String>,
+    /// Provider of that winning connection (`github-app`, not the `github`
+    /// its shared host resolves to). Request logs are labelled with it, so
+    /// two apps on one host stay distinguishable in the activity feed. Same
+    /// attribution law as `winning_connection_id`.
+    pub winning_provider: Option<String>,
+    /// The `githubOrgAccess` record of the winning connection (as of the
+    /// connect cache), set only when it is the GitHub OAuth connection (see
+    /// `github_org_access::record_for`). Advisory: it lets the hot path skip a
+    /// write the database would also have skipped.
+    pub github_org_access: Option<serde_json::Value>,
     /// Cloud-only: spend budgets governing the effective credential for this host
     /// (0/1 in practice).
     pub budget_bindings: Vec<ee::budget::BudgetBinding>,
@@ -255,6 +343,14 @@ pub struct ResolvedRules {
     /// the per-request availability pre-check. Unrestricted (all available) in
     /// OSS, when the org is "open", or when enforcement is off.
     pub available_apps: db::AvailableApps,
+    /// Granted host-gated connections that refused THIS request because it
+    /// went to a host other than their bound one (`AppConnectionResult::
+    /// HostMismatch`), each annotated with that host. Set only when nothing
+    /// else injected. Informational: the request still forwards; when it then
+    /// fails in a way the mismatch explains (transport failure, an auth-class
+    /// upstream response), the failure is answered with these choices instead
+    /// of a misleading generic error (#1137).
+    pub host_mismatch: Option<Vec<crate::connect::ConnectionChoice>>,
 }
 
 impl ResolvedRules {
@@ -281,6 +377,9 @@ enum ResolveResult {
         /// transparent at the use sites.
         rules: Box<ResolvedRules>,
         app_connections: Vec<db::AppConnectionRow>,
+        /// Custom secrets colliding on a slot on this host, advertised in
+        /// `x-onecli-connections` next to the app connections.
+        secret_choices: Vec<ConnectionChoice>,
     },
     /// Multiple connections exist and no header was provided.
     Ambiguous(Vec<ConnectionChoice>),
@@ -291,6 +390,8 @@ enum ResolveResult {
         connection_id: String,
         connections: Vec<ConnectionChoice>,
     },
+    /// The connection serving this request must be reconnected by the user.
+    NeedsReconnect(ConnectionChoice),
 }
 
 /// Resolve injection + policy rules from cache, with per-request app connection
@@ -322,7 +423,32 @@ async fn resolve_rules(
     )
     .await?;
 
-    let secret_rules = resp.injection_rules; // from secrets (path-scoped)
+    // Custom secrets that fill the same slot are disambiguated first, so a
+    // pin naming one never reaches the app resolver as an unknown id, and
+    // `secrets_serve` below reflects only the secret that will inject.
+    let (secret_rules, app_pin, secret_choices) = match connect::select_secret_rules(
+        resp.injection_rules,
+        &resp.app_connections,
+        hostname,
+        request_path,
+        connection_id,
+    ) {
+        connect::SecretSelection::Rules {
+            rules,
+            app_pin,
+            advertised,
+        } => (rules, app_pin, advertised),
+        connect::SecretSelection::Ambiguous(connections) => {
+            return Ok(ResolveResult::Ambiguous(connections));
+        }
+        connect::SecretSelection::NotFound(connections) => {
+            return Ok(ResolveResult::NotFound {
+                connection_id: connection_id.unwrap_or("").to_string(),
+                connections,
+            });
+        }
+    };
+    let connection_id = app_pin.as_deref();
     let mut app_rules: Vec<InjectionRule> = Vec::new();
     let mut pending_injections: Vec<crate::connect::PendingInjection> = Vec::new();
     let mut token_expires_at: Option<i64> = None;
@@ -335,6 +461,8 @@ async fn resolve_rules(
     // Id of the connection that wins injection (if any) — rides with
     // `session_policy` under the same attribution law.
     let mut winning_connection_id: Option<String> = None;
+    let mut winning_provider: Option<String> = None;
+    let mut host_mismatch: Option<Vec<crate::connect::ConnectionChoice>> = None;
 
     // Resolve app connections whenever any exist and MERGE their rules with
     // the secret rules. A shared host (e.g. www.googleapis.com) can carry
@@ -360,7 +488,7 @@ async fn resolve_rules(
         {
             Ok(AppConnectionResult::Rules {
                 rules,
-                provider: _,
+                provider,
                 token_expires_at: exp,
                 rewrite_host: rh,
                 connection_label: cl,
@@ -378,6 +506,7 @@ async fn resolve_rules(
                 finalizer = f;
                 body_transform = bt;
                 session_policy = sp;
+                winning_provider = cid.is_some().then_some(provider);
                 winning_connection_id = cid;
             }
             Ok(AppConnectionResult::Ambiguous { connections }) => {
@@ -401,7 +530,18 @@ async fn resolve_rules(
                 }
                 debug!(host = %hostname, "requested connection not found; secret rules serve this path");
             }
+            Ok(AppConnectionResult::NeedsReconnect { connection }) => {
+                if !secrets_serve {
+                    return Ok(ResolveResult::NeedsReconnect(connection));
+                }
+                debug!(host = %hostname, "connection needs reconnect; secret rules serve this path");
+            }
             Ok(AppConnectionResult::NoConnections) => {}
+            // Nothing injects, exactly as `NoConnections`; the choices ride
+            // along so a downstream failure can be explained (#1137).
+            Ok(AppConnectionResult::HostMismatch { connections }) => {
+                host_mismatch = Some(connections);
+            }
             Err(e) => {
                 if !secrets_serve {
                     return Err(e);
@@ -448,6 +588,12 @@ async fn resolve_rules(
 
     let mut injection_rules = inject::merge_injection_rules(app_rules, secret_rules);
 
+    // A non-injecting alias host (login.salesforce.com): nothing can inject,
+    // but the agent's connection of the owning provider tells it where it
+    // SHOULD have gone.
+    let host_mismatch =
+        host_mismatch.or_else(|| connect::alias_host_choices(&resp.alias_connections));
+
     // Vault fallback — only when neither secrets nor apps yielded any rules. A
     // connection awaiting its credential counts as "apps yielded rules": it
     // will inject once allowed, and adopting a vault credential alongside it
@@ -463,6 +609,7 @@ async fn resolve_rules(
             policy_rules_v2: resp.policy_rules_v2,
             available_apps: resp.available_apps,
             access_restricted: resp.access_restricted,
+            credential_unavailable: resp.credential_unavailable,
             intercept_token,
             plan: resp.plan,
             rewrite_host,
@@ -470,10 +617,17 @@ async fn resolve_rules(
             finalizer,
             body_transform,
             session_policy,
+            github_org_access: crate::github_org_access::record_for(
+                &resp.app_connections,
+                winning_connection_id.as_deref(),
+            ),
             winning_connection_id,
+            winning_provider,
             budget_bindings: resp.budget_bindings,
+            host_mismatch,
         }),
         app_connections: resp.app_connections,
+        secret_choices,
     })
 }
 
@@ -516,6 +670,7 @@ mod tests {
                 name: "authorization".to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -526,6 +681,7 @@ mod tests {
                 name: name.to_string(),
                 value: value.to_string(),
             }],
+            secret: None,
         }
     }
 
@@ -578,6 +734,147 @@ mod tests {
         (auth, request_path)
     }
 
+    fn custom_rule(id: &str, scope: &str, value: &str) -> InjectionRule {
+        InjectionRule {
+            secret: Some(inject::secret_choice::SecretRef {
+                id: id.to_string(),
+                name: format!("Key {id}"),
+                scope: scope.to_string(),
+            }),
+            ..header_rule("*", value)
+        }
+    }
+
+    async fn resolve(store: &Arc<dyn CacheStore>, pin: Option<&str>, path: &str) -> ResolveResult {
+        let engine = PolicyEngine::test_stub();
+        resolve_rules(&ctx(), HOST, &engine, &**store, &[], pin, Some(path))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn colliding_custom_secrets_escalate_then_pin_selects() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("s1", "workspace", "one"),
+                custom_rule("s2", "workspace", "two"),
+            ],
+            vec![],
+        )
+        .await;
+
+        let ResolveResult::Ambiguous(choices) = resolve(&store, None, "/x").await else {
+            panic!("expected Ambiguous");
+        };
+        let ids: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+        assert_eq!(choices[0].provider, "custom");
+        assert_eq!(choices[0].label.as_deref(), Some("Key s1"));
+        assert_eq!(choices[0].host.as_deref(), Some(HOST));
+
+        let ResolveResult::Resolved {
+            rules,
+            secret_choices,
+            ..
+        } = resolve(&store, Some("s1"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        let (auth, _) = applied_auth("/x", &rules.injection_rules);
+        assert_eq!(auth.as_deref(), Some("one"));
+        assert_eq!(secret_choices.len(), 2, "both advertised");
+
+        let ResolveResult::NotFound { connection_id, .. } =
+            resolve(&store, Some("foreign"), "/x").await
+        else {
+            panic!("expected NotFound");
+        };
+        assert_eq!(connection_id, "foreign");
+    }
+
+    #[tokio::test]
+    async fn workspace_custom_secret_shadows_org_without_pin() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![
+                custom_rule("org", "organization", "org"),
+                custom_rule("ws", "workspace", "ws"),
+            ],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/x", &rules.injection_rules).0.as_deref(),
+            Some("ws")
+        );
+        // A foreign pin on a non-colliding request is ignored, as before.
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, Some("nope"), "/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn secret_pin_does_not_break_app_resolution() {
+        // A pin naming a custom secret is not handed to the app resolver, so
+        // it never becomes an unknown-connection 404 on the app side.
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![InjectionRule {
+                path_pattern: "/youtube/*".into(),
+                ..custom_rule("s1", "workspace", "yt")
+            }],
+            vec![app_conn("c1", "google-calendar")],
+        )
+        .await;
+        seed_app_injection(
+            &store,
+            "c1",
+            "google-calendar",
+            HOST,
+            vec![header_rule("/calendar/*", "Bearer cal")],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } =
+            resolve(&store, Some("s1"), "/calendar/v3/x").await
+        else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(
+            applied_auth("/calendar/v3/x", &rules.injection_rules)
+                .0
+                .as_deref(),
+            Some("Bearer cal")
+        );
+    }
+
+    #[tokio::test]
+    async fn untagged_llm_rules_are_untouched() {
+        let store = cache::in_memory();
+        seed_connect(
+            &store,
+            HOST,
+            vec![header_rule("*", "a"), header_rule("*", "b")],
+            vec![],
+        )
+        .await;
+        let ResolveResult::Resolved { rules, .. } = resolve(&store, None, "/x").await else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(rules.injection_rules.len(), 2);
+    }
+
     #[tokio::test]
     async fn coexisting_secret_and_app_rules_merge() {
         let engine = PolicyEngine::test_stub();
@@ -617,10 +914,14 @@ mod tests {
             applied_auth("/calendar/v3/users/me/calendarList", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("Bearer cal"));
         assert!(!path.contains("key=yt-key"));
-        // …and the serving connection's label is attributed.
+        // …and the serving connection's label and provider are attributed:
+        // its request-log rows name `google-calendar`, not the host.
         assert_eq!(rules.connection_label.as_deref(), Some("Conn"));
+        assert_eq!(rules.winning_connection_id.as_deref(), Some("c1"));
+        assert_eq!(rules.winning_provider.as_deref(), Some("google-calendar"));
 
-        // A youtube request still gets the API key and no app metadata.
+        // A youtube request still gets the API key and no app metadata: the
+        // Calendar connection won nothing, so it labels nothing.
         let res = resolve_rules(
             &ctx(),
             HOST,
@@ -640,6 +941,8 @@ mod tests {
         assert!(path.contains("key=yt-key"));
         assert!(rules.connection_label.is_none());
         assert!(rules.session_policy.is_none());
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]
@@ -838,6 +1141,9 @@ mod tests {
         };
         let (auth, _) = applied_auth("/v1/x", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("catch-all"));
+        // A secret is not an app connection: nothing relabels its rows.
+        assert!(rules.winning_connection_id.is_none());
+        assert!(rules.winning_provider.is_none());
     }
 
     #[tokio::test]
@@ -863,5 +1169,202 @@ mod tests {
         };
         let (auth, _) = applied_auth("/anything", &rules.injection_rules);
         assert_eq!(auth.as_deref(), Some("Basic vault-cred"));
+    }
+
+    // ── host mismatch (#1137) ─────────────────────────────────────────────
+
+    use response::test_support::{body_json, TestBody};
+
+    /// A connection row with real encrypted credentials bound to another host.
+    async fn gated_app_conn(
+        engine: &PolicyEngine,
+        id: &str,
+        provider: &str,
+        creds: serde_json::Value,
+    ) -> db::AppConnectionRow {
+        let mut row = app_conn(id, provider);
+        row.credentials = Some(
+            engine
+                .crypto
+                .encrypt(&creds.to_string())
+                .await
+                .expect("encrypt"),
+        );
+        row
+    }
+
+    /// The mismatch is SOFT at resolution: the request still resolves (no
+    /// injection, exactly as before), and the choices ride on `ResolvedRules`
+    /// for the failure paths to explain what happened.
+    #[tokio::test]
+    async fn host_mismatch_resolves_uncredentialed_and_records_the_choices() {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        let host = "your-domain.my.salesforce.com";
+        let conn = gated_app_conn(
+            &engine,
+            "sf1",
+            "salesforce",
+            serde_json::json!({ "access_token": "t", "instance_host": "acme.my.salesforce.com" }),
+        )
+        .await;
+        seed_connect(&store, host, vec![], vec![conn]).await;
+
+        let res = resolve_rules(
+            &ctx(),
+            host,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/services/data/v60.0/sobjects/Opportunity"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        assert!(!rules.injects(), "a mismatched host must inject nothing");
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "sf1");
+        assert_eq!(choices[0].host.as_deref(), Some("acme.my.salesforce.com"));
+
+        // And the transport-failure answer for these rules is the 421, not
+        // the opaque 502 — the #1137 shape (placeholder host, DNS failure).
+        let resp: hyper::Response<TestBody> = transport_failure_response(
+            &rules,
+            &ctx(),
+            host,
+            &failed_get("/services/data/v60.0/sobjects/Opportunity"),
+            &anyhow::anyhow!("dns error"),
+        );
+        assert_eq!(resp.status(), hyper::StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    fn failed_get(path: &str) -> FailedRequest {
+        FailedRequest {
+            method: hyper::Method::GET,
+            path: path.to_string(),
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// Without a recorded mismatch, a local failure keeps the generic
+    /// `resolution_failed`, and a failed upstream send says the host could
+    /// not be reached — never "failed to resolve rules".
+    #[tokio::test]
+    async fn transport_failure_without_mismatch_names_what_failed() {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        seed_connect(&store, HOST, vec![], vec![]).await;
+        let res = resolve_rules(&ctx(), HOST, &engine, &*store, &[], None, Some("/x"))
+            .await
+            .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        assert!(rules.host_mismatch.is_none());
+
+        let local = anyhow::anyhow!("buffering request body");
+        let resp: hyper::Response<TestBody> =
+            transport_failure_response(&rules, &ctx(), HOST, &failed_get("/x"), &local);
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+        assert_eq!(body_json(resp).await["error"], "resolution_failed");
+
+        // A real reqwest send failure: nothing listens on the discard port.
+        let send_err = reqwest::Client::new()
+            .get("http://127.0.0.1:9/")
+            .send()
+            .await
+            .expect_err("nothing listens on :9");
+        let wrapped = anyhow::Error::new(send_err).context("forwarding to http://127.0.0.1:9/");
+        assert!(is_upstream_send_failure(&wrapped));
+        let resp: hyper::Response<TestBody> =
+            transport_failure_response(&rules, &ctx(), HOST, &failed_get("/x"), &wrapped);
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "upstream_unreachable");
+        assert_eq!(json["host"], HOST);
+    }
+
+    fn alias_conn(id: &str, instance_host: Option<&str>) -> db::AppConnectionRow {
+        db::AppConnectionRow {
+            id: id.to_string(),
+            provider: "salesforce".to_string(),
+            scope: "workspace".to_string(),
+            credentials: None,
+            label: Some("jane@acme.com".to_string()),
+            metadata: instance_host.map(|h| serde_json::json!({ "bound_host": h })),
+            session_policy: None,
+        }
+    }
+
+    async fn resolve_alias(
+        host: &str,
+        alias_connections: Vec<db::AppConnectionRow>,
+    ) -> Box<ResolvedRules> {
+        let engine = PolicyEngine::test_stub();
+        let store = cache::in_memory();
+        let resp = ConnectResponse {
+            workspace_id: Some("p1".to_string()),
+            organization_id: Some("o1".to_string()),
+            alias_connections,
+            ..Default::default()
+        };
+        store
+            .set(&format!("connect:o1:p1:tok:{host}"), &resp, 60)
+            .await;
+        let res = resolve_rules(
+            &ctx(),
+            host,
+            &engine,
+            &*store,
+            &[],
+            None,
+            Some("/services/oauth2/userinfo"),
+        )
+        .await
+        .unwrap();
+        let ResolveResult::Resolved { rules, .. } = res else {
+            panic!("expected Resolved");
+        };
+        rules
+    }
+
+    /// The prod incident: an agent with a connected Salesforce org calls
+    /// `login.salesforce.com`. Nothing may inject there, but the request must
+    /// carry the bound host so the failure is answered with it.
+    #[tokio::test]
+    async fn alias_host_records_the_bound_host_without_injecting() {
+        let rules = resolve_alias(
+            "login.salesforce.com",
+            vec![alias_conn("sf1", Some("acme.my.salesforce.com"))],
+        )
+        .await;
+        assert!(!rules.injects(), "an alias host must never inject");
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices[0].id, "sf1");
+        assert_eq!(choices[0].host.as_deref(), Some("acme.my.salesforce.com"));
+    }
+
+    /// A stored host outside the provider's zone is never vouched for.
+    #[tokio::test]
+    async fn alias_host_never_vouches_for_an_out_of_zone_bound_host() {
+        let rules = resolve_alias(
+            "login.salesforce.com",
+            vec![alias_conn("sf1", Some("evil.test"))],
+        )
+        .await;
+        let choices = rules.host_mismatch.as_deref().expect("mismatch recorded");
+        assert_eq!(choices[0].host, None);
+    }
+
+    /// No connection of the owning provider → no mismatch; the failure path
+    /// falls through to the native connect link.
+    #[tokio::test]
+    async fn alias_host_without_connections_records_nothing() {
+        let rules = resolve_alias("login.salesforce.com", vec![]).await;
+        assert!(rules.host_mismatch.is_none());
     }
 }

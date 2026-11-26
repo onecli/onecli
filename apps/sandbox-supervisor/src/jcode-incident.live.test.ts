@@ -1,9 +1,10 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  HarnessEvent,
   SupervisorMessage,
   SupervisorTransport,
-  WorkItem,
+  SupervisorWorkItem,
 } from "@onecli/agent-protocol";
 
 /**
@@ -29,6 +30,20 @@ const LIVE = Boolean(process.env.JCODE_LIVE_TEST);
 /** Injected into the managed config.toml by the writeManagedFile wrap. */
 let mockProviderToml = "";
 
+/** Every supervisor log line, for the scenarios that assert on what the
+ * adapter reported (the real log still prints). */
+const logged: { message: string; extra?: Record<string, unknown> }[] = [];
+vi.mock("./log", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./log")>();
+  return {
+    ...original,
+    log: (...args: Parameters<typeof original.log>) => {
+      logged.push({ message: args[1], ...(args[2] && { extra: args[2] }) });
+      original.log(...args);
+    },
+  };
+});
+
 // The adapter rewrites config.toml at instance launch — wrap the shared
 // managed write to add the mock provider profile and pin the default model
 // route onto it, exactly as if the image shipped this provider.
@@ -53,6 +68,7 @@ const { createJcodeHarness } = await import("./harness/jcode");
 const { runSupervisor } = await import("./supervisor");
 const { startMockProvider, FINAL_ANSWER_MARKER, LONG_RUN_MARKER } =
   await import("./harness/testing/mock-provider");
+type MockScript = import("./harness/testing/mock-provider").MockScript;
 
 interface Stamped {
   at: number;
@@ -61,11 +77,11 @@ interface Stamped {
 
 const createTransport = () => {
   const sent: Stamped[] = [];
-  const queue: WorkItem[] = [];
+  const queue: SupervisorWorkItem[] = [];
   let notify: (() => void) | undefined;
   return {
     sent,
-    push(item: WorkItem) {
+    push(item: SupervisorWorkItem) {
       queue.push(item);
       notify?.();
       notify = undefined;
@@ -105,7 +121,7 @@ const createTransport = () => {
       throw new Error(`timed out waiting for ${label}`);
     },
     transport: {
-      async *incoming(): AsyncIterable<WorkItem> {
+      async *incoming(): AsyncIterable<SupervisorWorkItem> {
         for (;;) {
           while (queue.length > 0) {
             const item = queue.shift();
@@ -136,9 +152,12 @@ const stubHarvester = {
   stop: () => undefined,
 };
 
-/** A short /tmp home — the daemon binds a unix socket under it, and macOS's
- * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro). */
-const shortHome = () => mkdtempSync("/tmp/ocl-");
+/** A short /tmp home: the daemon binds a unix socket under it, and macOS's
+ * /var/folders tmpdir overflows SUN_LEN (proven in the incident repro).
+ * Resolved to the real path, like the sandbox's real /workspace: macOS's
+ * /tmp is a symlink, and jcode (v1.0+) refuses every bash command when any
+ * component of its home's path is one. */
+const shortHome = () => mkdtempSync(`${realpathSync("/tmp")}/ocl-`);
 
 const supervisorConfig = (homeDir: string) => ({
   homeDir,
@@ -146,22 +165,37 @@ const supervisorConfig = (homeDir: string) => ({
   effort: "low" as const,
   instructions: "incident regression agent",
   agentName: "Donna",
+  channels: [],
+  peers: [],
+  connections: [],
   harness: "jcode",
   runnerWsUrl: undefined,
   bootstrapToken: undefined,
+  sandboxId: undefined,
+  outboundAttachments: false,
 });
 
 const deliver = (
   turnId: string,
   conversationId: string,
   message: string,
-): WorkItem => ({ kind: "turn.deliver", turnId, conversationId, message });
+): SupervisorWorkItem => ({
+  kind: "turn.deliver",
+  turnId,
+  conversationId,
+  message,
+});
 
 const withMock = async (
   longMs: number,
   body: (mock: Awaited<ReturnType<typeof startMockProvider>>) => Promise<void>,
+  script?: MockScript,
 ) => {
-  const mock = await startMockProvider({ longMs, keepaliveMs: 5_000 });
+  const mock = await startMockProvider({
+    longMs,
+    keepaliveMs: 5_000,
+    ...(script && { script }),
+  });
   mockProviderToml = `
 [providers.mockai]
 type = "openai-compatible"
@@ -353,6 +387,77 @@ describe.skipIf(!LIVE)("the stuck-sandbox incident, fixed (live jcode)", () => {
     });
   }, 240_000);
 
+  it("the platform's context size reaches the real daemon, clamped to the model, on a fresh and a resumed session", async () => {
+    // What only the real daemon can say: that set_context_cap with OUR
+    // session id is answered (the id-less form hangs), which budget it
+    // actually applies (clamped to the model's own window), and that a
+    // session resumed in a fresh container takes a size like a new one.
+    const applied = () =>
+      logged
+        .filter((line) => line.message === "context size applied")
+        .map((line) => ({
+          tokens: line.extra?.tokens,
+          effectiveBudget: line.extra?.effectiveBudget,
+        }));
+    logged.length = 0;
+    await withMock(20_000, async () => {
+      const homeDir = shortHome();
+      const first = createJcodeHarness();
+      let ref: string | null | undefined;
+      try {
+        const session = await first.startSession({
+          homeDir,
+          model: "mock-model",
+        });
+        ref = session.sessionRef;
+        const events = [];
+        for await (const event of session.runTurn({
+          message: "go small",
+          contextTokens: 100_000,
+        })) {
+          events.push(event);
+        }
+        expect(events.at(-1)?.type).toBe("turn.done");
+      } finally {
+        await first.dispose();
+      }
+      // Answered by the real daemon, with the budget it applied.
+      expect(applied()).toEqual([
+        { tokens: 100_000, effectiveBudget: 100_000 },
+      ]);
+
+      // A fresh container resuming the same session takes a NEW size: the
+      // adapter's memory is per process, so a resumed session is always
+      // set again (it costs one daemon round trip, on the first turn).
+      const second = createJcodeHarness();
+      try {
+        const resumed = await second.startSession({
+          homeDir,
+          model: "mock-model",
+          ...(ref && { resumeSessionRef: ref }),
+        });
+        expect(resumed.sessionRef).toBe(ref);
+        const events = [];
+        for await (const event of resumed.runTurn({
+          message: "grow",
+          contextTokens: 1_000_000,
+        })) {
+          events.push(event);
+        }
+        expect(events.at(-1)?.type).toBe("turn.done");
+      } finally {
+        await second.dispose();
+      }
+      // jcode clamps the budget to the model's own window: an unlisted
+      // model (this mock) gets jcode's 200k default window, so asking 1M
+      // yields 200k. That clamp is why the platform needs no model table.
+      expect(applied()).toEqual([
+        { tokens: 100_000, effectiveBudget: 100_000 },
+        { tokens: 1_000_000, effectiveBudget: 200_000 },
+      ]);
+    });
+  }, 240_000);
+
   it("a message steered into the live long turn JOINS it — never purged, never lost", async () => {
     // The mid-turn messages the user sent "while it was working": they ride
     // soft interrupts into the run and must reconcile as joined on the
@@ -398,7 +503,335 @@ describe.skipIf(!LIVE)("the stuck-sandbox incident, fixed (live jcode)", () => {
       }
     });
   }, 240_000);
+
+  it("a brief saved during a turn reaches the resumed model request without interrupting the active turn", async () => {
+    await withMock(2_000, async (mock) => {
+      const t = createTransport();
+      const run = runSupervisor(
+        { ...supervisorConfig(shortHome()), instructions: "BRIEF_BEFORE_SAVE" },
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      try {
+        t.push(deliver("before", "cv", `${LONG_RUN_MARKER} continue`));
+        await t.until(
+          () => mock.requests.length > 0,
+          "the original model request",
+          90_000,
+        );
+        expect(mock.requests[0]!.systemText).toContain("BRIEF_BEFORE_SAVE");
+        expect(t.resultsOf("before")).toHaveLength(0);
+        t.push({
+          kind: "skills.changed",
+          generation: 2,
+          part: 1,
+          of: 1,
+          files: [],
+          prune: [],
+          instructions: "BRIEF_AFTER_SAVE",
+        });
+        await t.until(
+          () => t.sent.some((s) => s.message.kind === "home.synced"),
+          "brief sync",
+          10_000,
+        );
+        await t.until(
+          () => t.resultsOf("before").length > 0,
+          "the uninterrupted turn",
+          30_000,
+        );
+        const before = t.resultsOf("before")[0]!.result;
+        expect(before.status).toBe("done");
+        expect(before.sessionRef).toEqual(expect.any(String));
+        expect(t.textOf("before")).toContain(FINAL_ANSWER_MARKER);
+
+        t.push(deliver("after", "cv", "continue with the current brief"));
+        await t.until(
+          () => t.resultsOf("after").length > 0,
+          "the resumed turn",
+          90_000,
+        );
+        expect(t.resultsOf("after")[0]!.result).toMatchObject({
+          status: "done",
+          sessionRef: before.sessionRef,
+        });
+        const resumed = mock.requests.at(-1)!;
+        expect(resumed.systemText).toContain("BRIEF_AFTER_SAVE");
+        expect(resumed.systemText).not.toContain("BRIEF_BEFORE_SAVE");
+        expect(resumed.lastUser).toContain(
+          "your operator just updated your brief",
+        );
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
+
+  it("a Slack presence attached MID-RUN reaches the live conversation's next turn — the doc AND the tools the model sees (the dev incident, 2026-09-15)", async () => {
+    // Observed live: an agent whose session was already awake had Slack
+    // attached; the home sync re-rendered CLAUDE.md, but jcode captures the
+    // instruction doc and the MCP tool list at session start, so the same
+    // session kept telling a Slack user it had no Slack access. The mock
+    // provider records the system prompt and tool list of EVERY request —
+    // the only ground truth for "what did the model see this turn".
+    await withMock(1_000, async (mock) => {
+      const homeDir = shortHome();
+      const t = createTransport();
+      const run = runSupervisor(
+        supervisorConfig(homeDir),
+        createJcodeHarness(),
+        t.transport,
+        { memoryHarvester: stubHarvester },
+      );
+      const saw = (request: (typeof mock.requests)[number]) => ({
+        whereYouTalk:
+          /## Where you talk/.test(request.systemText) &&
+          request.systemText.includes("Acme"),
+        sendMessage: request.toolNames.some((n) => n.endsWith("send_message")),
+      });
+      try {
+        // Turn 1, no presence: neither the section nor the tool.
+        t.push(deliver("t1", "cv", "hello"));
+        await t.until(() => t.resultsOf("t1").length > 0, "turn 1", 90_000);
+        expect(saw(mock.requests.at(-1)!)).toEqual({
+          whereYouTalk: false,
+          sendMessage: false,
+        });
+
+        // Slack attached while the session is live (the home sync's part).
+        t.push({
+          kind: "skills.changed",
+          generation: 2,
+          part: 1,
+          of: 1,
+          files: [],
+          prune: [],
+          channels: [
+            {
+              provider: "slack",
+              status: "active",
+              handle: "donna",
+              workspaceName: "Acme",
+            },
+          ],
+        });
+        await t.until(
+          () => t.sent.some((s) => s.message.kind === "home.synced"),
+          "home.synced",
+          30_000,
+        );
+
+        // Turn 2 on the SAME conversation: the restarted session's prompt is
+        // built from disk synchronously, so the DOC is fresh on its very
+        // first request. The TOOLS follow the harness's own MCP discovery,
+        // which can lag a fresh session's first request (the selfwake live
+        // pin states the contract as "present by the second turn"); so the
+        // tool assertion is made on the turn after — the same boundary the
+        // rest of the platform's tool pins use.
+        t.push(deliver("t2", "cv", "do you have access to slack?"));
+        await t.until(() => t.resultsOf("t2").length > 0, "turn 2", 90_000);
+        const second = mock.requests.at(-1)!;
+        expect(saw(second).whereYouTalk).toBe(true);
+        // ...on the same session ref: the transcript survived the restart.
+        expect(t.resultsOf("t2")[0]!.result.sessionRef).toBe(
+          t.resultsOf("t1")[0]!.result.sessionRef,
+        );
+        t.push(deliver("t2b", "cv", "and can you send me a message there?"));
+        await t.until(() => t.resultsOf("t2b").length > 0, "turn 2b", 90_000);
+        expect(saw(mock.requests.at(-1)!)).toEqual({
+          whereYouTalk: true,
+          sendMessage: true,
+        });
+        expect(t.resultsOf("t2b")[0]!.result.sessionRef).toBe(
+          t.resultsOf("t1")[0]!.result.sessionRef,
+        );
+
+        // The reverse move: the app is removed while the session is live.
+        // Turn 3 must see the removed copy and LOSE send_message — an agent
+        // whose app is gone must not keep a tool that would fail.
+        t.push({
+          kind: "skills.changed",
+          generation: 3,
+          part: 1,
+          of: 1,
+          files: [],
+          prune: [],
+          channels: [
+            {
+              provider: "slack",
+              status: "disabled",
+              handle: "donna",
+              workspaceName: "Acme",
+            },
+          ],
+        });
+        await t.until(
+          () =>
+            t.sent.filter((s) => s.message.kind === "home.synced").length >= 2,
+          "second home.synced",
+          30_000,
+        );
+        t.push(deliver("t3", "cv", "can you message me on slack?"));
+        await t.until(() => t.resultsOf("t3").length > 0, "turn 3", 90_000);
+        const third = mock.requests.at(-1)!;
+        expect(third.systemText).toContain("was removed from the workspace");
+        expect(t.resultsOf("t3")[0]!.result.sessionRef).toBe(
+          t.resultsOf("t1")[0]!.result.sessionRef,
+        );
+        t.push(deliver("t3b", "cv", "are you sure?"));
+        await t.until(() => t.resultsOf("t3b").length > 0, "turn 3b", 90_000);
+        const settled = mock.requests.at(-1)!;
+        expect(settled.systemText).toContain("was removed from the workspace");
+        // What jcode does on a resumed session after a presence is withdrawn.
+        // Through v0.81.1 (observed live, 2026-09-15) its tool registry was a
+        // UNION across attaches: withdrawn messaging tools stayed LISTED to
+        // the model. From v0.90.0 (re-run live 2026-10-01 at the pin bump)
+        // the withdrawn tools are DROPPED from the request, so the model no
+        // longer sees a tool it cannot use. The doc (asserted above) and the
+        // platform-tools socket's explanatory refusal (pinned in
+        // platform-tools.test.ts) remain as defence in depth. The tools that
+        // were never withdrawn must still be present.
+        expect(settled.toolNames.some((n) => n.endsWith("send_message"))).toBe(
+          false,
+        );
+        expect(settled.toolNames.some((n) => n.endsWith("memory_save"))).toBe(
+          true,
+        );
+      } finally {
+        t.push({ kind: "shutdown" });
+        await run;
+      }
+    });
+  }, 240_000);
 });
+
+describe.skipIf(!LIVE)(
+  "issue #1124 — the frame fence vs the daemon's get_history race (live jcode)",
+  () => {
+    it("turns whose reply outlasts the request loop: every one completes, none loses its own output", async () => {
+      // THE PROD SIGNATURE, reproduced against the real daemon. Each turn
+      // sends a message and, right behind it, a get_history (the reconcile
+      // baseline). Inside the daemon the get_history handler probes the
+      // agent mutex with try_lock and then takes it for real; when the probe
+      // wins the race against the turn task by microseconds, the history
+      // reply blocks for the WHOLE TURN and lands after the turn's `done`
+      // (jcode#1284). Measured live: 3 of 18 turns in prod; here, with a
+      // 20-turn loop, the daemon log shows the locked path taken on most.
+      //
+      // The reply must outlast the daemon's request-loop latency for the
+      // race to matter (a 4 ms turn's history lands before the adapter has
+      // even read the terminal), so each reply is streamed over ~1.2 s — the
+      // prod turns took 8 to 15 s. Pre-fix the adapter used the history
+      // reply as its frame fence, quarantined its own entire turn including
+      // the terminal, minted the "background run overlapped" notice for its
+      // own answer, and hung until the control plane's sweep. The fixed
+      // fence is `message_accepted`: 20/20 complete, 0 notices.
+      const TURNS = 20;
+      const script: MockScript = ({ lastUser }) =>
+        lastUser.includes("slow-reply")
+          ? {
+              kind: "text",
+              tag: "slow",
+              text: " Quick answer",
+              slow: { chunks: ["Thinking", ".", ".", "."], intervalMs: 300 },
+            }
+          : undefined;
+      await withMock(
+        20_000,
+        async (mock) => {
+          const harness = createJcodeHarness();
+          let failure: string | undefined;
+          harness.onFailure((reason) => {
+            failure = reason;
+          });
+          const homeDir = shortHome();
+          try {
+            const session = await harness.startSession({
+              homeDir,
+              model: "mock-model",
+            });
+            const durations: number[] = [];
+            let notices = 0;
+            for (let i = 0; i < TURNS; i += 1) {
+              const started = Date.now();
+              const events: HarnessEvent[] = [];
+              for await (const event of session.runTurn({
+                message: `slow-reply status please #${i}`,
+              })) {
+                events.push(event);
+              }
+              durations.push(Date.now() - started);
+              const terminal = events.at(-1);
+              expect(terminal?.type, `turn #${i} terminal`).toBe("turn.done");
+              const text = events
+                .filter((e) => e.type === "text.delta")
+                .map((e) => (e as { text: string }).text)
+                .join("");
+              expect(text, `turn #${i} text`).toContain("Quick answer");
+              notices += events.filter((e) => e.type === "notice").length;
+            }
+            // Each turn is ~1.5 s of streaming; one that took much longer was
+            // waiting on a lost terminal (the pre-fix shape, bounded only by
+            // the ceiling).
+            expect(Math.max(...durations)).toBeLessThan(10_000);
+            // Not one turn mistook its own answer for a background run's.
+            expect(notices).toBe(0);
+            expect(
+              mock.requests.filter(
+                (r) => r.kind === "scripted" && r.tag === "slow",
+              ),
+            ).toHaveLength(TURNS);
+            expect(failure).toBeUndefined();
+          } finally {
+            await harness.dispose();
+          }
+        },
+        script,
+      );
+    }, 300_000);
+
+    it("Stop on a session whose daemon has nothing to cancel ends within the abort grace", async () => {
+      // The user's three Stops in #1124 all reached the daemon and were
+      // answered NO_LOCAL_TASK / IDLE_NOOP: nothing was running. Reproduced:
+      // a turn whose model reply is held open, then a cancel that the daemon
+      // honours normally — and, separately, the adapter's own grace when the
+      // daemon's terminal never comes (unit-pinned; here the live half).
+      await withMock(60_000, async (mock) => {
+        const harness = createJcodeHarness();
+        const homeDir = shortHome();
+        try {
+          const session = await harness.startSession({
+            homeDir,
+            model: "mock-model",
+          });
+          const iterator = session
+            .runTurn({ message: `${LONG_RUN_MARKER} hold the line` })
+            [Symbol.asyncIterator]();
+          const events: HarnessEvent[] = [];
+          // Read until the run is live at the mock, on a side task.
+          const drained = (async () => {
+            let next = await iterator.next();
+            while (!next.done) {
+              events.push(next.value);
+              next = await iterator.next();
+            }
+          })();
+          await t0Streaming(mock);
+          const abortedAt = Date.now();
+          await session.abort();
+          await drained;
+          expect(events.at(-1)?.type).toBe("turn.done");
+          // The daemon's cooperative cancel: well inside the grace.
+          expect(Date.now() - abortedAt).toBeLessThan(5_000);
+        } finally {
+          await harness.dispose();
+        }
+      });
+    }, 120_000);
+  },
+);
 
 /** Wait until the mock has served the long request (the run is truly live). */
 const t0Streaming = async (
@@ -411,3 +844,160 @@ const t0Streaming = async (
   }
   throw new Error("the long run never reached the mock provider");
 };
+
+describe.skipIf(!LIVE)(
+  "a turn the model leaves unanswered is never a silent success (live jcode)",
+  () => {
+    it.each([
+      ["content_filter", "model_refused"],
+      ["stop", "model_empty_response"],
+    ])(
+      "a reply that finishes %j with nothing in it closes failed as %s; the next turn answers normally",
+      async (finishReason, code) => {
+        // The production shape: the provider answers 200 with no content and
+        // a stop reason, the runtime ends the turn cleanly, and before this
+        // fix the turn closed `done` with no answer at all. Driven through
+        // the real runtime binary, so the frame the adapter reads is the one
+        // the runtime actually sends, not a hand-written copy of it.
+        //
+        // Silent for EVERY request until the follow-up question, not only the
+        // first: an empty non-safety stop is retried by the runtime itself
+        // with a continuation prompt (its own recovery, seen live), and only
+        // a model that stays empty through those retries reaches the signal.
+        // A model that answers on a retry is a normal `done`, as it should be.
+        const script: MockScript = ({ lastUser }) =>
+          lastUser.includes("normal question")
+            ? undefined
+            : { kind: "silent", finishReason, tag: "silent" };
+        await withMock(
+          20_000,
+          async (mock) => {
+            const t = createTransport();
+            const run = runSupervisor(
+              supervisorConfig(shortHome()),
+              createJcodeHarness(),
+              t.transport,
+              { memoryHarvester: stubHarvester },
+            );
+            try {
+              t.push(deliver("t-1", "cv-a", "say-nothing please"));
+              await t.until(
+                () => t.resultsOf("t-1").length > 0,
+                "the unanswered turn's result",
+                60_000,
+              );
+              const [first] = t.resultsOf("t-1");
+              expect(first!.result.status).toBe("failed");
+              expect(first!.result.errorCode).toBe(code);
+              expect(first!.result.error).toContain(finishReason);
+              expect(
+                mock.requests.some(
+                  (r) => r.kind === "scripted" && r.tag === "silent",
+                ),
+              ).toBe(true);
+
+              // The session is healthy: the next message gets a real answer.
+              t.push(deliver("t-2", "cv-a", "and now a normal question"));
+              await t.until(
+                () => t.resultsOf("t-2").length > 0,
+                "the follow-up turn's result",
+                60_000,
+              );
+              const [second] = t.resultsOf("t-2");
+              expect(second!.result.status).toBe("done");
+              expect(second!.result.errorCode).toBeUndefined();
+              expect(t.textOf("t-2")).toContain("Quick answer");
+            } finally {
+              t.push({ kind: "shutdown" });
+              await run;
+            }
+          },
+          script,
+        );
+      },
+      180_000,
+    );
+
+    it("a reply cut short by a safety stop AFTER real words keeps them: an answer, not a failure", async () => {
+      // The runtime raises the same signal for a safety stop that follows
+      // visible text (its notice fires on the stop reason alone). The person
+      // got words; failing the turn would replace them with a refusal notice
+      // and count a strike against a schedule that did answer.
+      const script: MockScript = () => ({
+        kind: "text",
+        text: "Here is the part I can help with.",
+        finishReason: "content_filter",
+        tag: "partial",
+      });
+      await withMock(
+        20_000,
+        async () => {
+          const t = createTransport();
+          const run = runSupervisor(
+            supervisorConfig(shortHome()),
+            createJcodeHarness(),
+            t.transport,
+            { memoryHarvester: stubHarvester },
+          );
+          try {
+            t.push(deliver("t-1", "cv-a", "a question"));
+            await t.until(
+              () => t.resultsOf("t-1").length > 0,
+              "the turn's result",
+              60_000,
+            );
+            const [result] = t.resultsOf("t-1");
+            expect(t.textOf("t-1")).toContain("the part I can help with");
+            expect(result!.result.status).toBe("done");
+            expect(result!.result.errorCode).toBeUndefined();
+          } finally {
+            t.push({ kind: "shutdown" });
+            await run;
+          }
+        },
+        script,
+      );
+    }, 180_000);
+
+    it("an empty reply the model recovers from on the runtime's own retry stays an ordinary answer", async () => {
+      // The other side of the line: the runtime retries an empty answer
+      // itself, and a model that answers on that retry produced a real reply.
+      // Reporting it as a failure would cry wolf on every transient blip.
+      let silentServed = 0;
+      const script: MockScript = () => {
+        if (silentServed > 0) return undefined; // the retry: a real answer
+        silentServed += 1;
+        return { kind: "silent", finishReason: "stop", tag: "silent" };
+      };
+      await withMock(
+        20_000,
+        async () => {
+          const t = createTransport();
+          const run = runSupervisor(
+            supervisorConfig(shortHome()),
+            createJcodeHarness(),
+            t.transport,
+            { memoryHarvester: stubHarvester },
+          );
+          try {
+            t.push(deliver("t-1", "cv-a", "a question"));
+            await t.until(
+              () => t.resultsOf("t-1").length > 0,
+              "the turn's result",
+              60_000,
+            );
+            const [result] = t.resultsOf("t-1");
+            expect(silentServed).toBe(1);
+            expect(result!.result.status).toBe("done");
+            expect(result!.result.errorCode).toBeUndefined();
+            expect(t.textOf("t-1")).toContain("Quick answer");
+          } finally {
+            t.push({ kind: "shutdown" });
+            await run;
+          }
+        },
+        script,
+      );
+    }, 180_000);
+  },
+);

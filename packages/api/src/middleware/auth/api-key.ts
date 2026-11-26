@@ -27,15 +27,25 @@ export type ApiKeyAuthResult =
   | "invalid-key"
   | null;
 
+/**
+ * The `oc_` bearer a request carries, or `null` when it presents none (no
+ * header, another scheme, or a non-OneCLI token). The ONE definition of "is
+ * this an API-key request" — shared by the key authenticator and the
+ * session-only middleware that refuses keys.
+ */
+export const apiKeyBearer = (request: Request): string | null => {
+  const header = request.headers.get("authorization");
+  if (!header) return null;
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+  return token && token.startsWith("oc_") ? token : null;
+};
+
 export const authenticateApiKey = async (
   request: Request,
   requireWorkspace: boolean,
 ): Promise<ApiKeyAuthResult> => {
-  const header = request.headers.get("authorization");
-  if (!header) return null;
-
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
-  if (!token || !token.startsWith("oc_")) return null;
+  const token = apiKeyBearer(request);
+  if (!token) return null;
 
   // Org key (oc_org_*)
   if (token.startsWith("oc_org_")) {

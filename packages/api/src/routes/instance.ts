@@ -4,6 +4,7 @@ import { isEntitled } from "../lib/entitlements";
 import { resolveOriginsFromEnv } from "../lib/public-origins";
 import { getRunnerAvailability } from "../services/runner-service";
 import { sshAvailable } from "../services/ssh-service";
+import { previewAvailability } from "../lib/preview-availability";
 import { instanceEgressRoutes } from "./instance-egress";
 
 /**
@@ -33,6 +34,7 @@ export const instanceRoutes = (version?: string) => {
     // addresses the deployment already advertises to every browser (the
     // layout injects two of them into each page), never internal ones.
     const origins = resolveOriginsFromEnv();
+    const previews = previewAvailability();
     return c.json({
       edition: EDITION_INFO.edition,
       entitled: isEntitled(),
@@ -48,11 +50,15 @@ export const instanceRoutes = (version?: string) => {
         gateway: origins.gateway,
         mode: origins.mode,
       },
-      // The SSH front door (sandbox-platform step 5): absent means "not on
+      // The SSH front door: absent means "not on
       // this deployment" — the optional-field contract `runners` set. Only
-      // the public DNS host and port, never CA or session facts. Cloud
-      // advertises :22 (the NLB); self-host an unprivileged high port.
+      // the public DNS host and port, never CA or session facts. Default
+      // :22; self-host an unprivileged high port.
       ...(sshAvailable() ? { ssh: { host: SSH_HOST, port: SSH_PORT } } : {}),
+      // Sandbox previews: present only when the deployment serves them
+      // (a safe PREVIEW_DOMAIN + relay secret). The rail hides the agent's
+      // Ports section off its absence, the ssh contract.
+      ...(previews.enabled ? { previews: { domain: previews.domain } } : {}),
     });
   });
 

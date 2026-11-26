@@ -1,7 +1,12 @@
 import { notFound } from "next/navigation";
 import { getApp } from "@onecli/api/apps/registry";
+import { describeScopes } from "@onecli/api/apps/missing-permissions";
 import { checkAppConfigExists } from "@/lib/actions/app-config";
+import { getReconnectPrefill } from "@/lib/actions/reconnect-prefill";
 import { ConnectFlow } from "../_components/connect-flow";
+import { ConnectLayout } from "../_components/connect-layout";
+import { ConnectUpdated } from "../_components/connect-updated";
+import { LibraryGranted } from "../_components/library-granted";
 
 interface Props {
   params: Promise<{ provider: string }>;
@@ -13,8 +18,16 @@ interface Props {
      * distinct from `connectionId`, which means "re-authenticate". */
     connected?: string;
     agent_name?: string;
+    /** The agent the connect started from (its page, its chat, its connect
+     * link): the API switches the new account on for it. */
+    agent_id?: string;
     workspaceId?: string;
     orgId?: string;
+    /** Space-joined scopes the user didn't grant (the OAuth callback's
+     * success redirect, beside the `connectionId` a retry re-authenticates).
+     * Resolved to the app's own permission names, so only scopes the app
+     * requests and describes are ever shown. */
+    missing?: string;
   }>;
 }
 
@@ -26,12 +39,47 @@ export default async function ConnectPage({ params, searchParams }: Props) {
     connectionId,
     connected,
     agent_name,
+    agent_id,
     workspaceId,
     orgId,
+    missing,
   } = await searchParams;
 
   const app = getApp(provider);
   if (!app) notFound();
+
+  if (status === "updated") {
+    return (
+      <ConnectLayout
+        appName={app.name}
+        appIcon={app.icon}
+        appDarkIcon={app.darkIcon}
+        variant="success"
+      >
+        <ConnectUpdated appName={app.name} />
+      </ConnectLayout>
+    );
+  }
+
+  // "Install GitHub for skills only": nothing was stored here; the popup
+  // hands the signed grant to the Skills page and closes.
+  if (provider === "github-app" && status === "library") {
+    return (
+      <ConnectLayout
+        appName={app.name}
+        appIcon={app.icon}
+        appDarkIcon={app.darkIcon}
+        variant="success"
+      >
+        <LibraryGranted />
+      </ConnectLayout>
+    );
+  }
+
+  const missingScopes = new Set((missing ?? "").split(" "));
+  const missingPermissions = describeScopes(provider, (scope) =>
+    missingScopes.has(scope),
+  );
 
   // Check if platform defaults are available (server-only env var check)
   let hasEnvDefaults = false;
@@ -57,6 +105,12 @@ export default async function ConnectPage({ params, searchParams }: Props) {
       ? apiKeyMethod.fields
       : undefined;
 
+  // Reconnecting a database: start from what was typed last time.
+  const prefill =
+    connectionId && app.database
+      ? await getReconnectPrefill(provider, connectionId, orgId)
+      : null;
+
   return (
     <ConnectFlow
       app={{
@@ -65,7 +119,10 @@ export default async function ConnectPage({ params, searchParams }: Props) {
         icon: app.icon,
         darkIcon: app.darkIcon,
         connectionType: app.connectionMethod.type,
+        database: app.database,
         labelHint: app.labelHint,
+        connectNote: app.connectNote,
+        setupGuideUrl: app.setupGuideUrl,
         fields:
           app.connectionMethod.type === "api_key" ||
           app.connectionMethod.type === "credentials_import"
@@ -76,15 +133,22 @@ export default async function ConnectPage({ params, searchParams }: Props) {
             ? app.connectionMethod.fileImport
             : undefined,
         apiKeyFields,
+        accessLevels:
+          app.connectionMethod.type === "oauth"
+            ? app.connectionMethod.accessLevels
+            : undefined,
       }}
       hasDefaults={hasEnvDefaults || hasAppConfig}
       status={status === "success" || status === "error" ? status : undefined}
       errorMessage={message}
       connectionId={connectionId}
+      prefill={prefill ?? undefined}
       connectedId={connected}
       agentName={agent_name}
+      agentId={agent_id}
       workspaceId={workspaceId}
       orgId={orgId}
+      missingPermissions={missingPermissions}
     />
   );
 }

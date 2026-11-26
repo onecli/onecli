@@ -7,7 +7,10 @@ import {
 
 export const googleForms: AppDefinition = {
   id: "google-forms",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-forms",
   name: "Google Forms",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/forms/api/reference/rest",
   icon: "/icons/google-forms.svg",
   description: "Read, create, and edit forms and responses.",
   connectionMethod: {
@@ -43,5 +46,6 @@ export const googleForms: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

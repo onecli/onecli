@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn app_availability_block_restricted_blocks_ungranted_provider() {
-        let restricted = available(true, &["slack"]);
+        let restricted = available(true, &["datadog"]);
         assert_eq!(
             app_availability_block("gmail.googleapis.com", "/gmail/v1/users/me", &restricted),
             Some("gmail".to_string())
@@ -189,7 +189,7 @@ mod tests {
         // port (`:443`); the registry hosts are port-less, so the block must
         // strip the port first or it would identify NO provider and silently
         // never block. Regression guard for that class of port-handling bugs.
-        let restricted = available(true, &["slack"]);
+        let restricted = available(true, &["datadog"]);
         assert_eq!(
             app_availability_block(
                 "gmail.googleapis.com:443",
@@ -210,7 +210,7 @@ mod tests {
     fn app_availability_block_is_case_insensitive_on_host() {
         // A mixed-case Host must not slip past the gate — it normalizes to lower
         // before matching, else `Gmail.Googleapis.Com` identifies no provider.
-        let restricted = available(true, &["slack"]);
+        let restricted = available(true, &["datadog"]);
         assert_eq!(
             app_availability_block(
                 "Gmail.Googleapis.Com:443",

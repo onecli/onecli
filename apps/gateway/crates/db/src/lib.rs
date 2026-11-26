@@ -34,6 +34,9 @@ pub struct AgentRow {
 #[derive(Debug, FromRow)]
 pub struct SecretRow {
     pub id: String,
+    /// User-chosen label. Shown to the agent (sanitized) when two custom
+    /// secrets collide on one injection slot.
+    pub name: String,
     /// "workspace" | "organization". Read by the budget module (`BudgetSecret`
     /// impl) to identify a budget-eligible credential by its actual scope.
     pub scope: String,
@@ -85,7 +88,28 @@ pub struct VaultConnectionRow {
     pub name: Option<String>,
     pub status: String,
     pub connection_data: Option<serde_json::Value>,
+    /// The row's version: Postgres's `xmin`, the id of the transaction that
+    /// last wrote it. Every UPDATE (and every upsert's conflict branch) stamps
+    /// a new one, so a cached copy of the connection is current exactly when
+    /// its generation still matches the row's. See [`VaultGeneration`].
+    pub generation: VaultGeneration,
 }
+
+/// A vault connection row's version, as read from `xmin`.
+///
+/// Only equality is meaningful (the inner value is public so tests can mint
+/// one, not to be ordered or interpreted — `xid`s wrap). Gateways compare
+/// the generation they loaded a session at against the row's current one to
+/// tell whether the connection was re-paired (or rewritten) since — the signal
+/// that crosses gateway instances, because the row is the one thing they all
+/// share. `xmin` is preserved by VACUUM FREEZE (the frozen flag is a separate
+/// infomask bit), so an untouched row never reads as changed.
+///
+/// Read in SQL as `xmin::text::bigint` (`xid` has no direct integer cast; its
+/// text form is the decimal id) by every vault-connection query below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(transparent)]
+pub struct VaultGeneration(pub i64);
 
 // ── Queries ─────────────────────────────────────────────────────────────
 
@@ -278,7 +302,7 @@ pub async fn find_secrets_by_workspace(
     workspace_id: &str,
 ) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata FROM secrets WHERE workspace_id = $1"#,
     )
     .bind(workspace_id)
     .fetch_all(pool)
@@ -289,7 +313,7 @@ pub async fn find_secrets_by_workspace(
 /// Find all organization-level secrets.
 pub async fn find_secrets_by_org(pool: &PgPool, organization_id: &str) -> Result<Vec<SecretRow>> {
     sqlx::query_as::<_, SecretRow>(
-        r#"SELECT id, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
+        r#"SELECT id, name, scope, type, value_source, encrypted_value, op_ref, host_pattern, path_pattern, injection_config, metadata
            FROM secrets
            WHERE organization_id = $1 AND scope = 'organization'"#,
     )
@@ -497,6 +521,20 @@ pub struct InjectSelection {
     pub secret_scopes: Vec<String>,
 }
 
+impl InjectSelection {
+    /// Whether the agent's allow rules select this connection: by its id
+    /// (`kind=connection`), or as one of ALL its connections of `provider` at
+    /// `scope` (`kind=app` + `connection_scope`).
+    #[must_use]
+    pub fn selects_connection(&self, id: &str, provider: &str, scope: &str) -> bool {
+        self.connections.contains_key(id)
+            || self
+                .app_scopes
+                .iter()
+                .any(|(p, s)| p == provider && s == scope)
+    }
+}
+
 /// The apps a connection's workspace may reach (a licensed posture, resolved
 /// by `ee`'s `principals` at connection resolution). `restricted = false`
 /// — the default, and always on unlicensed deployments — means EVERY app is
@@ -594,25 +632,29 @@ pub struct AppConfigRow {
     pub credentials: Option<String>,
 }
 
-/// Find an enabled BYOC app config for a workspace + provider.
+/// Find an enabled BYOC app config for a workspace, trying `keys` in order
+/// (most specific first: the app id, then its vendor group, e.g.
+/// `["gmail", "google"]`). The first key with an enabled row wins.
 pub async fn find_app_config(
     pool: &PgPool,
     workspace_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE workspace_id = $1 AND provider = $2 AND enabled = true
+           WHERE workspace_id = $1 AND provider = ANY($2) AND enabled = true
+           ORDER BY array_position($2, provider)
            LIMIT 1"#,
     )
     .bind(workspace_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by workspace_id + provider")
 }
 
-/// Find an enabled org-level BYOC app config for an organization + provider.
+/// Find an enabled org-level BYOC app config for an organization, trying
+/// `keys` in order like [`find_app_config`].
 ///
 /// Org-level app configs are writable only through the EE org surface
 /// (`POST /v1/org/apps/:provider/config`); OSS has no way to create them, so
@@ -620,16 +662,17 @@ pub async fn find_app_config(
 pub async fn find_app_config_by_org(
     pool: &PgPool,
     organization_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT settings, credentials FROM app_configs
-           WHERE organization_id = $1 AND provider = $2
+           WHERE organization_id = $1 AND provider = ANY($2)
              AND scope = 'organization' AND enabled = true
+           ORDER BY array_position($2, provider)
            LIMIT 1"#,
     )
     .bind(organization_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by organization_id + provider")
@@ -643,30 +686,135 @@ pub async fn find_app_config_by_org(
 /// (workspace → org) would now select a different row. Returns `None` when the
 /// link is null (env-minted, a no-config method, or pre-dating the link), or the
 /// config has since been disabled/removed, or (defence-in-depth) points at a
-/// different provider. The `provider` guard keeps a mislinked FK from ever
-/// handing one provider's client secret to another provider's token endpoint;
-/// every writer links same-provider by construction, so it only ever excludes
-/// corrupt data. Shared across editions: workspace-tier links exist in OSS; org
+/// config key outside `keys` (the connection's provider and its vendor group).
+/// The guard keeps a mislinked FK from ever handing one vendor's client secret
+/// to another vendor's token endpoint; a Gmail connection may use the `google`
+/// group row, never an `atlassian` one. It only ever excludes corrupt data.
+/// Shared across editions: workspace-tier links exist in OSS; org
 /// rows simply never exist there.
 pub async fn find_app_config_by_connection(
     pool: &PgPool,
     connection_id: &str,
-    provider: &str,
+    keys: &[&str],
 ) -> Result<Option<AppConfigRow>> {
     sqlx::query_as::<_, AppConfigRow>(
         r#"SELECT ac.settings, ac.credentials FROM app_configs ac
            JOIN app_connections c ON c.app_config_id = ac.id
-           WHERE c.id = $1 AND ac.provider = $2 AND ac.enabled = true
+           WHERE c.id = $1 AND ac.provider = ANY($2) AND ac.enabled = true
            LIMIT 1"#,
     )
     .bind(connection_id)
-    .bind(provider)
+    .bind(keys)
     .fetch_optional(pool)
     .await
     .context("querying app_config by connection provenance link")
 }
 
 // ── App connection queries ─────────────────────────────────────────────
+
+/// The encrypted credentials of the connection a derived connection is built
+/// on (`app_connections.source_connection_id`), while that source is still
+/// connected and belongs to the derived connection's own organization. A
+/// shared GitHub App connection stores no signing key of its own: it borrows
+/// the source's at mint time, so removing or disconnecting the source cuts
+/// every connection built on it. `None` = no usable source.
+///
+/// Each side's organization is its own `organization_id` (an org-scoped row)
+/// or its workspace's: a link that crosses organizations, however it arose,
+/// never lends a key.
+pub async fn find_source_connection_credentials(
+    pool: &PgPool,
+    connection_id: &str,
+) -> Result<Option<String>> {
+    sqlx::query_scalar::<_, String>(
+        r#"SELECT s.credentials FROM app_connections c
+           JOIN app_connections s ON s.id = c.source_connection_id
+           LEFT JOIN workspaces cw ON cw.id = c.workspace_id
+           LEFT JOIN workspaces sw ON sw.id = s.workspace_id
+           WHERE c.id = $1 AND s.status = 'connected' AND s.credentials IS NOT NULL
+             AND s.provider = c.provider AND s.source_connection_id IS NULL
+             AND COALESCE(c.organization_id, cw.organization_id)
+               = COALESCE(s.organization_id, sw.organization_id)"#,
+    )
+    .bind(connection_id)
+    .fetch_optional(pool)
+    .await
+    .context("querying source connection credentials")
+}
+
+/// A credential snapshot, never serialized or logged.
+#[derive(FromRow)]
+pub struct TestableConnection {
+    pub id: String,
+    pub scope: String,
+    pub organization_id: String,
+    pub credentials: String,
+}
+
+/// Tenant membership and both scope arms are fenced in SQL, not fetch-then-check.
+pub async fn find_testable_connection(
+    pool: &PgPool,
+    user_id: &str,
+    workspace_id: Option<&str>,
+    organization_id: Option<&str>,
+    id: &str,
+) -> Result<Option<TestableConnection>> {
+    sqlx::query_as::<_, TestableConnection>(
+        r#"SELECT c.id, c.scope, COALESCE(w.organization_id, c.organization_id) AS organization_id, c.credentials
+           FROM app_connections c LEFT JOIN workspaces w ON w.id = $2
+           JOIN organization_members m ON m.organization_id = COALESCE(w.organization_id, c.organization_id)
+           WHERE c.id = $3 AND m.user_id = $1 AND m.status <> 'suspended'
+             AND c.provider = 'postgres' AND c.status = 'connected' AND c.credentials IS NOT NULL
+             AND (($2 IS NOT NULL AND c.scope = 'workspace' AND c.workspace_id = w.id
+                   AND (c.organization_id IS NULL OR c.organization_id = w.organization_id))
+               OR ($2 IS NULL AND c.scope = 'organization' AND c.organization_id = $4
+                   AND c.workspace_id IS NULL))"#,
+    )
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(id)
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .context("finding testable connection")
+}
+
+/// Update only the credential snapshot tested, with membership rechecked and an
+/// audit row in the same statement. A reconnect/move/delete race cannot bless a
+/// different credential. Zero updated rows is intentionally harmless.
+pub async fn record_connection_test(
+    pool: &PgPool,
+    user_id: &str,
+    workspace_id: Option<&str>,
+    row: &TestableConnection,
+    superuser: bool,
+) -> Result<()> {
+    sqlx::query(
+        r#"WITH updated AS (
+          UPDATE app_connections c
+          SET metadata = COALESCE(c.metadata, '{}'::jsonb) || jsonb_build_object('superuser', $7::boolean),
+              updated_at = now()
+          FROM organization_members m
+          WHERE c.id = $3 AND c.credentials = $4 AND c.scope = $5
+            AND m.organization_id = $6 AND m.user_id = $1 AND m.status <> 'suspended'
+            AND c.provider = 'postgres' AND c.status = 'connected'
+            AND (($2::text IS NOT NULL AND c.scope = 'workspace' AND c.workspace_id = $2
+                  AND (c.organization_id IS NULL OR c.organization_id = $6)
+                  AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $2 AND w.organization_id = $6))
+              OR ($2::text IS NULL AND c.scope = 'organization' AND c.organization_id = $6 AND c.workspace_id IS NULL))
+            AND (c.metadata->'superuser') IS DISTINCT FROM to_jsonb($7::boolean)
+          RETURNING c.id, c.scope
+        ) INSERT INTO audit_logs
+          (id, workspace_id, organization_id, user_id, user_email, action, service, status, source, metadata, created_at)
+          SELECT gen_random_uuid()::text, CASE WHEN updated.scope = 'workspace' THEN $2 ELSE NULL END,
+                 $6, $1, u.email, 'update', 'app-connection', 'success', 'api',
+                 jsonb_build_object('connectionId', updated.id, 'superuser', $7::boolean), now()
+          FROM updated JOIN users u ON u.id = $1"#,
+    ).bind(user_id).bind(workspace_id).bind(&row.id).bind(&row.credentials)
+        .bind(&row.scope).bind(&row.organization_id).bind(superuser)
+        .execute(pool).await.context("recording connection test")?;
+    Ok(())
+}
 
 /// An app connection row from the `app_connections` table.
 #[derive(Debug, Clone, PartialEq, FromRow, serde::Serialize, serde::Deserialize)]
@@ -712,19 +860,321 @@ pub async fn find_app_connections_by_org(
     .context("querying app_connections by organization_id")
 }
 
-/// Update the encrypted credentials for an app connection (e.g., after token refresh).
-pub async fn update_app_connection_credentials(
+/// A connected app connection as the agent-facing guidance sees it: never its
+/// credential or label, only what decides whether an agent could be switched
+/// on for it.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct GuidanceConnectionRow {
+    pub id: String,
+    pub provider: String,
+    /// "organization" | "workspace".
+    pub scope: String,
+    /// The provider refused the stored refresh token: only a reconnect revives
+    /// it, so switching an agent on for it would not help.
+    pub reauth_required: bool,
+}
+
+/// Every connected app connection of `providers` an agent of `workspace_id`
+/// could be granted: its workspace's own, plus the organization-level ones of
+/// `organization_id`. Fenced in the query, the same pool the grants surface
+/// offers (`poolWhere`), so another workspace's or organization's account is
+/// never seen.
+pub async fn find_guidance_connections(
     pool: &PgPool,
+    workspace_id: &str,
+    organization_id: &str,
+    providers: &[&str],
+) -> Result<Vec<GuidanceConnectionRow>> {
+    sqlx::query_as::<_, GuidanceConnectionRow>(
+        r#"SELECT id, provider, scope, (reauth_required_at IS NOT NULL) AS reauth_required
+           FROM app_connections
+           WHERE status = 'connected' AND provider = ANY($3)
+             AND (workspace_id = $1 OR (organization_id = $2 AND scope = 'organization'))
+           ORDER BY connected_at"#,
+    )
+    .bind(workspace_id)
+    .bind(organization_id)
+    .bind(providers)
+    .fetch_all(pool)
+    .await
+    .context("querying guidance app_connections")
+}
+
+/// A connected connection's stored credential, as the refresh re-reads it
+/// under its lock (see [`find_connected_app_credentials`]).
+#[derive(Debug, Clone, FromRow)]
+pub struct StoredConnectionCredentials {
+    /// The encrypted credential exactly as stored: the compare-and-set
+    /// version for [`replace_app_connection_credentials`] and
+    /// [`mark_app_connection_reauth_required`].
+    pub credentials: String,
+    /// The provider already refused this credential's refresh token
+    /// (`reauth_required_at` is set), so only the user reconnecting revives it.
+    pub reauth_required: bool,
+}
+
+/// The stored credential of a connection that is still connected, or `None`
+/// when the row is gone, disconnected, or holds no credentials.
+///
+/// The refresh path re-reads through this inside its lock: the connection row
+/// the caller resolved from can be a cached copy up to a minute old, and only
+/// the current value says whether another instance already refreshed it.
+pub async fn find_connected_app_credentials<'e, E>(
+    executor: E,
     connection_id: &str,
+) -> Result<Option<StoredConnectionCredentials>>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_as::<_, StoredConnectionCredentials>(
+        r#"SELECT credentials, (reauth_required_at IS NOT NULL) AS reauth_required
+           FROM app_connections
+           WHERE id = $1 AND status = 'connected' AND credentials IS NOT NULL"#,
+    )
+    .bind(connection_id)
+    .fetch_optional(executor)
+    .await
+    .context("reading app_connection credentials")
+}
+
+/// Replace a connection's encrypted credentials, but only while the row still
+/// holds `expected`, the ciphertext the refresh was computed from.
+///
+/// A credential the provider just accepted supersedes any earlier refusal,
+/// so the write also clears `reauth_required_at`: a suspended installation
+/// that was unsuspended, or a disabled key that was re-enabled, stops reading
+/// "Needs reconnect" the moment a mint succeeds again (the dashboard's own
+/// credential write, `reconnectConnection`, does the same).
+///
+/// Returns whether the write landed. `false` means the row moved underneath
+/// the refresh (a reconnect wrote a fresh pair, a disconnect cleared it, or a
+/// delete removed it), and the newer state wins: a plain overwrite here is how
+/// a slow refresh used to resurrect a credential the user had just replaced.
+pub async fn replace_app_connection_credentials<'e, E>(
+    executor: E,
+    connection_id: &str,
+    expected: &str,
     encrypted_credentials: &str,
-) -> Result<()> {
-    sqlx::query(r#"UPDATE app_connections SET credentials = $1 WHERE id = $2"#)
-        .bind(encrypted_credentials)
-        .bind(connection_id)
-        .execute(pool)
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let result = sqlx::query(
+        r#"UPDATE app_connections
+           SET credentials = $1, reauth_required_at = NULL, updated_at = now()
+           WHERE id = $2 AND credentials = $3"#,
+    )
+    .bind(encrypted_credentials)
+    .bind(connection_id)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("replacing app_connection credentials")?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Take the transaction-scoped lock that serializes every refresh of one
+/// connection across all gateway instances sharing this database.
+///
+/// Waits at most `wait_ms` (a `lock_timeout` local to this transaction, so it
+/// never outlives it); `Ok(false)` means the wait ran out and the caller should
+/// give up on refreshing rather than queue. The lock is released by the
+/// transaction's commit or rollback (including the rollback a dropped
+/// transaction queues), so it cannot leak past the connection's return to the
+/// pool.
+pub async fn lock_app_connection_refresh(
+    conn: &mut sqlx::PgConnection,
+    connection_id: &str,
+    wait_ms: u64,
+) -> Result<bool> {
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{wait_ms}ms"))
+        .execute(&mut *conn)
         .await
-        .context("updating app_connection credentials")?;
+        .context("setting the refresh lock timeout")?;
+    let locked = sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('app-connection-refresh:' || $1, 0))",
+    )
+    .bind(connection_id)
+    .execute(&mut *conn)
+    .await;
+    match locked {
+        Ok(_) => Ok(true),
+        // 55P03 lock_not_available: the bounded wait ran out.
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => Ok(false),
+        Err(e) => Err(e).context("taking the app_connection refresh lock"),
+    }
+}
+
+/// Record on a database connection's metadata whether its stored role logs
+/// in with superuser powers (a superuser, or a role that reaches the
+/// server's own files and programs), which the dashboard warns about: such a
+/// role can reach past the statement checks the gateway applies. The row is
+/// written only when the stored value differs, so a session start on an
+/// unchanged connection updates nothing. The authorized credential snapshot
+/// and tenant fence prevent a stale CONNECT-cache entry from stamping a
+/// reconnected, moved, disconnected or repurposed row.
+pub async fn record_app_connection_superuser<'e, E>(
+    executor: E,
+    expected: &AppConnectionRow,
+    workspace_id: &str,
+    organization_id: &str,
+    superuser: bool,
+) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query(
+        r#"UPDATE app_connections c
+              SET metadata = jsonb_set(COALESCE(c.metadata, '{}'::jsonb), '{superuser}', to_jsonb($2::boolean))
+            WHERE c.id = $1 AND c.credentials = $3 AND c.provider = $4 AND c.scope = $5
+              AND c.status = 'connected'
+              AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = $6 AND w.organization_id = $7)
+              AND ((c.scope = 'workspace' AND c.workspace_id = $6
+                    AND (c.organization_id IS NULL OR c.organization_id = $7))
+                OR (c.scope = 'organization' AND c.organization_id = $7 AND c.workspace_id IS NULL))
+              AND COALESCE((c.metadata->>'superuser')::boolean, false) IS DISTINCT FROM $2"#,
+    )
+    .bind(&expected.id)
+    .bind(superuser)
+    .bind(&expected.credentials)
+    .bind(&expected.provider)
+    .bind(&expected.scope)
+    .bind(workspace_id)
+    .bind(organization_id)
+    .execute(executor)
+    .await
+    .context("recording app_connection superuser")?;
     Ok(())
+}
+
+/// Record that the provider refused the refresh token of `expected`, only
+/// while that credential is still stored: a reconnect that landed meanwhile
+/// is never flagged. The connection stays `connected` (it is still the user's
+/// account, attached to the same agents and rules); any reconnect clears the
+/// flag. `false` = not flagged because the credential changed.
+pub async fn mark_app_connection_reauth_required<'e, E>(
+    executor: E,
+    connection_id: &str,
+    expected: &str,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections SET reauth_required_at = COALESCE(reauth_required_at, now())
+           WHERE id = $1 AND credentials = $2"#,
+    )
+    .bind(connection_id)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("marking app_connection reauth required")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Record what an approved request's upstream answered (the gateway's
+/// `summary::outcome::RequestResult`) on its approval's request-log row, as
+/// `extra_data.approval_result`, keeping every other key (the telemetry
+/// update that stamps "approval_approved" merges the same way, so the two
+/// writes land in either order). Only an approval's row is touched.
+/// `true` = written.
+pub async fn record_approval_result<'e, E>(
+    executor: E,
+    log_id: &str,
+    result: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE request_logs
+           SET extra_data = COALESCE(extra_data, '{}'::jsonb)
+                            || jsonb_build_object('approval_result', $2::jsonb)
+           WHERE id = $1
+             AND extra_data ->> 'decision' IN ('approval_pending', 'approval_approved')"#,
+    )
+    .bind(log_id)
+    .bind(Json(result))
+    .execute(executor)
+    .await
+    .context("recording an approved request's result")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Record that the GitHub organization `org` refused this connection's token,
+/// as `entry` (the gateway's `github_org_access::OrgAccessEntry`), under
+/// `metadata.githubOrgAccess.<org>`, keeping every other metadata key. A
+/// refusal identical to the stored one rewrites nothing. Only a connected
+/// connection is touched. `true` = a row was written.
+pub async fn record_github_org_access<'e, E>(
+    executor: E,
+    connection_id: &str,
+    org: &str,
+    entry: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections
+           SET metadata = jsonb_set(
+                 CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+                 '{githubOrgAccess}',
+                 CASE WHEN jsonb_typeof(metadata -> 'githubOrgAccess') = 'object'
+                      THEN metadata -> 'githubOrgAccess' ELSE '{}'::jsonb END
+                 || jsonb_build_object($2::text, $3::jsonb)
+               ),
+               updated_at = now()
+           WHERE id = $1 AND status = 'connected'
+             AND (metadata -> 'githubOrgAccess' -> $2::text) IS DISTINCT FROM $3::jsonb
+             -- Bounded: an already-recorded org may change, but no more than
+             -- 50 organizations are ever tracked per connection.
+             AND (
+               metadata -> 'githubOrgAccess' ? $2::text
+               OR jsonb_typeof(metadata -> 'githubOrgAccess') IS DISTINCT FROM 'object'
+               OR (SELECT count(*) FROM jsonb_object_keys(metadata -> 'githubOrgAccess')) < 50
+             )"#,
+    )
+    .bind(connection_id)
+    .bind(org)
+    .bind(entry)
+    .execute(executor)
+    .await
+    .context("recording github org access")?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Clear the refusal recorded for `org` once a request proved it stale, but
+/// only while the stored entry is still `expected`, the one the proof was
+/// checked against: a newer refusal recorded meanwhile stays. `false` when
+/// nothing (or something else) is recorded for `org`.
+pub async fn clear_github_org_access<'e, E>(
+    executor: E,
+    connection_id: &str,
+    org: &str,
+    expected: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let done = sqlx::query(
+        r#"UPDATE app_connections
+           SET metadata = CASE
+                 WHEN (metadata -> 'githubOrgAccess') - $2::text = '{}'::jsonb
+                   THEN metadata - 'githubOrgAccess'
+                 ELSE metadata #- ARRAY['githubOrgAccess', $2::text]
+               END,
+               updated_at = now()
+           WHERE id = $1 AND metadata -> 'githubOrgAccess' -> $2::text = $3::jsonb"#,
+    )
+    .bind(connection_id)
+    .bind(org)
+    .bind(expected)
+    .execute(executor)
+    .await
+    .context("clearing github org access")?;
+    Ok(done.rows_affected() == 1)
 }
 
 // ── Vault connection queries ────────────────────────────────────────────
@@ -736,7 +1186,8 @@ pub async fn find_vault_connection(
     provider: &str,
 ) -> Result<Option<VaultConnectionRow>> {
     sqlx::query_as::<_, VaultConnectionRow>(
-        r#"SELECT id, provider, name, status, connection_data FROM vault_connections WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
+        r#"SELECT id, provider, name, status, connection_data, xmin::text::bigint AS generation
+           FROM vault_connections WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
     )
     .bind(workspace_id)
     .bind(provider)
@@ -745,47 +1196,72 @@ pub async fn find_vault_connection(
     .context("querying vault_connection by workspace_id + provider")
 }
 
-/// Upsert a vault connection (insert or update on workspace_id + provider conflict).
+/// The current generation of a workspace's vault connection, or `None` when
+/// the connection no longer exists (it was disconnected).
+///
+/// The cheap freshness probe behind every cached vault session: one indexed
+/// point read on the `(workspace_id, provider)` unique key, no payload.
+pub async fn find_vault_connection_generation(
+    pool: &PgPool,
+    workspace_id: &str,
+    provider: &str,
+) -> Result<Option<VaultGeneration>> {
+    sqlx::query_scalar::<_, VaultGeneration>(
+        r#"SELECT xmin::text::bigint FROM vault_connections
+           WHERE workspace_id = $1 AND provider = $2 LIMIT 1"#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .context("querying vault_connection generation")
+}
+
+/// Upsert a vault connection (insert or update on workspace_id + provider
+/// conflict). Returns the written row's new generation.
 pub async fn upsert_vault_connection(
     pool: &PgPool,
     workspace_id: &str,
     provider: &str,
     status: &str,
     connection_data: Option<&serde_json::Value>,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<VaultGeneration> {
+    sqlx::query_scalar::<_, VaultGeneration>(
         r#"INSERT INTO vault_connections (id, workspace_id, provider, status, connection_data, created_at, updated_at)
            VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW(), NOW())
            ON CONFLICT (workspace_id, provider)
-           DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()"#,
+           DO UPDATE SET status = $3, connection_data = $4, updated_at = NOW()
+           RETURNING xmin::text::bigint"#,
     )
     .bind(workspace_id)
     .bind(provider)
     .bind(status)
     .bind(connection_data)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .context("upserting vault_connection")?;
-    Ok(())
+    .context("upserting vault_connection")
 }
 
 /// Update only the connection_data JSON for an existing vault connection.
+/// Returns the row's new generation, or `None` when no row exists (the
+/// connection was disconnected).
 pub async fn update_vault_connection_data(
     pool: &PgPool,
     workspace_id: &str,
     provider: &str,
     connection_data: &serde_json::Value,
-) -> Result<()> {
-    sqlx::query(
-        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW() WHERE workspace_id = $1 AND provider = $2"#,
+) -> Result<Option<VaultGeneration>> {
+    sqlx::query_scalar::<_, VaultGeneration>(
+        r#"UPDATE vault_connections SET connection_data = $3, updated_at = NOW()
+           WHERE workspace_id = $1 AND provider = $2
+           RETURNING xmin::text::bigint"#,
     )
     .bind(workspace_id)
     .bind(provider)
     .bind(connection_data)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
-    .context("updating vault_connection connection_data")?;
-    Ok(())
+    .context("updating vault_connection connection_data")
 }
 
 /// Delete a vault connection for a workspace + provider pair.

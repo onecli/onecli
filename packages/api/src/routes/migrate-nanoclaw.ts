@@ -481,7 +481,7 @@ const migrationSteps = (): string[] => [
   'echo ""',
   'echo "  Migrated LLM keys attach to your agents automatically."',
   'echo "  Grant other migrated secrets to agents here:"',
-  'echo "  $DASHBOARD_URL$DASH_PREFIX/agents"',
+  'echo "  $DASHBOARD_URL$DASH_PREFIX/connections/custom"',
   'echo ""',
   'echo "  Reconnect your app integrations:"',
   'echo "  $DASHBOARD_URL$DASH_PREFIX/connections"',

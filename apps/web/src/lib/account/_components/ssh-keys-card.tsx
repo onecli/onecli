@@ -106,21 +106,18 @@ export const SshKeysCard = () => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              disabled={deleteMutation.isPending}
-              onClick={(e) => {
-                e.preventDefault();
+              // Instant: the row leaves and the confirm closes on click; the
+              // hook puts the key back and says why if the server refuses.
+              onClick={() => {
                 if (!deleteTarget) return;
-                deleteMutation.mutate(deleteTarget.id, {
-                  onSuccess: () => setDeleteTarget(null),
-                });
+                deleteMutation.mutate(deleteTarget.id);
+                setDeleteTarget(null);
               }}
             >
-              {deleteMutation.isPending ? "Deleting…" : "Delete key"}
+              Delete key
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

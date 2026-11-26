@@ -35,7 +35,7 @@ export const FlowChrome = ({ children }: { children: React.ReactNode }) => {
                 <span
                   aria-hidden="true"
                   className={cn(
-                    "block h-1.5 rounded-full transition-[width,background-color]",
+                    "block h-1.5 rounded-full transition-[width,background-color] duration-500 ease-out",
                     i === currentIndex
                       ? "bg-brand w-6"
                       : i < currentIndex
@@ -48,7 +48,15 @@ export const FlowChrome = ({ children }: { children: React.ReactNode }) => {
           </ol>
         </nav>
       )}
-      {children}
+      {/* Keyed by step so each screen gets its own calm entrance: a soft
+          fade and a short rise, slow enough to read as a transition rather
+          than a cut. */}
+      <div
+        key={currentSlug ?? "step"}
+        className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-3 fill-mode-both flex w-full flex-col items-center duration-500 ease-out"
+      >
+        {children}
+      </div>
     </div>
   );
 };

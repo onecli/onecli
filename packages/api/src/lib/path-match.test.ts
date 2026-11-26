@@ -47,6 +47,29 @@ describe("pathMatches", () => {
     expect(pathMatches("/v1/p/data", "/v1/*/data/*")).toBe(false);
   });
 
+  it("a segment pattern ending in / matches with or without the slash, at the same depth", () => {
+    const create = "/services/data/v*/sobjects/*/";
+    expect(pathMatches("/services/data/v59.0/sobjects/Contact/", create)).toBe(
+      true,
+    );
+    expect(pathMatches("/services/data/v59.0/sobjects/Contact", create)).toBe(
+      true,
+    );
+    expect(
+      pathMatches("/services/data/v59.0/sobjects/Contact?x=1", create),
+    ).toBe(true);
+    // Never one segment deeper (a record id) or shallower.
+    expect(
+      pathMatches("/services/data/v59.0/sobjects/Contact/003xx", create),
+    ).toBe(false);
+    expect(
+      pathMatches("/services/data/v59.0/sobjects/Contact/003xx/", create),
+    ).toBe(false);
+    expect(pathMatches("/services/data/v59.0/sobjects", create)).toBe(false);
+    // Non-slash patterns are unchanged.
+    expect(pathMatches("/repos/r/issues/", "/repos/*/issues")).toBe(false);
+  });
+
   it("exact match otherwise, and query strings are stripped", () => {
     expect(pathMatches("/exact", "/exact")).toBe(true);
     expect(pathMatches("/exact/x", "/exact")).toBe(false);

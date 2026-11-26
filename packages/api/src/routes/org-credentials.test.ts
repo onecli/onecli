@@ -41,11 +41,54 @@ const store = vi.hoisted(() => ({
   }[],
   seq: 0,
   orgFlushes: [] as string[],
+  deleteTransactionEvents: [] as string[],
+  inTransaction: false,
 }));
 
 vi.mock("@onecli/db", () => ({
-  Prisma: {},
+  Prisma: { TransactionIsolationLevel: { Serializable: "Serializable" } },
   db: {
+    $transaction: async <T>(
+      run: (tx: typeof import("@onecli/db").db) => Promise<T>,
+      options: { isolationLevel: string },
+    ) => {
+      expect(options.isolationLevel).toBe("Serializable");
+      const snapshot = structuredClone(store.connections);
+      store.inTransaction = true;
+      store.deleteTransactionEvents.push("begin");
+      try {
+        const { db } = await import("@onecli/db");
+        const result = await run(db);
+        store.deleteTransactionEvents.push("commit");
+        return result;
+      } catch (error) {
+        store.connections = snapshot;
+        store.deleteTransactionEvents.push("rollback");
+        throw error;
+      } finally {
+        store.inTransaction = false;
+      }
+    },
+    $queryRaw: async (
+      query: TemplateStringsArray,
+      id: string,
+      organizationId: string,
+    ) => {
+      expect(store.inTransaction).toBe(true);
+      expect(query.join("?")).toBe(
+        "SELECT id FROM app_connections WHERE id = ? AND scope = 'organization' AND organization_id = ? FOR UPDATE",
+      );
+      expect(organizationId).toBe("org-1");
+      store.deleteTransactionEvents.push(`lock:${id}`);
+      return store.connections
+        .filter(
+          (row) =>
+            row.id === id &&
+            row.scope === "organization" &&
+            row.organizationId === organizationId,
+        )
+        .map(({ id }) => ({ id }));
+    },
     apiKey: {
       findUnique: async ({ where }: { where: { key: string } }) =>
         where.key === ORG_KEY
@@ -63,15 +106,23 @@ vi.mock("@onecli/db", () => ({
       findMany: async ({
         where,
       }: {
-        where: { organizationId?: string; scope?: string; provider?: string };
+        where: {
+          organizationId?: string;
+          scope?: string;
+          provider?: string;
+          sourceConnectionId?: string;
+        };
       }) =>
-        store.connections.filter(
-          (c) =>
-            (!where.organizationId ||
-              c.organizationId === where.organizationId) &&
-            (!where.scope || c.scope === where.scope) &&
-            (!where.provider || c.provider === where.provider),
-        ),
+        // No connection here is a copy built on another one.
+        where.sourceConnectionId
+          ? []
+          : store.connections.filter(
+              (c) =>
+                (!where.organizationId ||
+                  c.organizationId === where.organizationId) &&
+                (!where.scope || c.scope === where.scope) &&
+                (!where.provider || c.provider === where.provider),
+            ),
       findFirst: async ({
         where,
       }: {
@@ -96,6 +147,9 @@ vi.mock("@onecli/db", () => ({
         return row;
       },
       delete: async ({ where }: { where: { id: string } }) => {
+        expect(store.inTransaction).toBe(true);
+        expect(store.deleteTransactionEvents).toContain(`lock:${where.id}`);
+        store.deleteTransactionEvents.push(`delete:${where.id}`);
         const i = store.connections.findIndex((c) => c.id === where.id);
         if (i < 0) throw new Error("not found");
         return store.connections.splice(i, 1)[0];
@@ -183,6 +237,8 @@ beforeEach(() => {
   store.secrets = [];
   store.seq = 0;
   store.orgFlushes = [];
+  store.deleteTransactionEvents = [];
+  store.inTransaction = false;
   beforeCreateSecret.mockClear();
 });
 
@@ -215,6 +271,26 @@ describe("/v1/org/connections (free, org-fenced)", () => {
     });
     expect(res.status).toBe(204);
     expect(store.connections).toHaveLength(0);
+    expect(store.deleteTransactionEvents).toEqual([
+      "begin",
+      "lock:conn-1",
+      "delete:conn-1",
+      "commit",
+    ]);
+  });
+
+  it("rolls back a scoped delete when the connection does not exist", async () => {
+    const res = await app.request("/v1/org/connections/missing", {
+      method: "DELETE",
+      headers: orgKeyHeaders,
+    });
+    expect(res.status).toBe(404);
+    expect(store.connections.map(({ id }) => id)).toEqual(["conn-1"]);
+    expect(store.deleteTransactionEvents).toEqual([
+      "begin",
+      "lock:missing",
+      "rollback",
+    ]);
   });
 
   it("keeps the legacy /v1/org/apps/connections alias byte-identical", async () => {

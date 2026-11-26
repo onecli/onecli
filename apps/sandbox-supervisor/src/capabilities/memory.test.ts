@@ -79,14 +79,25 @@ describe("the memory tool surface", () => {
 
   it("the fragment teaches the write-back laws (files writable, index generated, deletes restored)", () => {
     // The laws the write-back amendment added — each one steers real agent
-    // behavior the platform depends on.
-    expect(memoryFragment.body).toContain("edit or create memory/");
-    expect(memoryFragment.body).toContain(
-      "memory/index.md is generated — never edit it",
-    );
-    expect(memoryFragment.body).toContain(
-      "Deleting a file does not delete the memory",
-    );
-    expect(memoryFragment.body).toContain("source of truth");
+    // behavior the platform depends on. index.md is named ONCE (the 2026-10
+    // budget audit folded the second mention into the opening sentence).
+    const flat = memoryFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("edit or create memory/");
+    expect(flat).toContain("memory/index.md, a generated map you never edit");
+    expect(flat.match(/memory\/index\.md/g)).toHaveLength(1);
+    expect(flat).toContain("Deleting a file does not delete the memory");
+    expect(flat).toContain("source of truth");
+  });
+
+  it("corrections are a same-turn save, with one home in the fragment", () => {
+    // Without this, agents fix the task and move on, and the person has to
+    // correct them again next time. One home per rule (the 2026-10 budget
+    // audit): the correction clause lives inside the save bullet, never in
+    // a second bullet restating it. MUTATION-PROOF: split it back out and
+    // the count fails; drop the clause and the content check fails.
+    const flat = memoryFragment.body.replace(/\s+/g, " ");
+    expect(flat).toContain("save it in the same turn, before you answer");
+    expect(flat.match(/the moment you learn/g)).toHaveLength(1);
+    expect(flat.match(/corrects you/g)).toHaveLength(1);
   });
 });

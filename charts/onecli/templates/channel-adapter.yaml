@@ -1,0 +1,93 @@
+{{- /*
+The channel adapter: the daemon that holds provider connections (Slack
+Socket Mode), posts agents' answers back into Slack threads, mirrors web
+exchanges, and posts gateway approval cards. Every channel answer goes out
+through it, Events-mode presences included, so channels need it running.
+
+Opt-in, like compose's `channel-adapter` profile. Outbound-only: it calls
+the api (register, config feed, work poll) and the gateway's approvals API,
+and dials Slack directly. No Service, no ports, no database, no
+ServiceAccount token. Its traffic is platform traffic, not agent traffic, so
+it never rides the governed gateway path and the sandbox fence does not
+admit it.
+
+One replica, Recreate, and a stable CHANNEL_ADAPTER_NAME: a restart
+re-registers under the same name and takes over its own row, presence
+leases included, so Slack is never left without an owner during a rollout.
+No probes: the daemon has no listener, exits on every fatal error (exit 2 on
+bad config, 1 on a refused token), and the kubelet restarts it.
+*/ -}}
+{{- if include "onecli.channelAdapter.enabled" . }}
+{{- $name := include "onecli.component" (dict "root" . "component" "channel-adapter") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "onecli.componentLabels" (dict "root" . "component" "channel-adapter") | nindent 4 }}
+  {{- include "onecli.annotations" . | nindent 2 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "onecli.selectorLabels" (dict "root" . "component" "channel-adapter") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "onecli.selectorLabels" (dict "root" . "component" "channel-adapter") | nindent 8 }}
+        onecli.sh/role: channel-adapter
+      {{- with .Values.channelAdapter.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "onecli.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "onecli.podSecurityContext" (dict "uid" 1000 "gid" 1000) | nindent 8 }}
+      containers:
+        - name: channel-adapter
+          image: {{ include "onecli.image" (dict "root" . "service" "channel-adapter") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "onecli.containerSecurityContext" (dict "readOnlyRootFilesystem" true) | nindent 12 }}
+          env:
+            # Its credential AND its registration anchor: the api reads the
+            # same key (api.yaml), which is what makes registration zero-touch.
+            - name: CHANNEL_ADAPTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "onecli.secretsName" . }}
+                  key: CHANNEL_ADAPTER_TOKEN
+            - name: CHANNEL_ADAPTER_NAME
+              value: {{ $name | quote }}
+            - name: CONTROL_PLANE_URL
+              value: {{ include "onecli.apiUrl" . | quote }}
+            # The gateway serves its approvals API on the proxy port.
+            - name: GATEWAY_API_URL
+              value: {{ include "onecli.gatewayUrl" . | quote }}
+            # Where the "connect a model key" buttons in Slack posts point.
+            - name: ONECLI_EXTERNAL_URL
+              value: {{ .Values.externalUrl | quote }}
+            {{- with .Values.channelAdapter.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.channelAdapter.resources | nindent 12 }}
+      {{- with .Values.channelAdapter.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.channelAdapter.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.channelAdapter.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

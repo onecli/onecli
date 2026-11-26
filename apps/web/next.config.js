@@ -43,7 +43,8 @@ const devGatewayUrl = (
 const nextConfig = {
   output: "standalone",
   poweredByHeader: false,
-  // Cloud: CloudFront compresses at the edge. Onprem prod: Next.js compresses.
+  // Cloud edition: the edge in front of it compresses. Onprem prod: Next.js
+  // compresses.
   // Dev: OFF — the dev server's gzip middleware buffers proxied responses, and
   // the single-origin rewrites now carry the conversation SSE stream and the
   // approvals long-poll through it; compressing those would stall live chat
@@ -57,7 +58,7 @@ const nextConfig = {
     NEXT_PUBLIC_EDITION: process.env.NEXT_PUBLIC_EDITION || "onprem",
     NEXT_PUBLIC_APP_VERSION: appVersion,
     // Baked ONLY when a value was actually provided — full URLs first (what
-    // cloud CI passes), the bare-domain vars as a DEPRECATED fallback for
+    // CI passes), the bare-domain vars as a DEPRECATED fallback for
     // older build invocations. LEGACY(next-major): delete the fallback here
     // and the API_DOMAIN/GATEWAY_API_DOMAIN rows in turbo.json together
     // (ledger: packages/api/src/lib/public-origins.ts).
@@ -119,6 +120,26 @@ const nextConfig = {
       destination: "/w/:workspaceId/settings/install",
       permanent: true,
     },
+    // Org-wide administration moved under Organization Settings. Whole
+    // subtrees, so every deep link (a Global Connections tab, an app's page)
+    // keeps landing, not just the section root. Non-permanent: the settings
+    // layout is still settling, and a cached 308 would outlive a second move.
+    {
+      source: "/org/:orgId/global-connections/:path*",
+      destination: "/org/:orgId/settings/global-connections/:path*",
+      permanent: false,
+    },
+    {
+      source: "/org/:orgId/policy",
+      destination: "/org/:orgId/settings/policy",
+      permanent: false,
+    },
+    // Domains folded into the Single sign-on page (its step 1).
+    {
+      source: "/org/:orgId/settings/domains",
+      destination: "/org/:orgId/settings/sso",
+      permanent: false,
+    },
   ],
   //
   // `rewrites()` exists for exactly one reason: to serve the whole DEV stack
@@ -140,7 +161,7 @@ const nextConfig = {
   // `/auth/cli` pages and the `/v1/health` deploy probe. `/gw` is a stripped
   // prefix of our own invention — the gateway's browser routes live under
   // `/v1/*` too, so they'd collide with the api-server's without one. Dev-only
-  // but edition-agnostic: cloud PRODUCTION has CloudFront and a bearer token,
+  // but edition-agnostic: a production deployment has its own edge routing,
   // but cloud DEV behind one tunnel needs the same single origin. For that
   // cloud-dev tunnel, set BOTH baked vars at dev-server start —
   // NEXT_PUBLIC_API_URL=<tunnel-origin> and

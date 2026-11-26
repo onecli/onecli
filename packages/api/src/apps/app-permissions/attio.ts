@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const attioPermissions: AppPermissionDefinition = {
   provider: "attio",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

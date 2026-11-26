@@ -66,5 +66,21 @@ scenario("idle park keeps the volume, wake resumes the session", async (cx) => {
   );
   expect(transcript).toMatch(/\[state sessionRef=\S+ turnsRun=2\]/);
 
+  // The awake-time ledger saw both boots: the parked run is CLOSED with the
+  // park's reason, the woken one is OPEN, and the usage read sums them.
+  const runs = await cx.prisma.sandboxRuntimeInterval.findMany({
+    where: { sandboxId: cx.ids.sandbox },
+    orderBy: { startedAt: "asc" },
+    select: { endedAt: true, endReason: true, agentId: true },
+  });
+  expect(runs.map((run) => run.endReason)).toEqual(["idle", null]);
+  expect(runs[0]?.endedAt).not.toBeNull();
+  expect(runs.every((run) => run.agentId === cx.ids.agent)).toBe(true);
+  const usage = await stack.v1.json<{ awakeSeconds: number; running: boolean }>(
+    await stack.v1.get(`/v1/agents/${cx.ids.agent}/usage`),
+  );
+  expect(usage.running).toBe(true);
+  expect(usage.awakeSeconds).toBeGreaterThan(0);
+
   await stack.runner.pausePump();
 });

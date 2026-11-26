@@ -1,14 +1,23 @@
 "use client";
 
-import { AlarmClock, CalendarClock, type LucideIcon } from "lucide-react";
+import {
+  AlarmClock,
+  Brain,
+  CalendarClock,
+  MessagesSquare,
+  Webhook,
+  type LucideIcon,
+} from "lucide-react";
 import type { AutomationSource } from "@/lib/chat/turns";
 
 /**
- * A platform-posted report — a scheduled run (cron) or a process watch firing
- * (watch) — materialized into the origin thread as a completed turn. The person
- * did NOT type `title`; the platform did (e.g. `Watch on "sleep 90;"`), so it
- * must never wear the user's bubble. A quiet, start-aligned system label
- * instead, introducing the report body the agent-side block renders below it.
+ * A platform-posted report — a scheduled run (cron), a process watch firing
+ * (watch), or a peer task's report (peer_task: what the agent told the
+ * person after talking with another agent) — materialized into the origin
+ * thread as a completed turn. The person did NOT type `title`; the platform
+ * did (e.g. `Watch on "sleep 90;"`, `After talking with Ray`), so it must
+ * never wear the user's bubble. A quiet, start-aligned system label instead,
+ * introducing the report body the agent-side block renders below it.
  *
  * The cron icon matches the schedules section (`CalendarClock`) so a report and
  * its schedule read as one thing; watches get `AlarmClock` — a process the
@@ -17,6 +26,15 @@ import type { AutomationSource } from "@/lib/chat/turns";
 const AUTOMATION_ICON: Record<AutomationSource, LucideIcon> = {
   cron: CalendarClock,
   watch: AlarmClock,
+  // An external app's event (the Webhooks section uses the same mark).
+  webhook: Webhook,
+  // A peer task's report: the agent's own words after talking with another
+  // agent, so the two-bubbles mark - the same family the Contacts page uses
+  // for a pair conversation.
+  peer_task: MessagesSquare,
+  // Never rendered (a review delivers nothing); the Memory page's icon, for
+  // exhaustiveness.
+  memory_review: Brain,
 };
 
 export const AutomationTurnHeader = ({

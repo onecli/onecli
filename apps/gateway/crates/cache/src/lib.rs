@@ -2,7 +2,7 @@
 //!
 //! Two backends behind one trait, selected at startup by the composition
 //! root (`wiring`):
-//! Redis (`ConnectionManager`, ElastiCache with TLS + AUTH) when `REDIS_HOST`
+//! Redis (`ConnectionManager`, TLS + AUTH) when `REDIS_HOST`
 //! is set, else an in-memory `DashMap` for single-instance deployments.
 //!
 //! All values are serialized to JSON — the `CacheStore` trait is

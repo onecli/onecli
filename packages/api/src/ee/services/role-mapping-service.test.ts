@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   // (userId, its group's roleMapping) pair.
   mapped: [] as { userId: string; role: string; priority: number }[],
   mappingCount: 0,
+  mappingCountProbes: [] as unknown[],
   // Preview fixtures.
   previewExisting: null as { priority: number } | null,
   previewAggMin: null as number | null,
@@ -32,7 +33,10 @@ vi.mock("@onecli/db", () => ({
       },
     },
     groupRoleMapping: {
-      count: async () => state.mappingCount,
+      count: async (args: unknown) => {
+        state.mappingCountProbes.push(args);
+        return state.mappingCount;
+      },
       findFirst: async () => state.previewExisting,
       aggregate: async () => ({ _min: { priority: state.previewAggMin } }),
     },
@@ -52,6 +56,7 @@ import {
 beforeEach(() => {
   state.mapped = [];
   state.mappingCount = 0;
+  state.mappingCountProbes = [];
   state.previewExisting = null;
   state.previewAggMin = null;
   state.previewTarget = [];
@@ -127,14 +132,19 @@ describe("resolveRolesForUsers", () => {
 });
 
 describe("isRoleManagedByIdp", () => {
-  it("is true when a mapping covers a group the member belongs to", async () => {
-    state.mappingCount = 1;
-    expect(await isRoleManagedByIdp("org-1", "u1")).toBe(true);
-  });
-
-  it("is false when no mapping covers the member", async () => {
-    state.mappingCount = 0;
-    expect(await isRoleManagedByIdp("org-1", "u1")).toBe(false);
+  // The boolean itself is exercised through team-service's IdP lock; what
+  // only this suite can pin is the fence: a mapping in ANOTHER org must never
+  // lock this member's role, and only the member's own groups count.
+  it("counts mappings fenced to this org and the member's own groups", async () => {
+    await isRoleManagedByIdp("org-1", "u1");
+    expect(state.mappingCountProbes).toEqual([
+      {
+        where: {
+          organizationId: "org-1",
+          group: { members: { some: { userId: "u1" } } },
+        },
+      },
+    ]);
   });
 });
 

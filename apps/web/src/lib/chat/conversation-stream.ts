@@ -5,8 +5,8 @@ import { initialSseState, parseTranscriptFrame, pushSseChunk } from "./sse";
 /**
  * The stream's connect/read/reconnect engine, pure over an injected fetch so
  * every lifecycle decision is node-testable. Reconnection is the normal state
- * of this protocol, not an exception: the ALB recycles healthy connections by
- * design, and the server deliberately cuts slow readers — so the engine
+ * of this protocol, not an exception: load balancers recycle healthy
+ * connections, and the server deliberately cuts slow readers — so the engine
  * retries forever on anything transient and stops only when the server
  * refuses for good.
  */
@@ -231,7 +231,7 @@ export const runConversationStream = async (
           void reader.cancel().catch(() => undefined);
           break;
         }
-        if (result.done) break; // server closed (overflow, ALB, stall cut)
+        if (result.done) break; // server closed (overflow, load balancer, stall cut)
         sawBytes = true; // keepalives count: liveness is bytes
 
         const pushed = pushSseChunk(

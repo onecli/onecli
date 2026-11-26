@@ -6,11 +6,7 @@ import {
   resolveOrgContext,
   requireOrgAdminContext,
 } from "@/lib/actions/resolve-user";
-import {
-  requireRole,
-  getUserRole,
-  type OrgRole,
-} from "@onecli/api/ee/services/authorization-service";
+import { requireRole } from "@onecli/api/ee/services/authorization-service";
 import {
   withAudit,
   type AuditAction,
@@ -26,16 +22,6 @@ export const getOrgSubscriptionStatus = async (): Promise<string> => {
     select: { subscriptionStatus: true },
   });
   return org.subscriptionStatus;
-};
-
-export const getUserOrgRole = async (): Promise<OrgRole> => {
-  try {
-    const { userId, organizationId } = await resolveOrgContext();
-    const role = await getUserRole(userId, organizationId);
-    return role ?? "member";
-  } catch {
-    return "member";
-  }
 };
 
 export const changeTeamMemberRole = async (

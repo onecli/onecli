@@ -1,9 +1,9 @@
 import { apiGet, apiPut, apiDelete } from "./client";
 import type {
   AgentGrants,
-  AgentWithGrantsSummary,
   ConnectionGrantInput,
   ConnectionGrants,
+  SecretAgentAccess,
 } from "./types";
 
 // The attach-model grants API (workspace scope only — org policy stays rules).
@@ -33,6 +33,12 @@ export const attachSecret = (agentId: string, secretId: string) =>
 export const detachSecret = (agentId: string, secretId: string) =>
   apiDelete(`/v1/agents/${agentId}/grants/secrets/${secretId}`);
 
+/** Every agent of the workspace against one secret (the custom connection's
+ * "choose agents" window). Toggles write through `attachSecret` /
+ * `detachSecret`. */
+export const forSecret = (secretId: string) =>
+  apiGet<SecretAgentAccess>(`/v1/secrets/${secretId}/agents`);
+
 export const forConnection = (connectionId: string) =>
   apiGet<ConnectionGrants>(`/v1/connections/${connectionId}/grants`);
 
@@ -48,6 +54,3 @@ export const setForConnection = (
 
 export const detachForConnection = (connectionId: string, agentId: string) =>
   apiDelete(`/v1/connections/${connectionId}/grants/agents/${agentId}`);
-
-export const summary = () =>
-  apiGet<AgentWithGrantsSummary[]>("/v1/agents?include=grants-summary");

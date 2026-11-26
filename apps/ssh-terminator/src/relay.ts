@@ -15,14 +15,13 @@ export type { RelayRequest } from "./backend/types";
 /**
  * The guest's durable-home contract, duplicated privately (the
  * runner/supervisor precedent): byte-equal with the agent image
- * (docker/agent.Dockerfile, agent-entrypoint.sh) and pinned against
- * apps/sandbox-manager/src/constants.ts by the infra contract test
- * (sandbox-manager-contract.test.ts) — change them ONLY in lockstep.
+ * (docker/agent.Dockerfile, agent-entrypoint.sh) and with every substrate
+ * that boots that image — change them ONLY in lockstep.
  */
 export const HOME_MOUNT = "/workspace";
 export const AGENT_POSIX_HOME = "/workspace/.home";
 
-/** POSIX single-quote: close, escaped quote, reopen (boot-script.ts's sq). */
+/** POSIX single-quote: close, escaped quote, reopen. */
 const sq = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /** Where the in-guest OpenSSH sftp-server lives (agent image, Debian path). */

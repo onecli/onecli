@@ -19,7 +19,8 @@ export const hasRedisConfigured = (): boolean => Boolean(REDIS_HOST);
  * Singleton Redis client for the web app.
  * Uses globalThis to survive Next.js dev hot-reloads without leaking connections.
  * Connects as the "web" user with ACL restricted to `api:*` keys.
- * TLS is enabled automatically for ElastiCache endpoints.
+ * TLS is enabled automatically for AWS-hosted Redis endpoints
+ * (`*.cache.amazonaws.com`).
  */
 export const getRedis = (): Redis => {
   if (!globalForRedis.onecliRedis) {

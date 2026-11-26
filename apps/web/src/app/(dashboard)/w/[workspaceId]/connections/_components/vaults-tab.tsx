@@ -2,7 +2,6 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -15,7 +14,7 @@ import { Button } from "@onecli/ui/components/button";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
 import { useVaultStatus } from "@/hooks/use-vault-status";
-import { withWorkspacePrefix } from "@/lib/navigation";
+import { useConnectionsHref } from "@/lib/settings-modal/use-connections-href";
 
 /** A vault provider rendered as a connect/manage card on the Vaults tab. */
 interface VaultProviderMeta {
@@ -24,6 +23,7 @@ interface VaultProviderMeta {
   description: string;
   iconSrc: string;
   iconSize: number;
+  /** The provider's setup page, under `/connections`. */
   vaultPath: string;
 }
 
@@ -35,7 +35,7 @@ const VAULT_PROVIDERS: VaultProviderMeta[] = [
       "Access credentials from your Bitwarden vault. The gateway fetches secrets at request time. Nothing is stored.",
     iconSrc: "/icons/bitwarden.svg",
     iconSize: 28,
-    vaultPath: "/connections/vaults/bitwarden",
+    vaultPath: "/vaults/bitwarden",
   },
   {
     provider: "onepassword",
@@ -44,7 +44,7 @@ const VAULT_PROVIDERS: VaultProviderMeta[] = [
       "Resolve secrets from 1Password with a service account. The gateway fetches them at request time. Nothing is stored.",
     iconSrc: "/icons/onepassword.svg",
     iconSize: 32,
-    vaultPath: "/connections/vaults/onepassword",
+    vaultPath: "/vaults/onepassword",
   },
 ];
 
@@ -67,7 +67,7 @@ const VaultProviderCard = ({
   iconSize,
   vaultPath,
 }: VaultProviderMeta) => {
-  const pathname = usePathname();
+  const href = useConnectionsHref();
   const { loading, isPaired, isReady, status } = useVaultStatus<{
     last_error: string | null;
   }>(provider);
@@ -155,13 +155,8 @@ const VaultProviderCard = ({
       <CardContent className="flex flex-1 flex-col">
         <CardDescription>{description}</CardDescription>
         <div className="mt-auto pt-4">
-          <Button
-            size="sm"
-            variant={isPaired ? "outline" : "default"}
-            className="w-full"
-            asChild
-          >
-            <Link href={withWorkspacePrefix(pathname, vaultPath)}>
+          <Button size="sm" variant="outline" asChild>
+            <Link href={href(vaultPath)}>
               {isPaired ? "Manage" : "Connect"}
             </Link>
           </Button>

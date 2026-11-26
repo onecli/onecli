@@ -32,6 +32,10 @@ export interface ScriptedText {
   text: string;
   /** Stream as these chunks, one per interval — a deliberately long turn. */
   slow?: { chunks: string[]; intervalMs: number };
+  /** The finish reason the reply ends with; `stop` when absent. A safety
+   * stop after real text (`content_filter`) is a reply cut short, not an
+   * empty one. */
+  finishReason?: string;
   /** Recorded on the request entry so tests can await a specific route. */
   tag?: string;
 }
@@ -47,7 +51,36 @@ export interface ScriptedToolCall {
   tag?: string;
 }
 
-export type ScriptedResponse = ScriptedText | ScriptedToolCall;
+/**
+ * A reply whose connection DROPS mid-stream after `partial`: the transient
+ * transport fault a runtime answers by rolling the partial attempt back and
+ * replaying the request. Only the first response should be scripted this
+ * way; the replay is a fresh request the script routes as it likes.
+ */
+export interface ScriptedCut {
+  kind: "cut";
+  partial: string;
+  tag?: string;
+}
+
+/**
+ * A reply with NO content at all, finished with `finishReason`: what a
+ * provider sends when the model declines (`content_filter`, the OpenAI-wire
+ * safety stop) or returns an empty answer (`stop`). The runtime ends the
+ * turn with nothing visible, which is the case the adapter must report
+ * instead of closing as a silent success.
+ */
+export interface ScriptedSilent {
+  kind: "silent";
+  finishReason: string;
+  tag?: string;
+}
+
+export type ScriptedResponse =
+  | ScriptedText
+  | ScriptedToolCall
+  | ScriptedCut
+  | ScriptedSilent;
 
 /**
  * Per-request director for scenario tests. Receives the LAST user message
@@ -78,6 +111,17 @@ export interface MockProvider {
     tag?: string;
     swarmToolDescription?: string;
     toolNames: string[];
+    /** The request's system/developer message text, joined — the only
+     * ground truth for "what instruction doc did the model see THIS turn". */
+    systemText: string;
+    /** The request's LAST user message, as the model saw it: the ground
+     * truth for what a steered message looked like once injected (its
+     * delivery-only frame included). */
+    lastUser: string;
+    /** Every user message the request carried, oldest first: the ground
+     * truth for what transcript the model was handed (a resumed session's
+     * earlier turns ride here). */
+    userTexts: string[];
   }[];
   close: () => Promise<void>;
 }
@@ -93,6 +137,28 @@ const toolNamesOf = (body: string): string[] => {
     );
   } catch {
     return [];
+  }
+};
+
+/** Every system/developer-role message's text, joined. */
+const systemTextOf = (body: string): string => {
+  try {
+    const parsed = JSON.parse(body) as {
+      messages?: {
+        role?: string;
+        content?: string | { type?: string; text?: string }[];
+      }[];
+    };
+    return (parsed.messages ?? [])
+      .filter((m) => m.role === "system" || m.role === "developer")
+      .map((m) =>
+        typeof m.content === "string"
+          ? m.content
+          : (m.content ?? []).map((c) => c.text ?? "").join("\n"),
+      )
+      .join("\n");
+  } catch {
+    return "";
   }
 };
 
@@ -125,20 +191,24 @@ const chunk = (text: string, finish: string | null) =>
   })}\n\n`;
 
 /** The last user message's text, however the body nests it. */
-const lastUserContent = (body: string): string => {
+const lastUserContent = (body: string): string =>
+  userContents(body).at(-1) ?? "";
+
+/** Every user message's text, oldest first, however the body nests it. */
+const userContents = (body: string): string[] => {
   try {
     const parsed = JSON.parse(body) as {
       messages?: { role?: string; content?: unknown }[];
     };
-    const last = [...(parsed.messages ?? [])]
-      .reverse()
-      .find((message) => message.role === "user");
-    if (!last) return "";
-    return typeof last.content === "string"
-      ? last.content
-      : JSON.stringify(last.content ?? "");
+    return (parsed.messages ?? [])
+      .filter((message) => message.role === "user")
+      .map((message) =>
+        typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content ?? ""),
+      );
   } catch {
-    return body;
+    return [body];
   }
 };
 
@@ -171,11 +241,24 @@ const serveScripted = (
     connection: "keep-alive",
   });
   res.write(rawChunk({ role: "assistant" }, null));
+  if (scripted.kind === "cut") {
+    // Stream the partial, then drop the socket with no finish and no
+    // [DONE]: to the runtime, a transport fault mid-response. The pause
+    // lets the partial reach the consumer first, so it is a real partial
+    // attempt to roll back, not an empty one.
+    res.write(rawChunk({ content: scripted.partial }, null));
+    setTimeout(() => res.socket?.destroy(), 300);
+    return;
+  }
   const finish = (reason: string) => {
     res.write(rawChunk({}, reason, true));
     res.write("data: [DONE]\n\n");
     res.end();
   };
+  if (scripted.kind === "silent") {
+    finish(scripted.finishReason);
+    return;
+  }
   if (scripted.kind === "tool_call") {
     if (scripted.textBefore)
       res.write(rawChunk({ content: scripted.textBefore }, null));
@@ -199,7 +282,7 @@ const serveScripted = (
   }
   if (!scripted.slow) {
     res.write(rawChunk({ content: scripted.text }, null));
-    finish("stop");
+    finish(scripted.finishReason ?? "stop");
     return;
   }
   const chunks = [...scripted.slow.chunks];
@@ -236,8 +319,11 @@ export const startMockProvider = (options: {
         }
         const swarmToolDescription = swarmToolDescriptionOf(body);
         const toolNames = toolNamesOf(body);
+        const systemText = systemTextOf(body);
+        const lastUser = lastUserContent(body);
+        const userTexts = userContents(body);
         const scripted = options.script?.({
-          lastUser: lastUserContent(body),
+          lastUser,
           index: served++,
         });
         if (scripted) {
@@ -246,6 +332,9 @@ export const startMockProvider = (options: {
             kind: "scripted",
             tag: scripted.tag,
             toolNames,
+            systemText,
+            lastUser,
+            userTexts,
             ...(swarmToolDescription !== undefined && {
               swarmToolDescription,
             }),
@@ -253,11 +342,14 @@ export const startMockProvider = (options: {
           serveScripted(res, scripted);
           return;
         }
-        const long = lastUserContent(body).includes(LONG_RUN_MARKER);
+        const long = lastUser.includes(LONG_RUN_MARKER);
         requests.push({
           at: Date.now(),
           kind: long ? "long" : "quick",
           toolNames,
+          systemText,
+          lastUser,
+          userTexts,
           ...(swarmToolDescription !== undefined && { swarmToolDescription }),
         });
         res.writeHead(200, {

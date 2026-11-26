@@ -19,7 +19,10 @@ export const flyioPermissions: AppPermissionDefinition = {
           name: "Get app",
           description: "Get details for a specific app",
           hostPattern: "api.machines.dev",
-          pathPattern: "/v1/apps/*",
+          // Trailing slash = exactly one segment: the app itself. A raw
+          // `/apps/*` prefix also matched `/secrets?show_secrets=true`, which
+          // returns the app's secret values.
+          pathPattern: "/v1/apps/*/",
           method: "GET",
         },
         {

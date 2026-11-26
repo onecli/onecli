@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use crate::{
-    last_segment, parse_json, path_segment_before, ApprovalSummary, RequestSummarizer,
+    last_segment, parse_json, path_segment_before, ApprovalSummary, RequestSummarizer, SummaryKind,
     SummaryRequest, MAX_ATTACHMENTS, MAX_SNIPPET_LEN,
 };
 
@@ -24,7 +24,7 @@ impl RequestSummarizer for OutlookMail {
         // (alongside `saveToSentItems`), but Graph also accepts the message fields
         // at the top level (docs Example 5). Handle both; borrow, don't clone.
         if m == "POST" && base.ends_with("/sendMail") {
-            let mut s = ApprovalSummary::new("Send email");
+            let mut s = ApprovalSummary::new("Send email").with_kind(SummaryKind::Email);
             if let Some(v) = req.body.and_then(parse_json) {
                 populate_from_message(&mut s, v.get("message").unwrap_or(&v));
             }
@@ -43,7 +43,7 @@ impl RequestSummarizer for OutlookMail {
 
         // POST .../messages — create a draft; message fields are at the top level.
         if m == "POST" && base.ends_with("/messages") {
-            let mut s = ApprovalSummary::new("Create draft");
+            let mut s = ApprovalSummary::new("Create draft").with_kind(SummaryKind::Email);
             if let Some(v) = req.body.and_then(parse_json) {
                 populate_from_message(&mut s, &v);
             }

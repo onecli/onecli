@@ -8,6 +8,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createServer as createTlsServer } from "node:https";
+import { lookup } from "node:dns/promises";
 import type { Duplex } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +25,40 @@ import { flattenHeaders } from "./http.js";
  *
  * It binds `127.0.0.1` explicitly: `localhost` would be resolved by Node with
  * verbatim DNS ordering and can answer `::1` first.
+ *
+ * It is ADDRESSED by name, never by that address. The caller is a sandbox
+ * container, where `127.0.0.1` is the container's own loopback: the sandbox
+ * env exempts it from the proxy (`NO_PROXY`), so a request to it would dial
+ * the container itself and never reach the gateway. A hostname is what real
+ * agent traffic carries, and it is the gateway, on the host, that resolves it
+ * to the stub.
  */
+
+/**
+ * The name the stub is reached by. `.test` is reserved for exactly this
+ * (RFC 2606): it never resolves on the public internet, so a machine that has
+ * not mapped it cannot leak a test request anywhere. The mapping is one
+ * `/etc/hosts` line, verified when a stub starts.
+ */
+export const UPSTREAM_HOST = "upstream.e2e.test";
+
+const BIND_ADDRESS = "127.0.0.1";
+
+/**
+ * Verify that `UPSTREAM_HOST` resolves to the stub's bind address on this
+ * machine, with the remedy in the failure. Loud and exact, never a skip: a
+ * scenario that cannot reach its upstream would otherwise fail as a fetch
+ * error inside the sandbox, three layers away from the cause.
+ */
+const assertUpstreamAlias = async (): Promise<void> => {
+  const addresses = await lookup(UPSTREAM_HOST, { all: true }).catch(() => []);
+  if (addresses.some((a) => a.address === BIND_ADDRESS)) return;
+  throw new Error(
+    `${UPSTREAM_HOST} does not resolve to ${BIND_ADDRESS} on this machine. The stub upstream is addressed by name; map it once:\n` +
+      `  echo "${BIND_ADDRESS} ${UPSTREAM_HOST}" | sudo tee -a /etc/hosts`,
+  );
+};
+
 export interface RecordedRequest {
   readonly method: string;
   readonly url: string;
@@ -86,9 +120,10 @@ export interface StubStream {
 }
 
 export interface StubUpstream {
+  /** [`UPSTREAM_HOST`]: the name a request's target carries. */
   readonly host: string;
   readonly port: number;
-  /** `127.0.0.1:<port>` — what a request's Host header and target carry. */
+  /** `<host>:<port>` — what a request's Host header and target carry. */
   readonly authority: string;
   url(path: string): string;
   /** What the stub answers with. Defaults to `200 {}`. */
@@ -205,11 +240,11 @@ const record = (req: IncomingMessage, body: string): RecordedRequest => {
  *
  * Generated with `openssl` rather than a Node library: it is present on both
  * macOS and the CI runner, and this avoids adding a dependency for four lines of
- * work. The IP SAN matters — TLS clients omit SNI when connecting to an address,
- * so identity is checked against the address rather than a name.
+ * work. The DNS SAN names the host the gateway dials; the IP SAN keeps the
+ * stub honest for a client that connects by address (which omits SNI).
  *
  * Validity is irrelevant to the gateway here (it is told to skip verification
- * for 127.0.0.1), but issuing a correct cert keeps the stub honest for anything
+ * for the host), but issuing a correct cert keeps the stub honest for anything
  * that does verify.
  */
 const selfSignedCert = (): { key: string; cert: string; dir: string } => {
@@ -231,9 +266,9 @@ const selfSignedCert = (): { key: string; cert: string; dir: string } => {
       "-days",
       "1",
       "-subj",
-      "/CN=127.0.0.1",
+      `/CN=${UPSTREAM_HOST}`,
       "-addext",
-      "subjectAltName=IP:127.0.0.1",
+      `subjectAltName=DNS:${UPSTREAM_HOST},IP:${BIND_ADDRESS}`,
     ],
     // openssl narrates key generation on stderr; keep the test output readable.
     { stdio: ["ignore", "ignore", "ignore"] },
@@ -402,7 +437,8 @@ export const startStubUpstream = async (
     );
   }
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await assertUpstreamAlias();
+  await new Promise<void>((resolve) => server.listen(0, BIND_ADDRESS, resolve));
   const address = server.address();
   if (address === null || typeof address === "string") {
     throw new Error(
@@ -410,11 +446,11 @@ export const startStubUpstream = async (
     );
   }
   const port = address.port;
-  const authority = `127.0.0.1:${String(port)}`;
+  const authority = `${UPSTREAM_HOST}:${String(port)}`;
   const scheme = tls === undefined ? "http" : "https";
 
   return {
-    host: "127.0.0.1",
+    host: UPSTREAM_HOST,
     port,
     authority,
     url: (path: string) =>

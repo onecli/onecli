@@ -23,9 +23,12 @@ const services = vi.hoisted(() => ({
   updateAgent: vi.fn(),
   deleteAgent: vi.fn(),
   regenerateAgentToken: vi.fn(),
+  restartAgent: vi.fn(),
   listAgentsWithGrantsSummary: vi.fn(),
   setAgentImage: vi.fn(),
   clearAgentImage: vi.fn(),
+  warmAgentSandbox: vi.fn(),
+  getAgentSandboxStatus: vi.fn(),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -38,17 +41,28 @@ vi.mock("@onecli/db", () => ({
           : null,
       findFirst: async () => null,
     },
-    user: { findUnique: async () => ({ email: "admin@example.com" }) },
+    // Session auth: `externalAuthId` → the user row, then the memberships
+    // list the workspace lookup fences on. API-key auth reads only the email.
+    user: {
+      findUnique: async ({ select }: { select?: Record<string, unknown> }) =>
+        select?.organizationMemberships
+          ? { organizationMemberships: [{ organizationId: "org-1" }] }
+          : { id: "user-1", email: "admin@example.com" },
+    },
     organizationMember: {
       findUnique: async () => ({
         organizationId: "org-1",
         userId: "user-1",
         role: "owner",
       }),
+      findFirst: async () => ({ organizationId: "org-1", userId: "user-1" }),
     },
     workspace: {
       findFirst: async ({ where }: { where: { id: string } }) =>
-        where.id === "p1" ? { id: "p1" } : null,
+        where.id === "p1"
+          ? { id: "p1", organizationId: "org-1", createdByUserId: "user-1" }
+          : null,
+      findUnique: async () => ({ organizationId: "org-1" }),
     },
     auditLog: { create: auditCreate },
   },
@@ -62,10 +76,22 @@ vi.mock("../services/agent-service", () => ({
   updateAgent: services.updateAgent,
   deleteAgent: services.deleteAgent,
   regenerateAgentToken: services.regenerateAgentToken,
+  restartAgent: services.restartAgent,
 }));
 
 vi.mock("../services/grants-summary-service", () => ({
   listAgentsWithGrantsSummary: services.listAgentsWithGrantsSummary,
+}));
+
+vi.mock("../services/sandbox-warm-service", () => ({
+  warmAgentSandbox: services.warmAgentSandbox,
+}));
+
+// Only the status read is replaced; the rest of the service (the runner
+// routes' start/stop machinery createApiApp mounts) stays real.
+vi.mock("../services/sandbox-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/sandbox-service")>()),
+  getAgentSandboxStatus: services.getAgentSandboxStatus,
 }));
 
 vi.mock("../services/agent-image-service", () => ({
@@ -79,7 +105,11 @@ vi.mock("../services/agent-image-service", () => ({
 const { createApiApp } = await import("../app");
 const { ServiceError } = await import("../services/errors");
 
-const app = createApiApp({ getSession: async () => null });
+// The session provider is a module singleton (`initSession`), so ONE app,
+// and the session it resolves is switched per test: null for the API-key
+// cases (the file's default), a dashboard user for the session-only route.
+let currentSession: { id: string; email: string } | null = null;
+const app = createApiApp({ getSession: async () => currentSession });
 
 const AUTH = {
   authorization: `Bearer ${ORG_KEY}`,
@@ -104,6 +134,8 @@ beforeEach(() => {
   services.createAgent.mockResolvedValue(CREATED);
   services.updateAgent.mockResolvedValue(undefined);
   services.listAgents.mockResolvedValue([]);
+  services.warmAgentSandbox.mockResolvedValue(undefined);
+  services.getAgentSandboxStatus.mockResolvedValue({ status: "stopped" });
 });
 
 describe("POST /v1/agents", () => {
@@ -170,6 +202,40 @@ describe("POST /v1/agents", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: expect.any(String) });
+    expect(services.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("creates a hosted agent from a name alone: the identifier is the service's", async () => {
+    const res = await app.request("/v1/agents", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ name: "Donna", kind: "hosted" }),
+    });
+    expect(res.status).toBe(201);
+    expect(services.createAgent).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({
+        name: "Donna",
+        identifier: undefined,
+        kind: "hosted",
+      }),
+      "user-1",
+    );
+    // No identifier to look up: a derived one is always a new agent, so the
+    // quota gate runs and the existence probe is skipped.
+    expect(services.agentExistsByIdentifier).not.toHaveBeenCalled();
+  });
+
+  it("400s a BYO create without an identifier (the handle machines pin to)", async () => {
+    const res = await app.request("/v1/agents", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ name: "N" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: "identifier is required for byo agents",
+    });
     expect(services.createAgent).not.toHaveBeenCalled();
   });
 
@@ -390,21 +456,136 @@ describe("PUT/DELETE /v1/agents/:agentId/image", () => {
   });
 });
 
-describe("GET /v1/agents", () => {
-  it("passes the service list through, kind included", async () => {
-    const row = {
-      id: "a1",
-      name: "A",
-      identifier: "a",
-      accessToken: "aoc_x",
-      kind: "hosted",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      lastSeenAt: null,
-    };
-    services.listAgents.mockResolvedValue([row]);
-    const res = await app.request("/v1/agents", { headers: AUTH });
+describe("POST /v1/agents/:agentId/restart", () => {
+  it("requires auth", async () => {
+    const res = await app.request("/v1/agents/a1/restart", { method: "POST" });
+    expect(res.status).toBe(401);
+    expect(services.restartAgent).not.toHaveBeenCalled();
+  });
+
+  it("restarts workspace-fenced, audited, and answers success", async () => {
+    services.restartAgent.mockResolvedValue(undefined);
+    const res = await app.request("/v1/agents/a1/restart", {
+      method: "POST",
+      headers: AUTH,
+    });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([row]);
+    expect(await res.json()).toEqual({ success: true });
+    expect(services.restartAgent).toHaveBeenCalledWith("p1", "a1");
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "restart",
+          service: "agent",
+          source: "api",
+          metadata: { agentId: "a1" },
+        }),
+      }),
+    );
+  });
+
+  it("passes the service's refusal through and audits nothing", async () => {
+    auditCreate.mockClear();
+    services.restartAgent.mockRejectedValue(
+      new ServiceError("UNPROCESSABLE", "Only hosted agents can be restarted"),
+    );
+    const res = await app.request("/v1/agents/a1/restart", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.message).toBe(
+      "Only hosted agents can be restarted",
+    );
+    expect(auditCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /v1/agents/:agentId/regenerate-token", () => {
+  // The dashboard no longer offers rotation; the CLI/API is its only door,
+  // so the route itself must leave the audit trail.
+  it("rotates workspace-fenced and audits ids only, never the token", async () => {
+    auditCreate.mockClear();
+    services.regenerateAgentToken.mockResolvedValue({
+      accessToken: "aoc_rotated_value",
+    });
+    const res = await app.request("/v1/agents/a1/regenerate-token", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(200);
+    expect(services.regenerateAgentToken).toHaveBeenCalledWith("p1", "a1");
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "regenerate",
+          service: "agent",
+          source: "api",
+          metadata: { agentId: "a1" },
+        }),
+      }),
+    );
+    expect(JSON.stringify(auditCreate.mock.calls)).not.toContain(
+      "aoc_rotated_value",
+    );
+  });
+
+  it("audits nothing when the agent is not found", async () => {
+    auditCreate.mockClear();
+    services.regenerateAgentToken.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "Agent not found"),
+    );
+    const res = await app.request("/v1/agents/a1/regenerate-token", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(404);
+    expect(auditCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /v1/agents/:agentId/wake", () => {
+  const SESSION = { "x-workspace-id": "p1" };
+
+  it("warms the agent for a dashboard session and answers 204 with no body", async () => {
+    // The session resolves to user-1, whose org membership and workspace
+    // the db mock above already answer.
+    currentSession = { id: "user-1", email: "admin@example.com" };
+    try {
+      const res = await app.request("/v1/agents/a1/wake", {
+        method: "POST",
+        headers: SESSION,
+      });
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+      expect(services.warmAgentSandbox).toHaveBeenCalledWith("p1", "a1");
+    } finally {
+      currentSession = null;
+    }
+  });
+
+  it("refuses an API-key caller: a program's call is not a person about to type", async () => {
+    const res = await app.request("/v1/agents/a1/wake", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(403);
+    expect(services.warmAgentSandbox).not.toHaveBeenCalled();
+  });
+
+  it("requires auth", async () => {
+    const res = await app.request("/v1/agents/a1/wake", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /v1/agents/:agentId/sandbox", () => {
+  it("answers the machine's status, workspace-fenced through the service", async () => {
+    services.getAgentSandboxStatus.mockResolvedValueOnce({ status: "running" });
+    const res = await app.request("/v1/agents/a1/sandbox", { headers: AUTH });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "running" });
+    expect(services.getAgentSandboxStatus).toHaveBeenCalledWith("p1", "a1");
   });
 });
 
@@ -428,15 +609,5 @@ describe("the default-agent surface is gone", () => {
     services.getAgentDetail.mockResolvedValue({ id: "a1", name: "A" });
     const res = await app.request("/v1/agents/a1", { headers: AUTH });
     expect(res.status).toBe(200);
-  });
-
-  it("deletes the last agent — no default guard left", async () => {
-    services.deleteAgent.mockResolvedValue(undefined);
-    const res = await app.request("/v1/agents/a1", {
-      method: "DELETE",
-      headers: AUTH,
-    });
-    expect(res.status).toBe(204);
-    expect(services.deleteAgent).toHaveBeenCalledWith("p1", "a1");
   });
 });

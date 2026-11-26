@@ -1,0 +1,19 @@
+#!/bin/sh
+# OneCLI: the sandbox browser, as the agent drives it.
+#
+#   onecli-browser <verb> [args]     (`onecli-browser help` lists the verbs)
+#
+# A thin shim over the driver the agent image ships beside the supervisor:
+# the command (one JSON line to a background driver over a unix socket in
+# the agent's home) and the driver it starts when none answers. Both live
+# in /app, root-owned, so an agent cannot rewrite its own browser. The
+# driver attaches to one browser per machine on a profile under the home
+# and keeps that attachment between calls, which is what makes each verb a
+# socket round-trip instead of a process start, a library load, and a CDP
+# handshake. See /etc/onecli/README.browser.
+#
+# --no-warnings: the sandbox sets NODE_USE_ENV_PROXY=1 so every Node process
+# honours the gateway proxy, and Node prints an "EnvHttpProxyAgent is
+# experimental" warning for it on every start. Printed by the command, it
+# would land in the agent's output on every verb and read as an error.
+exec node --no-warnings /app/apps/sandbox-supervisor/dist/browser-driver/cli.mjs "$@"

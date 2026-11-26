@@ -15,20 +15,21 @@ const state = vi.hoisted(() => ({
   view: undefined as unknown,
   attachData: undefined as unknown,
   manifest: { transport: "events", material: { name: "manifest" } } as unknown,
+  search: "",
+  onConnected: undefined as
+    | ((event: { provider?: string; pending?: boolean }) => void)
+    | undefined,
 }));
 
 const mocks = vi.hoisted(() => ({
   attach: vi.fn(),
   complete: vi.fn(),
   detach: vi.fn(),
+  replace: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-channels", () => ({
-  // The contacts section renders nothing on an empty list — inert here;
-  // its own behavior is covered by its own test.
-  useAgentContacts: () => ({ data: { contacts: [] } }),
-  useSetContactPolicy: () => ({ mutate: vi.fn(), isPending: false }),
-  useDeleteContact: () => ({ mutate: vi.fn(), isPending: false }),
   useAgentChannels: () => ({
     data: state.view,
     isPending: state.view === undefined,
@@ -41,6 +42,7 @@ vi.mock("@/hooks/use-channels", () => ({
     data: state.attachData,
   }),
   useCompleteChannel: () => ({ mutate: mocks.complete, isPending: false }),
+  useSyncAgentIcon: () => ({ mutate: vi.fn(), isPending: false }),
   useDetachChannel: () => ({ mutate: mocks.detach, isPending: false }),
   useChannelManifest: () => ({ data: state.manifest, isPending: false }),
 }));
@@ -50,12 +52,22 @@ vi.mock("../../_components/agent-page-frame", () => ({
 }));
 
 vi.mock("@/hooks/use-app-connected", () => ({
-  useAppMessages: () => {},
+  useAppMessages: ({
+    onConnected,
+  }: {
+    onConnected: (event: { provider?: string; pending?: boolean }) => void;
+  }) => {
+    state.onConnected = onConnected;
+  },
+}));
+
+vi.mock("sonner", () => ({
+  toast: { success: mocks.toastSuccess, error: vi.fn() },
 }));
 
 vi.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams(""),
-  useRouter: () => ({ replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(state.search),
+  useRouter: () => ({ replace: mocks.replace }),
   usePathname: () => "/w/p1/agents/ag-1/channels",
 }));
 
@@ -100,8 +112,11 @@ const activePresence = (
 beforeEach(() => {
   state.view = view();
   state.attachData = undefined;
+  state.search = "";
   mocks.attach.mockClear();
   mocks.complete.mockClear();
+  mocks.replace.mockClear();
+  mocks.toastSuccess.mockClear();
   // The events arm opens its install popup synchronously in the click; jsdom
   // leaves `window.open` unimplemented, so stub it (the popup dance itself is
   // covered in slack-attach-card.test.tsx).
@@ -109,6 +124,42 @@ beforeEach(() => {
     "open",
     vi.fn(() => null),
   );
+});
+
+describe("the install-return landing", () => {
+  it("?connected says connected and strips the marker", () => {
+    state.search = "connected=slack&tab=x";
+    renderSection();
+
+    expect(mocks.toastSuccess).toHaveBeenCalledWith("Slack connected");
+    expect(mocks.replace).toHaveBeenCalledWith(
+      "/w/p1/agents/ag-1/channels?tab=x",
+      { scroll: false },
+    );
+  });
+
+  it("?installed says one step is left, never connected, and strips the marker", () => {
+    state.search = "installed=slack";
+    renderSection();
+
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      "Installed in Slack. One step left to finish.",
+    );
+    expect(mocks.replace).toHaveBeenCalledWith("/w/p1/agents/ag-1/channels", {
+      scroll: false,
+    });
+  });
+
+  it("a popup's pending message says one step is left", () => {
+    renderSection();
+
+    state.onConnected?.({ provider: "slack", pending: true });
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      "Installed in Slack. One step left to finish.",
+    );
+    state.onConnected?.({ provider: "slack" });
+    expect(mocks.toastSuccess).toHaveBeenLastCalledWith("Slack connected");
+  });
 });
 
 describe("the guided events arm", () => {
@@ -170,6 +221,49 @@ describe("the guided socket arm", () => {
       expect.anything(),
     );
   });
+
+  it("a consent install the SERVER flags as awaiting asks for the app-level token alone", () => {
+    state.view = view({
+      posture: { transport: "socket", available: ["events", "socket"] },
+      presences: [
+        activePresence({
+          status: "pending_setup",
+          transport: "socket",
+          externalId: "A900",
+          awaitingTransportCredential: true,
+        }),
+      ],
+    });
+    renderSection();
+
+    expect(screen.getByText("Installed in Slack")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Open app settings/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps/A900/general");
+    expect(screen.queryByLabelText("Bot token")).not.toBeInTheDocument();
+  });
+
+  it("a DETACHED socket app with a bot identity is NOT taken for a waiting install", () => {
+    // A detach keeps the row's identity but revokes its install: without the
+    // server's flag the card must resume, not offer a doomed one-field paste.
+    state.view = view({
+      posture: { transport: "socket", available: ["events", "socket"] },
+      presences: [
+        activePresence({
+          status: "pending_setup",
+          transport: "socket",
+          identityRef: "U777",
+          awaitingTransportCredential: false,
+        }),
+      ],
+    });
+    renderSection();
+
+    expect(screen.queryByText("Installed in Slack")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Resume setup" }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("no org credential", () => {
@@ -179,7 +273,7 @@ describe("no org credential", () => {
 
     expect(
       screen.getByRole("link", { name: "Set up Slack for the organization" }),
-    ).toHaveAttribute("href", "/org/org-1/channels");
+    ).toHaveAttribute("href", "/w/p1/agents/ag-1/channels?settings=slack");
     // The scary manual arm is gone from the events posture entirely.
     expect(
       screen.queryByText("Create a Slack app from this manifest"),
@@ -217,6 +311,96 @@ describe("no org credential", () => {
       { botToken: "xoxb-bot", appId: "A999", appToken: "xapp-1" },
       expect.anything(),
     );
+  });
+
+  it("a REMOVED app on the SOCKET floor re-attaches THAT app: no create step, no App ID to retype, the known id goes on the wire", async () => {
+    // Seen on a real-browser walk: after the app was deleted at Slack, the
+    // floor under the removed banner still read "1. Create a Slack app from
+    // this manifest" with an App ID field, as if nothing existed.
+    const user = userEvent.setup();
+    state.view = view({
+      orgIntegrations: [],
+      posture: { transport: "socket" },
+      // The removed presence was stamped socket, so the card resumes on it.
+      presences: [activePresence({ status: "disabled", transport: "socket" })],
+    });
+    renderSection();
+
+    expect(
+      screen.getByText(/@donna was removed from the workspace/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Create a Slack app from this manifest"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Paste the app's tokens to reconnect it"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Open the app on api.slack.com/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps/A123/general");
+
+    await user.type(screen.getByLabelText("Bot token"), "xoxb-fresh");
+    await user.type(screen.getByLabelText("App-level token"), "xapp-fresh");
+    await user.click(screen.getByRole("button", { name: "Re-attach" }));
+
+    expect(mocks.complete).toHaveBeenCalledWith(
+      { botToken: "xoxb-fresh", appId: "A123", appToken: "xapp-fresh" },
+      expect.anything(),
+    );
+  });
+
+  it("a DETACHED app on the SOCKET floor reconnects THAT app too, with Start over to use a different one", async () => {
+    // The reported loop: after a detach the floor read "1. Create a Slack app
+    // from this manifest" with an App ID field, as if no app existed, and a
+    // different App ID typed there was silently bound to the old app.
+    const user = userEvent.setup();
+    state.view = view({
+      orgIntegrations: [],
+      posture: { transport: "socket" },
+      presences: [
+        activePresence({ status: "pending_setup", transport: "socket" }),
+      ],
+    });
+    renderSection();
+
+    expect(
+      screen.queryByText("Create a Slack app from this manifest"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Paste the app's tokens to reconnect it"),
+    ).toBeInTheDocument();
+    // The floor has no Resume button, so the hint must not name one.
+    expect(screen.queryByText(/click Resume setup/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start over" }),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Bot token"), "xoxb-same");
+    await user.type(screen.getByLabelText("App-level token"), "xapp-same");
+    await user.click(screen.getByRole("button", { name: "Re-attach" }));
+
+    expect(mocks.complete).toHaveBeenCalledWith(
+      { botToken: "xoxb-same", appId: "A123", appToken: "xapp-same" },
+      expect.anything(),
+    );
+  });
+});
+
+describe("act-as-you lives on Contacts", () => {
+  it("renders neither the read card nor a link to Contacts (the section sits on Contacts)", () => {
+    state.view = view({ presences: [activePresence()] });
+    renderSection();
+
+    expect(screen.getByText("@donna")).toBeInTheDocument();
+    expect(screen.queryByText(/can read$/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Connect your Slack" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: /reads and sends as you/ }),
+    ).toBeNull();
   });
 });
 
@@ -271,6 +455,70 @@ describe("the attached card", () => {
     // The rest of the card stays — messaging still works.
     expect(
       screen.getByRole("link", { name: /Open in Slack/ }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("a presence the workspace REMOVED on the Slack side", () => {
+  // plans/channel-aware-agents.md: Slack's app_uninstalled / tokens_revoked
+  // flip the row to `disabled`. The card must SAY so (not vanish, not read
+  // "Connected"), and offer the two honest exits.
+  it("explains the removal by handle and offers Re-attach and Detach — never the connected face", () => {
+    state.view = view({ presences: [activePresence({ status: "disabled" })] });
+    renderSection();
+
+    expect(
+      screen.getByText(/@donna was removed from the workspace/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Messaging is paused/)).toBeInTheDocument();
+    expect(screen.getByText("Re-attach to Slack")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Re-attach" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Detach" })).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open in Slack/ })).toBeNull();
+    // Not the half-finished-setup story either.
+    expect(screen.queryByText(/Not finished yet/)).toBeNull();
+  });
+
+  it("Re-attach resumes the SAME app: the create fires on the row's stamped transport", async () => {
+    state.view = view({
+      presences: [activePresence({ status: "disabled", transport: "socket" })],
+      posture: { transport: "events", available: ["events", "socket"] },
+    });
+    renderSection();
+
+    // The row pinned the mode: no picker while resuming.
+    expect(screen.queryByText("Connection mode")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Re-attach" }));
+    expect(mocks.attach).toHaveBeenCalledWith(
+      expect.objectContaining({ transport: "socket" }),
+      expect.anything(),
+    );
+  });
+
+  it("Detach on a removed app asks first — the same confirmation as the attached face, never an immediate click", async () => {
+    state.view = view({ presences: [activePresence({ status: "disabled" })] });
+    renderSection();
+
+    await userEvent.click(screen.getByRole("button", { name: "Detach" }));
+    // Nothing fired yet: the dialog is the destructive-action gate.
+    expect(mocks.detach).not.toHaveBeenCalled();
+    expect(screen.getByText("Detach Slack?")).toBeInTheDocument();
+    // The handle names the app in the delete opt-in, like the attached face.
+    expect(
+      screen.getByLabelText("Also delete the Slack app (@donna)"),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to a generic subject when the handle is unknown", () => {
+    state.view = view({
+      presences: [activePresence({ status: "disabled", identityName: null })],
+    });
+    renderSection();
+    expect(
+      screen.getByText(/This agent's Slack app was removed from the workspace/),
     ).toBeInTheDocument();
   });
 });

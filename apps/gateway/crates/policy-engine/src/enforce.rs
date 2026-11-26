@@ -26,6 +26,7 @@ use policy::{check_rate_limit, ConditionBody, MatchedRule, PolicyDecision};
 
 use super::assemble::assemble_v2;
 use super::evaluate::{evaluate_outcome, Outcome};
+use super::secret_reads::secret_read;
 use super::types::{Action, NewRule, PolicyRequest, RateWindow, Scope};
 
 /// Whether any loaded v2 rule needs THIS request's body to evaluate - the
@@ -302,6 +303,11 @@ async fn decision_for_rule(
 /// (pre-rewrite) rule-match host, stripped here as defense-in-depth. The decision
 /// comes back WITH the matched rule (rule- or default-decided; `None` for a plain
 /// allow) so telemetry can attribute it.
+///
+/// A request that returns a secret ([`secret_read`]) needs approval whenever
+/// the rules would let it through: no rule holds it, so it names none
+/// (an empty `rule_id`, no matched rule). A block still blocks, a rule that
+/// asks keeps its own approval, and a rate limit is never counted for it.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate(
     proxy_ctx: &ProxyContext,
@@ -327,14 +333,124 @@ pub async fn evaluate(
         return (PolicyDecision::Allow, None);
     };
     let agent_token = proxy_ctx.agent_token.as_str();
+    let (rules, request) = policy_input(
+        agent_id,
+        host,
+        method,
+        path,
+        has_injections,
+        is_llm_host,
+        winning_connection_id,
+        v2,
+    );
 
+    let matched_of = |rule: &NewRule| MatchedRule {
+        logical_id: rule.logical_id.clone(),
+        name: rule.name.clone(),
+        scope: match rule.scope {
+            Scope::Organization => "organization".to_string(),
+            Scope::Workspace => "workspace".to_string(),
+        },
+    };
+    let returns_secret = secret_read(host, path, has_injections).is_some();
+    let held_for_secret = || {
+        (
+            PolicyDecision::ManualApproval {
+                rule_id: String::new(),
+            },
+            None,
+        )
+    };
+    match evaluate_outcome(&rules, &request, body) {
+        Outcome::Rule(rule)
+            if returns_secret && rule.action == Action::Allow && !rule.require_approval =>
+        {
+            held_for_secret()
+        }
+        Outcome::Allow if returns_secret => held_for_secret(),
+        Outcome::Rule(rule) => (
+            decision_for_rule(rule, org_id, workspace_id, agent_token, cache).await,
+            Some(matched_of(rule)),
+        ),
+        Outcome::DenyDefault(default_rule) => (
+            PolicyDecision::BlockedByDefaultPolicy,
+            default_rule.map(matched_of),
+        ),
+        Outcome::Allow => (PolicyDecision::Allow, None),
+    }
+}
+
+/// Would the agent's own rules PLAINLY allow this request (no approval, no
+/// rate limit, no block, no deny-default)? For a gateway-internal read made on
+/// the agent's behalf (e.g. resolving a record id to a name for an approval
+/// card): the gateway may only read what the agent could read itself.
+///
+/// Side-effect free: a rate-limited allow is answered `false` WITHOUT touching
+/// its counter (so the probe never spends the agent's budget), and anything but
+/// an unconditional allow is `false` (fail closed), a request that returns a
+/// secret included ([`secret_read`]). Bodyless: the probe is a GET, so a rule
+/// whose conditions need a body resolves by its own polarity.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn would_allow(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    has_injections: bool,
+    is_llm_host: bool,
+    winning_connection_id: Option<&str>,
+    v2: &PolicyV2Rules,
+) -> bool {
+    let (Some(_), Some(_), Some(agent_id)) = (
+        proxy_ctx.organization_id.as_deref(),
+        proxy_ctx.workspace_id.as_deref(),
+        proxy_ctx.agent_id.as_deref(),
+    ) else {
+        return false;
+    };
+    if secret_read(host, path, has_injections).is_some() {
+        return false;
+    }
+    let (rules, request) = policy_input(
+        agent_id,
+        host,
+        method,
+        path,
+        has_injections,
+        is_llm_host,
+        winning_connection_id,
+        v2,
+    );
+    match evaluate_outcome(&rules, &request, ConditionBody::None) {
+        Outcome::Rule(rule) => {
+            rule.action == Action::Allow && !rule.require_approval && rule.rate_limit.is_none()
+        }
+        Outcome::DenyDefault(_) => false,
+        Outcome::Allow => true,
+    }
+}
+
+/// The rule set and request the first-match engine decides over, shared by
+/// [`evaluate`] and [`would_allow`] so the probe can never judge a different
+/// request than the real decision would.
+#[allow(clippy::too_many_arguments)]
+fn policy_input(
+    agent_id: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    has_injections: bool,
+    is_llm_host: bool,
+    winning_connection_id: Option<&str>,
+    v2: &PolicyV2Rules,
+) -> (Vec<NewRule>, PolicyRequest) {
     let rules = assemble_v2(
         &v2.org,
         &v2.workspace,
         &v2.secret_hosts,
         &v2.connection_providers,
     );
-
     let request = PolicyRequest {
         host: strip_port(host).to_string(),
         path: path.to_string(),
@@ -346,26 +462,7 @@ pub async fn evaluate(
         is_llm_host,
         winning_connection_id: winning_connection_id.map(str::to_string),
     };
-
-    let matched_of = |rule: &NewRule| MatchedRule {
-        logical_id: rule.logical_id.clone(),
-        name: rule.name.clone(),
-        scope: match rule.scope {
-            Scope::Organization => "organization".to_string(),
-            Scope::Workspace => "workspace".to_string(),
-        },
-    };
-    match evaluate_outcome(&rules, &request, body) {
-        Outcome::Rule(rule) => (
-            decision_for_rule(rule, org_id, workspace_id, agent_token, cache).await,
-            Some(matched_of(rule)),
-        ),
-        Outcome::DenyDefault(default_rule) => (
-            PolicyDecision::BlockedByDefaultPolicy,
-            default_rule.map(matched_of),
-        ),
-        Outcome::Allow => (PolicyDecision::Allow, None),
-    }
+    (rules, request)
 }
 
 #[cfg(test)]
@@ -650,5 +747,267 @@ mod body_buffer_tests {
             "api.anthropic.com",
             "/v1/messages"
         ));
+    }
+}
+
+#[cfg(test)]
+mod would_allow_tests {
+    use super::*;
+    use db::{PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow};
+    use sqlx::types::Json;
+
+    const HOST: &str = "acme.my.salesforce.com";
+    const QUERY: &str = "/services/data/v60.0/query?q=SELECT+Id%2C+Name+FROM+Account";
+
+    fn ctx() -> ProxyContext {
+        ProxyContext {
+            workspace_id: Some("w1".into()),
+            organization_id: Some("o1".into()),
+            agent_id: Some("a1".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "aoc_t".into(),
+        }
+    }
+
+    fn network_rule(
+        name: &str,
+        action: &str,
+        require_approval: bool,
+        rate_limit: Option<i32>,
+        is_default: bool,
+    ) -> PolicyRuleV2Row {
+        PolicyRuleV2Row {
+            id: name.into(),
+            logical_id: name.into(),
+            name: name.into(),
+            source: "custom".into(),
+            priority: 1,
+            is_default,
+            action: action.into(),
+            rate_limit,
+            rate_limit_window: rate_limit.map(|_| "minute".to_string()),
+            require_approval,
+            conditions: None,
+            identities: Json(vec![PolicyIdentityRow {
+                agent_id: Some("a1".into()),
+                user_id: None,
+                group_id: None,
+            }]),
+            targets: Json(if is_default {
+                Vec::new()
+            } else {
+                vec![PolicyTargetRow {
+                    kind: "network".into(),
+                    app_provider: None,
+                    app_tools: Vec::new(),
+                    app_connection_scope: None,
+                    app_connection_id: None,
+                    secret_id: None,
+                    secret_scope: None,
+                    host_pattern: Some(HOST.into()),
+                    path_pattern: Some("/services/data/v*/query*".into()),
+                    method: Some("GET".into()),
+                }]
+            }),
+        }
+    }
+
+    fn probe(workspace: Vec<PolicyRuleV2Row>) -> bool {
+        let v2 = PolicyV2Rules {
+            workspace,
+            ..Default::default()
+        };
+        would_allow(&ctx(), HOST, "GET", QUERY, true, false, None, &v2)
+    }
+
+    #[test]
+    fn only_a_plain_allow_permits_the_internal_read() {
+        assert!(probe(vec![network_rule(
+            "allow", "allow", false, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "ask", "allow", true, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "rate",
+            "allow",
+            false,
+            Some(5),
+            false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "block", "block", false, None, false
+        )]));
+        assert!(!probe(vec![network_rule(
+            "deny", "block", false, None, true
+        )]));
+    }
+
+    #[test]
+    fn a_context_without_identity_never_reads() {
+        let mut c = ctx();
+        c.agent_id = None;
+        let v2 = PolicyV2Rules {
+            workspace: vec![network_rule("allow", "allow", false, None, false)],
+            ..Default::default()
+        };
+        assert!(!would_allow(&c, HOST, "GET", QUERY, true, false, None, &v2));
+    }
+}
+
+#[cfg(test)]
+mod secret_read_floor_tests {
+    use super::*;
+    use db::{PolicyIdentityRow, PolicyRuleV2Row, PolicyTargetRow};
+    use sqlx::types::Json;
+
+    const GH: &str = "api.github.com";
+    const ALERTS: &str = "/repos/acme/web/secret-scanning/alerts?state=open";
+
+    fn ctx() -> ProxyContext {
+        ProxyContext {
+            workspace_id: Some("w1".into()),
+            organization_id: Some("o1".into()),
+            agent_id: Some("a1".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "aoc_t".into(),
+        }
+    }
+
+    /// One rule for the agent on every GitHub API path.
+    fn rule(action: &str, require_approval: bool, rate_limit: Option<i32>) -> PolicyRuleV2Row {
+        PolicyRuleV2Row {
+            id: "r1".into(),
+            logical_id: "lr1".into(),
+            name: "github".into(),
+            source: "custom".into(),
+            priority: 1,
+            is_default: false,
+            action: action.into(),
+            rate_limit,
+            rate_limit_window: rate_limit.map(|_| "minute".to_string()),
+            require_approval,
+            conditions: None,
+            identities: Json(vec![PolicyIdentityRow {
+                agent_id: Some("a1".into()),
+                user_id: None,
+                group_id: None,
+            }]),
+            targets: Json(vec![PolicyTargetRow {
+                kind: "network".into(),
+                app_provider: None,
+                app_tools: Vec::new(),
+                app_connection_scope: None,
+                app_connection_id: None,
+                secret_id: None,
+                secret_scope: None,
+                host_pattern: Some(GH.into()),
+                path_pattern: Some("/*".into()),
+                method: None,
+            }]),
+        }
+    }
+
+    fn rules(rows: Vec<PolicyRuleV2Row>) -> PolicyV2Rules {
+        PolicyV2Rules {
+            workspace: rows,
+            ..Default::default()
+        }
+    }
+
+    /// The live decision on a GET of `path`, credentialed or not.
+    async fn decide(
+        rows: Vec<PolicyRuleV2Row>,
+        path: &str,
+        has_injections: bool,
+        cache: &dyn CacheStore,
+    ) -> (PolicyDecision, Option<MatchedRule>) {
+        let v2 = rules(rows);
+        let none = ConditionBody::None;
+        evaluate(
+            &ctx(),
+            GH,
+            "GET",
+            path,
+            none,
+            has_injections,
+            false,
+            None,
+            cache,
+            &v2,
+        )
+        .await
+    }
+
+    /// Held by the gateway itself: an approval no rule names.
+    fn held_by_floor(decision: &(PolicyDecision, Option<MatchedRule>)) -> bool {
+        matches!(&decision.0, PolicyDecision::ManualApproval { rule_id } if rule_id.is_empty())
+            && decision.1.is_none()
+    }
+
+    #[tokio::test]
+    async fn a_plain_allow_or_no_rule_at_all_still_asks() {
+        let cache = cache::in_memory();
+        let allow = || vec![rule("allow", false, None)];
+        assert!(held_by_floor(&decide(allow(), ALERTS, true, &*cache).await));
+        assert!(held_by_floor(
+            &decide(Vec::new(), ALERTS, true, &*cache).await
+        ));
+        // The same rule decides every other GitHub read alone.
+        let (decision, _) = decide(allow(), "/repos/acme/web", true, &*cache).await;
+        assert!(matches!(decision, PolicyDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn a_block_still_blocks_and_an_asking_rule_keeps_its_approval() {
+        let cache = cache::in_memory();
+        let (decision, _) = decide(vec![rule("block", false, None)], ALERTS, true, &*cache).await;
+        assert!(matches!(decision, PolicyDecision::Blocked { .. }));
+
+        let deny_default = PolicyRuleV2Row {
+            is_default: true,
+            targets: Json(Vec::new()),
+            ..rule("block", false, None)
+        };
+        let (decision, _) = decide(vec![deny_default], ALERTS, true, &*cache).await;
+        assert!(matches!(decision, PolicyDecision::BlockedByDefaultPolicy));
+
+        let (decision, matched) =
+            decide(vec![rule("allow", true, None)], ALERTS, true, &*cache).await;
+        assert!(matches!(decision, PolicyDecision::ManualApproval { rule_id } if rule_id == "r1"));
+        assert_eq!(matched.map(|m| m.logical_id).as_deref(), Some("lr1"));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_allow_asks_without_spending_its_budget() {
+        let cache = cache::in_memory();
+        let limited = || vec![rule("allow", false, Some(1))];
+        for _ in 0..3 {
+            assert!(held_by_floor(
+                &decide(limited(), ALERTS, true, &*cache).await
+            ));
+        }
+        // The one request the limit allows is still unspent.
+        let (first, _) = decide(limited(), "/repos/acme/web", true, &*cache).await;
+        assert!(matches!(first, PolicyDecision::Allow));
+        let (second, _) = decide(limited(), "/repos/acme/web", true, &*cache).await;
+        assert!(matches!(second, PolicyDecision::RateLimited { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_uncredentialed_request_is_decided_by_the_rules_alone() {
+        let cache = cache::in_memory();
+        let (decision, _) = decide(vec![rule("allow", false, None)], ALERTS, false, &*cache).await;
+        assert!(matches!(decision, PolicyDecision::Allow));
+    }
+
+    #[test]
+    fn the_gateway_never_reads_one_on_the_agents_behalf() {
+        let v2 = rules(vec![rule("allow", false, None)]);
+        let may_get = |path| would_allow(&ctx(), GH, "GET", path, true, false, None, &v2);
+        assert!(!may_get(ALERTS));
+        assert!(may_get("/repos/acme/web"));
     }
 }

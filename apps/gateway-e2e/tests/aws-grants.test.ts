@@ -1,5 +1,6 @@
 import { describe, expect } from "vitest";
 
+import { compiledGrantStack } from "../src/fixtures.js";
 import { throughProxy } from "../src/proxy.js";
 import { scenario } from "../src/scenario.js";
 
@@ -24,45 +25,24 @@ import { scenario } from "../src/scenario.js";
  */
 describe("aws per-tool grants (wire-level refusals)", () => {
   /**
-   * The real grant stack `compileConnectionStack` emits for "custom access,
-   * only s3_read_objects": the allow row, then the TERMINAL block over the
-   * whole app. The terminal row is what makes the stack deny-by-default, and
-   * it is the rule that named itself in the field report
-   * ("Grant: … · …: everything else"). Reproducing both rows is the point —
-   * an allow row alone would leave unmatched requests to fall through to the
-   * gateway's default, which is not what production does.
+   * The real grant stack for "custom access, only s3_read_objects": the allow
+   * row, the blocked complement, and the terminal "everything else" row. AWS
+   * opts into `unlisted: "block"`, so that terminal is a BLOCK over the whole
+   * app rather than the approval row other providers get; it is what refuses
+   * an AWS service the catalog has no tool for.
    */
-  const s3ReadGrantStack = [
-    {
-      name: "Grant: e2e · aws-role: allowed",
-      action: "allow",
-      identities: ["agent"],
-      targets: [
-        {
-          kind: "connection",
-          connectionIndex: 0,
-          tools: ["s3_read_objects"],
-        },
-      ],
-    },
-    {
-      name: "Grant: e2e · aws-role: everything else",
-      action: "block",
-      identities: ["agent"],
-      targets: [{ kind: "connection", connectionIndex: 0 }],
-    },
-  ] as const;
+  const s3ReadGrantStack = compiledGrantStack("aws-role", ["s3_read_objects"]);
 
   scenario(
     "an S3 grant does not reach the separate s3tables service",
     async (cx) => {
       // `s3tables` is its own AWS service with its own IAM actions, and is
       // exactly what a tempting `s3*.amazonaws.com` glob would have swallowed.
-      // Nothing else names this host, so the refusal can only come from the
+      // No catalog tool names this host, so the refusal can only come from the
       // grant stack's terminal block.
       await cx.seed({
         appConnections: [{ provider: "aws-role" }],
-        rules: [...s3ReadGrantStack],
+        rules: s3ReadGrantStack,
       });
       const gw = await cx.startGateway();
 
@@ -72,7 +52,10 @@ describe("aws per-tool grants (wire-level refusals)", () => {
       });
 
       expect(res.status).toBe(403);
-      expect(res.json()).toMatchObject({ error: "blocked_by_policy" });
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "Grant: e2e · aws-role: everything else",
+      });
     },
   );
 
@@ -83,7 +66,7 @@ describe("aws per-tool grants (wire-level refusals)", () => {
       // "granted the account" must not mean "granted every service on it".
       await cx.seed({
         appConnections: [{ provider: "aws-role" }],
-        rules: [...s3ReadGrantStack],
+        rules: s3ReadGrantStack,
       });
       const gw = await cx.startGateway();
 
@@ -110,7 +93,7 @@ describe("aws per-tool grants (wire-level refusals)", () => {
       // credential onto a look-alike domain.
       await cx.seed({
         appConnections: [{ provider: "aws-role" }],
-        rules: [...s3ReadGrantStack],
+        rules: s3ReadGrantStack,
       });
       const gw = await cx.startGateway();
 
@@ -128,6 +111,32 @@ describe("aws per-tool grants (wire-level refusals)", () => {
       const logs = gw.logs();
       expect(logs).toContain("s3.us-east-1.amazonaws.com.evil.test");
       expect(logs).toMatch(/"injection_count":0/);
+    },
+  );
+
+  scenario(
+    "an unlisted service's delete sent as a GET is blocked, not a read",
+    async (cx) => {
+      // AWS query-protocol services run any Action sent as a GET, deletes
+      // included, so a GET is no safe "read" here. The default customization
+      // (Never on both catch-alls) refuses it; the API refuses to save
+      // "Other reads: Always allow" for AWS at all (grants-service tests).
+      await cx.seed({
+        appConnections: [{ provider: "aws-role" }],
+        rules: s3ReadGrantStack,
+      });
+      const gw = await cx.startGateway();
+
+      const res = await throughProxy(gw.origin, {
+        url: "http://sqs.us-east-1.amazonaws.com/?Action=DeleteQueue&QueueUrl=https%3A%2F%2Fsqs.us-east-1.amazonaws.com%2F123456789012%2Fe2e",
+        token: cx.ids.agentToken,
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({
+        error: "blocked_by_policy",
+        rule_name: "Grant: e2e · aws-role: everything else",
+      });
     },
   );
 });

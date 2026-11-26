@@ -1,18 +1,32 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // The OSS sync is deny-list shaped: every file syncs unless CLOUD-DEVELOPMENT.md's
-// exclusion table names it, and that table is prose with no other gate
-// (plans/sandbox-platform.md §3.11). This guard makes the boundary mechanical
-// for whole cloud-only PACKAGES: each one listed below must have an exclusion
-// row, so deleting the row (or adding a cloud-only package without one) fails
-// `pnpm check` on the cloud side before a sync window can ever carry the
-// package upstream.
+// exclusion table names it, and that table is prose with no other gate. This
+// guard makes the boundary mechanical twice over: (1) for whole cloud-only
+// PACKAGES — each one listed below must have an exclusion row, so deleting
+// the row (or adding a cloud-only package without one) fails `pnpm check` on
+// the cloud side before a sync window can ever carry the package upstream;
+// and (2) for the PROSE of every synced file — no comment may name the
+// cloud's implementation (CLOUD-DEVELOPMENT.md, "Comments in synced files
+// never describe the cloud's implementation").
 
 /** Workspace packages that must never reach the OSS mirror. */
-const CLOUD_ONLY_PACKAGES = ["packages/infra", "apps/sandbox-manager"];
+const CLOUD_ONLY_PACKAGES = [
+  "packages/infra",
+  "apps/sandbox-manager",
+  "apps/sandbox-home-device",
+  "apps/sandbox-home-daemon",
+  "apps/sandbox-log-shipper",
+  "apps/preview-relay",
+  "packages/sandbox-home-device-proto",
+  "packages/sandbox-shared",
+  "packages/api-cloud",
+  "packages/runner-cloud",
+];
 
 const path = (rel) => fileURLToPath(new URL(`../${rel}`, import.meta.url));
 
@@ -28,34 +42,519 @@ const rootPackageName = JSON.parse(
 ).name;
 const inCloudRepo = rootPackageName === "onecli-cloud";
 
-test("cloud-only packages each have an exclusion row", { skip: !inCloudRepo }, () => {
-  assert.ok(
-    existsSync(boundaryDoc),
-    "CLOUD-DEVELOPMENT.md is missing from the cloud repo — the exclusion list (and this guard's subject) is gone",
-  );
+/** The exclusion table's pattern cells: table lines whose first cell is a
+ * backticked pattern. */
+const exclusionPatterns = () => {
   const doc = readFileSync(boundaryDoc, "utf8");
-  // Exclusion rows are table lines whose first cell is a backticked pattern.
-  const patternCells = [...doc.matchAll(/^\|\s*`([^`]+)`/gm)].map((m) => m[1]);
+  return [...doc.matchAll(/^\|\s*`([^`]+)`/gm)].map((m) => m[1]);
+};
 
-  // Positive controls: a reformatted table must fail here, not pass vacuously.
-  assert.ok(
-    patternCells.length >= 8,
-    `expected the exclusion table's pattern cells, found ${patternCells.length}`,
-  );
-  assert.ok(
-    !patternCells.some((cell) => cell.startsWith("apps/web/**")),
-    "apps/web is shared — a row excluding it means the parse grabbed the wrong table",
-  );
-
-  for (const pkg of CLOUD_ONLY_PACKAGES) {
+test(
+  "cloud-only packages each have an exclusion row",
+  { skip: !inCloudRepo },
+  () => {
     assert.ok(
-      existsSync(path(pkg)),
-      `${pkg} is in CLOUD_ONLY_PACKAGES but does not exist — remove it here`,
+      existsSync(boundaryDoc),
+      "CLOUD-DEVELOPMENT.md is missing from the cloud repo — the exclusion list (and this guard's subject) is gone",
+    );
+    const patternCells = exclusionPatterns();
+
+    // Positive controls: a reformatted table must fail here, not pass vacuously.
+    assert.ok(
+      patternCells.length >= 8,
+      `expected the exclusion table's pattern cells, found ${patternCells.length}`,
     );
     assert.ok(
-      patternCells.some((cell) => cell === `${pkg}/**`),
-      `${pkg} exists but CLOUD-DEVELOPMENT.md's exclusion table has no \`${pkg}/**\` row — ` +
-        "without it, /sync-oss would copy the whole package to the public mirror.",
+      !patternCells.some((cell) => cell.startsWith("apps/web/**")),
+      "apps/web is shared — a row excluding it means the parse grabbed the wrong table",
     );
+
+    for (const pkg of CLOUD_ONLY_PACKAGES) {
+      assert.ok(
+        existsSync(path(pkg)),
+        `${pkg} is in CLOUD_ONLY_PACKAGES but does not exist — remove it here`,
+      );
+      assert.ok(
+        patternCells.some((cell) => cell === `${pkg}/**`),
+        `${pkg} exists but CLOUD-DEVELOPMENT.md's exclusion table has no \`${pkg}/**\` row — ` +
+          "without it, /sync-oss would copy the whole package to the public mirror.",
+      );
+    }
+  },
+);
+
+// ── Imports from synced files ───────────────────────────────────────────────
+
+/**
+ * The workspace names of the cloud-only packages: a synced file importing
+ * one would compile here and break in the mirror, which is the Golden Rule's
+ * first invariant made mechanical. Derived from the packages above so a new
+ * cloud-only package is guarded the day its row lands.
+ */
+const cloudOnlyPackageNames = () =>
+  CLOUD_ONLY_PACKAGES.flatMap((pkg) => {
+    const manifest = path(`${pkg}/package.json`);
+    return existsSync(manifest)
+      ? [JSON.parse(readFileSync(manifest, "utf8")).name]
+      : [];
+  });
+
+/**
+ * Every way a module specifier reaches a cloud-only package from a synced
+ * file: `import`/`export … from` (type-only included: a type import still
+ * fails to resolve in the mirror), dynamic `import()`, `require()`,
+ * `vi.mock()`/`vi.doMock()`/`jest.mock()`, and a RELATIVE path into the
+ * package's directory (the cloud entrypoints use that form by design, and
+ * they are excluded; a synced file must not).
+ */
+const cloudImportMatcher = (names, dirs) => {
+  const quoted = (xs) => xs.map((x) => x.replace(/[/.]/g, "\\$&")).join("|");
+  const byName = `(${quoted(names)})(/|["'])`;
+  // A relative path reaches the package either through its repo path
+  // (`../../packages/api-cloud/…`) or, from a sibling package, through its
+  // bare directory name (`../../api-cloud/…`): both are matched.
+  const basenames = dirs.map((d) => d.slice(d.lastIndexOf("/") + 1));
+  const byDir = `(\\.\\.?/)+(${quoted(dirs)}|${quoted(basenames)})(/|["'])`;
+  return new RegExp(
+    `(from\\s+|\\bimport\\s*\\(\\s*|\\brequire\\s*\\(\\s*|\\b(?:vi|jest)\\.(?:mock|doMock)\\s*\\(\\s*)["'](?:${byName}|${byDir})`,
+  );
+};
+
+test(
+  "no synced file imports a cloud-only package",
+  { skip: !inCloudRepo },
+  () => {
+    const names = cloudOnlyPackageNames();
+    assert.ok(names.includes("@onecli/api-cloud"));
+    const specifier = cloudImportMatcher(names, CLOUD_ONLY_PACKAGES);
+    const findings = [];
+    for (const file of syncedFiles()) {
+      // This guard's own negative controls are the one synced place the
+      // specifiers appear as fixtures.
+      if (!TS_LIKE.test(file) || file === "scripts/cloud-boundary.test.mjs")
+        continue;
+      let source;
+      try {
+        source = readFileSync(path(file), "utf8");
+      } catch {
+        continue;
+      }
+      source.split("\n").forEach((text, i) => {
+        if (specifier.test(text))
+          findings.push(`${file}:${i + 1} ${text.trim().slice(0, 120)}`);
+      });
+    }
+    assert.deepEqual(
+      findings,
+      [],
+      "synced code imports a cloud-only package; move the code or put the dependency behind a seam the host registers:\n" +
+        findings.join("\n"),
+    );
+  },
+);
+
+test(
+  "the import guard catches every specifier form (negative control)",
+  { skip: !inCloudRepo },
+  () => {
+    const matcher = cloudImportMatcher(
+      ["@onecli/api-cloud", "@onecli/runner-cloud"],
+      ["packages/api-cloud", "packages/runner-cloud"],
+    );
+    const caught = [
+      'import { x } from "@onecli/api-cloud";',
+      "import type { X } from '@onecli/api-cloud';",
+      'import x from "@onecli/api-cloud";',
+      'export { x } from "@onecli/api-cloud";',
+      'export * from "@onecli/api-cloud/services/x";',
+      'export type { X } from "@onecli/runner-cloud";',
+      'const m = await import("@onecli/api-cloud");',
+      'const m = require("@onecli/runner-cloud");',
+      'vi.mock("@onecli/api-cloud", () => ({}));',
+      'vi.doMock("@onecli/api-cloud");',
+      'import { y } from "../../packages/api-cloud/src/index.ts";',
+      'import("../packages/runner-cloud/src/index.ts");',
+      'import { y } from "../../api-cloud/src/index.ts";',
+      'export * from "../../../runner-cloud/src/index";',
+    ];
+    const allowed = [
+      'import { y } from "@onecli/api-cloudy";',
+      'import { y } from "@onecli/api";',
+      'import { y } from "@onecli/api/services/due-work";',
+      'import { y } from "./packages-api-cloud-ish";',
+      'import { y } from "./api-cloud-adjacent";',
+      '// a comment that mentions "@onecli/api-cloud" is not an import',
+      'const name = "@onecli/api-cloud";',
+    ];
+    for (const line of caught) assert.ok(matcher.test(line), `missed: ${line}`);
+    for (const line of allowed)
+      assert.ok(!matcher.test(line), `false positive: ${line}`);
+  },
+);
+
+// ── Comments in synced files ────────────────────────────────────────────────
+
+/**
+ * Names of the hosted sandbox's own setup that have no use anywhere in the
+ * shared product, code included: the filesystem shared under its home, its
+ * home device, and the hosted nodes' DNS names. Unlike the prose terms below,
+ * these are matched in the WHOLE text (strings and fixtures too), because
+ * fixtures are exactly where they slipped in: a test that copies a real
+ * mount table or node name publishes it.
+ */
+const SUBSTRATE_LITERALS = [
+  /\bvirtiofs\b/i,
+  /\/dev\/agenthome\b/,
+  /\bec2\.internal\b/i,
+];
+
+/**
+ * Terms that only ever describe OUR cloud's implementation — never product
+ * behavior a self-hoster could see. Deliberately narrow (a backstop, not the
+ * rule): generic words like "pod", "S3" or "load balancer" are legitimate in
+ * shared prose and are left to review. Every entry was checked against the
+ * whole synced tree for false positives when it was added.
+ *
+ * Plain Kubernetes vocabulary (kubelet, PVC, ServiceAccount, ResourceQuota,
+ * EKS as a platform name, Kata as a RuntimeClass, an ALB fronting the
+ * chart's Gateway) is NOT in this list: the synced Helm chart and the
+ * runner's kubernetes backend describe a self-hoster's own cluster in those
+ * words. What stays cloud-only is the cloud's own machinery (the sandbox
+ * platform, its stacks, its AWS services).
+ *
+ * The NLB (spelled out too), its IP-target registration, "on dev" notes and
+ * the private tracker's issue numbers ARE listed: no synced file needs them
+ * (the chart fronts its Gateway with an ALB), so a hit is always a hosted
+ * deployment's own detail, its dev environment, or an issue the public mirror
+ * cannot open. Issue numbers are listed one by one as they are scrubbed. A
+ * `jcode#623`-style qualified reference names a public upstream issue and is
+ * never matched.
+ */
+const CLOUD_IMPLEMENTATION_TERMS = [
+  /\bmicro-?vms?\b/i,
+  /\bublk\b/i,
+  /\bkarpenter\b/i,
+  /\btopolvm\b/i,
+  /\b(irsa|fargate|ecs)\b/i,
+  /\bcloudfront\b/i,
+  /\belasticache\b/i,
+  /\bcloudwatch\b/i,
+  /\bkube-root-ca\b/i,
+  /\btwingate\b/i,
+  /\bsandbox[- ]manager\b/i,
+  /\bhome[- ](daemon|device)\b/i,
+  /\blog[- ]shipper\b/i,
+  /\bsandbox-shared\b/i,
+  /\bsandbox[- ]platform\b/i,
+  /\bpackages\/infra\b/,
+  /\b[a-z-]+-stack\.ts\b/,
+  /\bapi-server-stack\b/,
+  /\bmetric filters?\b/i,
+  /\btask (role|definition)s?\b/i,
+  /\brwo\b/i,
+  /\b[a-z0-9]+-dev\.onecli\.sh\b/i,
+  /\bcloud-scripts\b/,
+  /\bplans\/deploy-ownership\b/,
+  // The hosted platform's resource-management components (the admission
+  // ledger, the placement reconciler, the rootfs probe, a demand pod) are
+  // cloud machinery; synced prose says "capacity" and "a hosted scheduler"
+  // instead.
+  /\badmission ledger\b/i,
+  /\bstorage ledger\b/i,
+  /\bplacement reconciler\b/i,
+  /\brootfs probe\b/i,
+  /\bdemand pods?\b/i,
+  /\bdeploy(-infra|-sandbox-platform|-analytics)?\.yml\b/,
+  /\bdev live gate\b/i,
+  /\bobserved on dev\b/i,
+  /\bnlb\b/i,
+  /\bnetwork load balancer\b/i,
+  /\bip-target registration\b/i,
+  /\b(found|seen) (live )?on dev\b|\b(after boot|ran) on dev\b|\bdev ran on\b|\bon dev:/i,
+  /\b(read|observed|showed|shown|measured) (live )?on dev\b|\blive on dev\b/i,
+  // The hosted sandbox's own setup, named. Shared prose says "a backend" or
+  // "another mount", and fixtures use neutral values (`/dev/sdb`,
+  // `node-1.example.test`).
+  /\bkata guests?\b/i,
+  ...SUBSTRATE_LITERALS,
+  /#1300\b/,
+  /(^|[^\w#&])#(783|803|834|869|1335|1375|1401|1412|1470|1495)\b/,
+  // The hosted agent desktop is licensed hosted-platform code: its plan and
+  // the screen server it runs are named only inside ee/ and cloud-only dirs.
+  /\bplans\/desktop-takeover\b/,
+  /\b(x0)?tigervnc\b/i,
+];
+
+/** Synced files whose prose may name these terms by design. */
+const COMMENT_SCAN_EXEMPT = [
+  // This guard and the legacy ledger name the cloud-only paths they police.
+  "scripts/cloud-boundary.test.mjs",
+  "scripts/legacy-marker.test.mjs",
+  // Ignore files list cloud-only build outputs so a local cloud checkout
+  // stays clean; they are paths, not prose.
+  ".gitignore",
+  ".dockerignore",
+  ".prettierignore",
+];
+
+/** Applied migrations are checksum-locked: never edited, so never scanned. */
+const isAppliedMigration = (file) =>
+  /^packages\/db\/prisma\/migrations\/[^/]+\/migration\.sql$/.test(file);
+
+/** A glob from the exclusion table, as a matcher over repo-relative paths. */
+const globToRegExp = (glob) => {
+  let re = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const ch = glob[i];
+    if (ch === "*" && glob[i + 1] === "*") {
+      re += ".*";
+      i += 1;
+    } else if (ch === "*") re += "[^/]*";
+    else if (ch === "{") {
+      const end = glob.indexOf("}", i);
+      re += `(${glob
+        .slice(i + 1, end)
+        .split(",")
+        .map((s) => s.replace(/[.+?^$()[\]\\|]/g, "\\$&"))
+        .join("|")})`;
+      i = end;
+    } else re += ch.replace(/[.+?^$()[\]\\|]/g, "\\$&");
   }
-});
+  return new RegExp(`^${re}$`);
+};
+
+/** Every tracked file the OSS mirror receives: tracked minus every glob the
+ * exclusion table names (a row's first cell may list several, e.g.
+ * `CLAUDE.md`, `.claude/**`; the workflow carve-out pair stays synced). */
+const syncedFiles = () => {
+  const doc = readFileSync(boundaryDoc, "utf8");
+  const firstCells = [...doc.matchAll(/^\|([^|]*`[^|]*)\|/gm)]
+    .map((m) => m[1])
+    // The root `package.json` row is field-level: the file itself syncs.
+    .filter((cell) => !cell.trim().startsWith("root "));
+  const globs = firstCells.flatMap((cell) =>
+    [...cell.matchAll(/`([^`\s]+)`/g)]
+      .map((m) => m[1])
+      // Only path globs: skip prose tokens like `name` or `generate:catalog`.
+      .filter((g) => /[/*.]/.test(g) && !g.includes(":")),
+  );
+  // `apps/{web,…}/Dockerfile.cloud` and `apps/*/cloud-*.{sh,mjs}` are the
+  // brace-expanded deploy-artifact rows.
+  const excluded = globs.map(globToRegExp);
+  const carveOut = new Set([
+    ".github/workflows/publish.yml",
+    ".github/workflows/release.yml",
+  ]);
+  return execFileSync("git", ["ls-files"], { cwd: path("."), encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean)
+    .filter((f) => carveOut.has(f) || !excluded.some((re) => re.test(f)));
+};
+
+const TS_LIKE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const HASH_LIKE =
+  /(^|\/)(Dockerfile[^/]*|[^/]*\.Dockerfile|[^/]*\.(sh|ya?ml|toml)|\.env\.example|onecli-nix-install)$/;
+
+/** The prose of a file, as `{ line, text }` rows: comments for code (TS/JS
+ * via the real TypeScript parser, so strings and templates are never
+ * mistaken for comments), the whole text for Markdown. */
+const commentsOf = async (file, source) => {
+  const rows = [];
+  if (TS_LIKE.test(file)) {
+    const { default: ts } = await import("typescript");
+    const kind = /x$/.test(file)
+      ? ts.ScriptKind.TSX
+      : /\.(js|mjs|cjs)$/.test(file)
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS;
+    const sf = ts.createSourceFile(
+      file,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      kind,
+    );
+    const seen = new Map();
+    const take = (ranges) => {
+      for (const r of ranges ?? []) seen.set(r.pos, source.slice(r.pos, r.end));
+    };
+    const visit = (node) => {
+      take(ts.getLeadingCommentRanges(source, node.getFullStart()));
+      take(ts.getTrailingCommentRanges(source, node.getEnd()));
+      for (const child of node.getChildren(sf)) visit(child);
+    };
+    visit(sf);
+    for (const [pos, text] of seen) {
+      const start = source.slice(0, pos).split("\n").length;
+      text
+        .split("\n")
+        .forEach((t, i) => rows.push({ line: start + i, text: t }));
+    }
+    return rows;
+  }
+  const lines = source.split("\n");
+  const marker = /\.rs$/.test(file)
+    ? "//"
+    : /\.(sql|prisma)$/.test(file)
+      ? /(--|\/\/)/
+      : HASH_LIKE.test(file)
+        ? "#"
+        : null;
+  lines.forEach((text, i) => {
+    if (/\.md$/.test(file)) rows.push({ line: i + 1, text });
+    else if (typeof marker === "string" && text.includes(marker)) {
+      rows.push({ line: i + 1, text: text.slice(text.indexOf(marker)) });
+    } else if (marker instanceof RegExp) {
+      const m = text.match(marker);
+      if (m) rows.push({ line: i + 1, text: text.slice(m.index) });
+    }
+  });
+  return rows;
+};
+
+test(
+  "no synced file's comments name the cloud's implementation",
+  { skip: !inCloudRepo },
+  async () => {
+    const files = syncedFiles();
+    // Positive control: the synced set is the shared product, not an empty
+    // or mis-parsed list — and it never contains an excluded package.
+    assert.ok(
+      files.length > 1000,
+      `expected the synced tree, got ${files.length} files`,
+    );
+    assert.ok(files.includes("apps/web/package.json"));
+    assert.ok(!files.some((f) => f.startsWith("packages/infra/")));
+
+    const findings = [];
+    for (const file of files) {
+      if (COMMENT_SCAN_EXEMPT.includes(file) || isAppliedMigration(file))
+        continue;
+      let source;
+      try {
+        source = readFileSync(path(file), "utf8");
+      } catch {
+        continue;
+      }
+      // Raw-text prefilter, identical in result: every comment row is a
+      // substring of the source whose edges sit next to a non-word character
+      // there (a comment marker, a newline, `*/`), so a term that matches a
+      // row matches the source too. Only the few files that name a term
+      // anywhere pay for the TypeScript parse.
+      if (!CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(source))) continue;
+      for (const { line, text } of await commentsOf(file, source)) {
+        const hit = CLOUD_IMPLEMENTATION_TERMS.find((re) => re.test(text));
+        if (hit)
+          findings.push(
+            `${file}:${line} ${hit} — ${text.trim().slice(0, 120)}`,
+          );
+      }
+    }
+    assert.deepEqual(
+      findings,
+      [],
+      "synced comments describe the cloud's implementation — rewrite them in the generic form " +
+        '(CLOUD-DEVELOPMENT.md, "Comments in synced files never describe the cloud\'s implementation"):\n' +
+        findings.join("\n"),
+    );
+  },
+);
+
+test(
+  "the comment guard catches what it claims to (negative control)",
+  { skip: !inCloudRepo },
+  async () => {
+    // Proves the extractor reads real comments and ignores code: a term in a
+    // comment is found, the same term inside a string literal is not.
+    const rows = await commentsOf(
+      "x.ts",
+      'const a = "fargate";\n// boots under Fargate\nconst b = `sandbox-manager ${a}`;\n' +
+        'const c = "behind the NLB";\n// Found live on dev: behind the NLB\n' +
+        'const d = "X0tigervnc";\n// verified against the real TigerVNC desktop\n',
+    );
+    const flagged = rows.filter(({ text }) =>
+      CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),
+    );
+    assert.equal(flagged.length, 3);
+    assert.equal(flagged[0].line, 2);
+    assert.equal(flagged[1].line, 5);
+    assert.equal(flagged[2].line, 7);
+
+    // The prose terms this guard grew for the read-only-home scrub: each is
+    // caught in a comment, and the neutral fixtures that replaced them are not.
+    const prose = await commentsOf(
+      "y.ts",
+      "// The table read live on dev after an ext4 error\n" +
+        "// The shape a Kata guest's table has\n" +
+        "// the honest #834 copy, and a rule written after #1412\n" +
+        "// a 6.15+ kernel, another mount of the home's path underneath\n" +
+        "// see jcode#834 upstream\n",
+    );
+    const hits = prose.filter(({ text }) =>
+      CLOUD_IMPLEMENTATION_TERMS.some((re) => re.test(text)),
+    );
+    assert.deepEqual(
+      hits.map(({ line }) => line),
+      [1, 2, 3],
+    );
+  },
+);
+
+test(
+  "no synced file names the hosted sandbox's setup, strings included",
+  { skip: !inCloudRepo },
+  () => {
+    const findings = [];
+    for (const file of syncedFiles()) {
+      if (COMMENT_SCAN_EXEMPT.includes(file) || isAppliedMigration(file))
+        continue;
+      let source;
+      try {
+        source = readFileSync(path(file), "utf8");
+      } catch {
+        continue;
+      }
+      source.split("\n").forEach((text, i) => {
+        const hit = SUBSTRATE_LITERALS.find((re) => re.test(text));
+        if (hit)
+          findings.push(
+            `${file}:${i + 1} ${hit} — ${text.trim().slice(0, 120)}`,
+          );
+      });
+    }
+    assert.deepEqual(
+      findings,
+      [],
+      "synced files name the hosted sandbox's own setup; use a neutral fixture (`/dev/sdb`, `node-1.example.test`):\n" +
+        findings.join("\n"),
+    );
+  },
+);
+
+test(
+  "the substrate literal guard catches what it claims to (negative control)",
+  { skip: !inCloudRepo },
+  () => {
+    const caught = [
+      '"none /workspace virtiofs rw,nodev,relatime 0 0",',
+      "`/dev/agenthome ${homeDir} ext4 ${options} 0 0`,",
+      '{ nodeOf: () => "ip-10-0-0-1.ec2.internal" },',
+    ];
+    const allowed = [
+      '"tmpfs /workspace tmpfs rw,nodev,relatime 0 0",',
+      "`/dev/sdb ${homeDir} ext4 ${options} 0 0`,",
+      '{ nodeOf: () => "node-1.example.test" },',
+      "const agentHome = agentHomeDir(process.env);",
+    ];
+    for (const line of caught)
+      assert.ok(
+        SUBSTRATE_LITERALS.some((re) => re.test(line)),
+        `missed: ${line}`,
+      );
+    for (const line of allowed)
+      assert.ok(
+        !SUBSTRATE_LITERALS.some((re) => re.test(line)),
+        `false positive: ${line}`,
+      );
+  },
+);

@@ -9,6 +9,8 @@ import { queryKeys } from "@/lib/api/keys";
 import { Button } from "@onecli/ui/components/button";
 import { Card } from "@onecli/ui/components/card";
 import { Skeleton } from "@onecli/ui/components/skeleton";
+import type { SavedSecret } from "@/lib/api";
+import { SecretAgentsDialog } from "@/lib/components/policy-reflect";
 import { SecretCard } from "./secret-card";
 import { SecretDialog, type SecretPrefill } from "./secret-dialog";
 import type { SecretActions } from "./types";
@@ -54,6 +56,20 @@ export const SecretsContent = ({
   const [createOpen, setCreateOpen] = useState(false);
   const [prefill, setPrefill] = useState<SecretPrefill | undefined>();
   const paramHandled = useRef(false);
+  // A workspace's custom connection is on for no agent until the user picks
+  // them: the "choose agents" window opens straight after one is added, and
+  // from each card later. Agents live in workspaces, so this is a
+  // workspace-page door only (an org secret reaches agents through org
+  // policy). The `open` flag outlives the secret so closing animates.
+  const choosesAgents = typeFilter === "generic" && pageScope === "workspace";
+  const [agentsFor, setAgentsFor] = useState<
+    (SavedSecret & { justAdded: boolean }) | null
+  >(null);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const openAgents = (secret: SavedSecret, justAdded: boolean) => {
+    setAgentsFor({ ...secret, justAdded });
+    setAgentsOpen(true);
+  };
 
   const allFiltered = secrets.filter((s: Secret) =>
     typeFilter === "generic" ? s.type === "generic" : s.type !== "generic",
@@ -70,10 +86,23 @@ export const SecretsContent = ({
     const createType = searchParams.get("create");
     const host = searchParams.get("host");
     const action = searchParams.get("action");
+    // A handled deep link drops its own params and keeps the Settings
+    // modal's (`?settings=&tab=`) when the tab renders inside it, so the
+    // link opens the dialog over the modal instead of closing it.
+    const clearLinkParams = () => {
+      const kept = new URLSearchParams();
+      for (const key of ["settings", "tab"]) {
+        const val = searchParams.get(key);
+        if (val) kept.set(key, val);
+      }
+      const qs = kept.toString();
+      const path = window.location.pathname;
+      router.replace(qs ? `${path}?${qs}` : path, { scroll: false });
+    };
     if (action === "new") {
       paramHandled.current = true;
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "anthropic" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -82,7 +111,7 @@ export const SecretsContent = ({
         name: "Anthropic Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "openai" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -91,7 +120,7 @@ export const SecretsContent = ({
         name: "OpenAI Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "codex" && typeFilter === "llm") {
       paramHandled.current = true;
       setPrefill({
@@ -100,7 +129,7 @@ export const SecretsContent = ({
         name: "Codex Token",
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     } else if (createType === "generic" && typeFilter === "generic" && host) {
       paramHandled.current = true;
       setPrefill({
@@ -114,7 +143,7 @@ export const SecretsContent = ({
         paramFormat: safeDecode(searchParams.get("paramFormat")),
       });
       setCreateOpen(true);
-      router.replace(window.location.pathname, { scroll: false });
+      clearLinkParams();
     }
   }, [searchParams, loading, router, typeFilter]);
 
@@ -148,7 +177,7 @@ export const SecretsContent = ({
         ) : (
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="size-3.5" />
-            {typeFilter === "llm" ? "Add LLM Key" : "Add Secret"}
+            {typeFilter === "llm" ? "Add LLM Key" : "Add connection"}
           </Button>
         )}
       </div>
@@ -159,12 +188,14 @@ export const SecretsContent = ({
             <KeyRound className="text-muted-foreground size-6" />
           </div>
           <p className="text-sm font-medium">
-            {typeFilter === "llm" ? "No LLM keys yet" : "No custom secrets yet"}
+            {typeFilter === "llm"
+              ? "No LLM keys yet"
+              : "No custom connections yet"}
           </p>
           <p className="text-muted-foreground mt-1 max-w-xs text-xs">
             {typeFilter === "llm"
               ? "Add an LLM API key to route requests through the gateway."
-              : "Add a custom secret to inject encrypted credentials into gateway requests."}
+              : "Connect any API with a key. The key is stored encrypted and never shown to agents."}
           </p>
         </Card>
       ) : (
@@ -174,6 +205,9 @@ export const SecretsContent = ({
               key={secret.id}
               secret={secret}
               secretActions={secretActions}
+              onChooseAgents={
+                choosesAgents ? () => openAgents(secret, false) : undefined
+              }
             />
           ))}
           {inheritedSecrets.map((secret) => (
@@ -199,7 +233,23 @@ export const SecretsContent = ({
           typeFilter === "llm" ? ["anthropic", "openai"] : undefined
         }
         secretActions={secretActions}
+        onSaved={(created) => {
+          if (created && choosesAgents) openAgents(created, true);
+        }}
       />
+
+      {/* Re-keyed per secret so a second add can't inherit the first one's
+          rows. */}
+      {agentsFor && (
+        <SecretAgentsDialog
+          key={agentsFor.id}
+          secretId={agentsFor.id}
+          secretName={agentsFor.name}
+          justAdded={agentsFor.justAdded}
+          open={agentsOpen}
+          onOpenChange={setAgentsOpen}
+        />
+      )}
     </div>
   );
 };

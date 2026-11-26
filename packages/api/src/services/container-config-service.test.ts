@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   loadCaCertificate: vi.fn(),
   secretFindFirst: vi.fn(),
   secretFindMany: vi.fn(),
+  workspaceFindUnique: vi.fn(),
+  ownerFindFirst: vi.fn(),
   decrypt: vi.fn(),
 }));
 
@@ -26,6 +28,9 @@ vi.mock("@onecli/db", () => ({
       findFirst: mocks.secretFindFirst,
       findMany: mocks.secretFindMany,
     },
+    workspace: { findUnique: mocks.workspaceFindUnique },
+    // The trial credit's founding-owner lookup.
+    organizationMember: { findFirst: mocks.ownerFindFirst },
   },
 }));
 
@@ -64,7 +69,46 @@ beforeEach(() => {
   // The credential resolver reads the same fenced pool with findMany; empty
   // by default, which is the "no key granted" shape these tests assume.
   mocks.secretFindMany.mockResolvedValue([]);
+  mocks.workspaceFindUnique.mockResolvedValue({ timezone: null });
   mocks.decrypt.mockResolvedValue("REAL-SECRET-VALUE");
+});
+
+describe("the sandbox's own loopback", () => {
+  it("is exempt from the gateway proxy in both spellings", async () => {
+    // The open proxy, a browser's DevTools port, a dev server the agent
+    // runs: all on 127.0.0.1, and all refused by the gateway as private
+    // destinations if a proxy-env reader sent them there. Observed live:
+    // the browser launcher's readiness curl got a 403 from the gateway and
+    // timed out on a browser that was up.
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+    expect(result.config.env.NO_PROXY).toBe("localhost,127.0.0.1");
+    expect(result.config.env.no_proxy).toBe("localhost,127.0.0.1");
+  });
+});
+
+describe("the sandbox clock", () => {
+  it("hands the workspace's zone to the container as TZ", async () => {
+    mocks.workspaceFindUnique.mockResolvedValue({ timezone: "Asia/Jerusalem" });
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+    expect(result.config.env.TZ).toBe("Asia/Jerusalem");
+    // The locale is the image's (it generates one); the control plane
+    // naming a locale the image lacks would make every tool warn.
+    expect(result.config.env.LANG).toBeUndefined();
+  });
+
+  it("falls back to the platform default when the workspace chose none", async () => {
+    const result = await build();
+    if (!result.ok) throw new Error("expected a config");
+    // Whatever the default resolves to on this host, it is a zone Intl can
+    // use: the container must never inherit an empty or garbage TZ.
+    const tz = result.config.env.TZ;
+    expect(typeof tz).toBe("string");
+    expect(
+      () => new Intl.DateTimeFormat("en-US", { timeZone: tz }),
+    ).not.toThrow();
+  });
 });
 
 describe("the zero-credential line", () => {
@@ -269,10 +313,30 @@ describe("the platform trial credential", () => {
   });
 
   it("advertises Anthropic for a keyless agent when the credit applies", async () => {
-    initPlatformLlm({ trialCreditApplies: () => true });
+    const seen: unknown[] = [];
+    initPlatformLlm({
+      trialCreditApplies: (_pool, owner) => {
+        seen.push(owner);
+        return true;
+      },
+    });
+    mocks.ownerFindFirst.mockResolvedValue({
+      user: { email: "person@company.example", signInProvider: null },
+    });
 
     const result = await build();
     if (!result.ok) throw new Error("expected a config");
+    // The rule is handed the org's founding owner, looked up the way the
+    // gateway's `founding_owner` does (earliest active owner, then id).
+    expect(seen).toEqual([
+      { email: "person@company.example", signInProvider: null },
+    ]);
+    expect(mocks.ownerFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ role: "owner", status: "active" }),
+        orderBy: [{ createdAt: "asc" }, { userId: "asc" }],
+      }),
+    );
 
     // The placeholder is the whole hand-off: the harness picks Claude, the
     // gateway splices the platform key at the wire. No real value here.

@@ -1,5 +1,11 @@
 import { randomBytes } from "crypto";
-import { db } from "@onecli/db";
+import { db, type Prisma } from "@onecli/db";
+import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+  recordAuditEvent,
+} from "./audit-service";
 import type { ResourceScope } from "./resource-scope";
 import { scopeWhere, scopeCreate, isOrgScope } from "./resource-scope";
 
@@ -78,6 +84,33 @@ export const ensureApiKey = async (
 };
 
 /**
+ * The person's own workspace key, minting it on first use. A mint is
+ * audited exactly as every auto-provision is (the API's `/user/api-key`,
+ * the supersede check acting for the speaker); a read never is.
+ */
+export const ensureWorkspaceApiKey = async (input: {
+  userId: string;
+  userEmail: string;
+  workspaceId: string;
+}): Promise<string> => {
+  const { apiKey, created } = await ensureApiKey(input.userId, {
+    workspaceId: input.workspaceId,
+  });
+  if (created) {
+    await recordAuditEvent({
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      userEmail: input.userEmail,
+      action: AUDIT_ACTIONS.CREATE,
+      service: AUDIT_SERVICES.API_KEY,
+      source: AUDIT_SOURCE.API,
+      metadata: { scope: "workspace", autoProvisioned: true },
+    });
+  }
+  return apiKey;
+};
+
+/**
  * Mint a SERVICE key: a platform-created machine credential (`kind:
  * "service"`), distinct from a person's own key so the personal flows above
  * never see it. The key still belongs to a real user — the gateway
@@ -115,8 +148,12 @@ export const createServiceApiKey = async (
 /**
  * Delete a service key by id. Deliberately fenced to `kind: "service"` so no
  * teardown path can ever delete a person's own key by mistake; deleting an
- * already-gone key is a no-op (teardown must be idempotent).
+ * already-gone key is a no-op (teardown must be idempotent). Pass the caller's
+ * `tx` when the revoke must commit or roll back with a local deletion.
  */
-export const revokeServiceApiKey = async (id: string): Promise<void> => {
-  await db.apiKey.deleteMany({ where: { id, kind: "service" } });
+export const revokeServiceApiKey = async (
+  id: string,
+  tx: Prisma.TransactionClient = db,
+): Promise<void> => {
+  await tx.apiKey.deleteMany({ where: { id, kind: "service" } });
 };

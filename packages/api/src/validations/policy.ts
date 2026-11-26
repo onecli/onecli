@@ -86,12 +86,13 @@ const rateLimitWindowSchema = z.enum(["minute", "hour", "day"]);
 
 // Granular per-resource scoping (the "session policy") a CONNECTION target can
 // carry: an object keyed by the provider's resource axis — GitHub → repos,
-// Dropbox → folders. It rides in `conditions` (the exact shape the equipment
-// materialization persists and the gateway's `granular_access` guard reads,
-// source-agnostically), distinct from the behavioral RuleCondition[] (body
-// contains X) the block/allow engine evaluates. Structural bounds only; the
-// per-provider deep checks (repos exist on the installation, absolute Dropbox
-// paths) + the entitlement gate run in the EE policy validator. Absent = all.
+// Dropbox → folders, Google Drive → driveFolders. It rides in `conditions`
+// (the exact shape the equipment materialization persists and the gateway's
+// `granular_access` guard reads, source-agnostically), distinct from the
+// behavioral RuleCondition[] (body contains X) the block/allow engine
+// evaluates. Structural bounds only; the per-provider deep checks (repos exist
+// on the installation, absolute Dropbox paths, Drive folder-ID chains) + the
+// entitlement gate run in the EE policy validator. Absent = all.
 //
 // An EMPTY list is refused: it reads as "reach nothing", which is a scope no
 // UI can author (clearing a restriction sends `null`) and which the credential
@@ -104,6 +105,10 @@ const resourceList = (max: number, itemMax: number) =>
 export const sessionPolicySchema = z.union([
   z.object({ repositories: resourceList(1000, 400) }).strict(),
   z.object({ folders: resourceList(100, 1024) }).strict(),
+  // Google Drive: each entry is a chain of folder IDs (`<id>/<id>/…`), see
+  // lib/resource-axis.ts. Sized for Drive's deepest legal chain (100 levels
+  // of ~33-char IDs); the EE validator checks each ID and the depth.
+  z.object({ driveFolders: resourceList(100, 8192) }).strict(),
 ]);
 export type SessionPolicyInput = z.infer<typeof sessionPolicySchema>;
 

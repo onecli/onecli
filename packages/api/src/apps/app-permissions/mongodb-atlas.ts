@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const mongodbAtlasPermissions: AppPermissionDefinition = {
   provider: "mongodb-atlas",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

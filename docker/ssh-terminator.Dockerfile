@@ -1,4 +1,4 @@
-# OneCLI SSH terminator — the sandbox platform's SSH front door (hosted agents)
+# OneCLI SSH terminator — the SSH front door to hosted agents
 # Build context: repo root (run with `docker build -f docker/ssh-terminator.Dockerfile .`)
 #
 # It terminates ssh with the short-lived certificates the api mints and bridges
@@ -13,7 +13,7 @@
 # ──────────────────────────────────────────────
 # Stage 1: Prepare Node.js base
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS base
+FROM node:22.23.4-alpine3.24 AS base
 RUN corepack enable && corepack prepare pnpm@9.0.0 --activate
 WORKDIR /app
 
@@ -51,7 +51,7 @@ RUN echo "node-linker=hoisted" >> .npmrc \
 # ──────────────────────────────────────────────
 # Stage 6: Production runner
 # ──────────────────────────────────────────────
-FROM node:22.23.2-alpine3.24 AS runner
+FROM node:22.23.4-alpine3.24 AS runner
 # The terminator is pure Apache-2.0 — no ee/ code lives in this app.
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /app

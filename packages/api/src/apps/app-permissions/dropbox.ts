@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const dropboxPermissions: AppPermissionDefinition = {
   provider: "dropbox",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

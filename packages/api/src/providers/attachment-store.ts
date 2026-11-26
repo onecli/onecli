@@ -3,7 +3,7 @@ import { failMissingCloudDefault } from "./edition-state";
 // ── Attachment blob store (edition default) ─────────────────────────────────
 // Where conversation-attachment BYTES live. Metadata is always the
 // `conversation_attachments` row; this seam owns only the payload, so a
-// scalable backend (S3 on cloud) can replace the Postgres column without
+// scalable backend (object storage) can replace the Postgres column without
 // touching a single call site. Dispatch is per ROW, not per deployment:
 // `storageRef` null = bytes inline in the row's `data` column; non-null = the
 // key of whichever external store wrote it (the ciphertext-shape pattern —
@@ -45,6 +45,26 @@ export interface AttachmentBlobStore {
   /** Fetch the bytes. Throws (loudly) for a ref this backend cannot serve —
    * bytes written by an external store this deployment no longer runs. */
   get(ref: AttachmentBlobRef): Promise<Buffer>;
+  /**
+   * A short-lived URL the BROWSER can download from directly, when this
+   * backend can mint one (object storage). Takes the api out of the byte
+   * path — the whole scalability point of an external arm. `null` when the
+   * ref's bytes live inline (the Postgres arm, or a legacy row under the
+   * external arm): the caller streams them itself. The URL MUST pin the
+   * response's `Content-Disposition: attachment` and `Content-Type` server-
+   * side, so a stored SVG/HTML never renders inline from the bucket either.
+   */
+  presign(
+    ref: AttachmentBlobRef,
+    file: { name: string; mimeType: string },
+  ): Promise<{ url: string; expiresAt: Date } | null>;
+  /**
+   * Retention: drop the BYTES of rows that stay (as `expired` metadata, so
+   * the surfaces can say so). The Postgres arm nulls the inline column
+   * (frees the TOAST pages for vacuum); an external arm deletes its objects.
+   * Idempotent — a second pass over the same refs is a no-op.
+   */
+  expire(refs: AttachmentBlobRef[]): Promise<void>;
   /**
    * Best-effort payload cleanup for rows about to be (or already) deleted.
    * The Postgres arm is a no-op — the row cascade owns the bytes; an

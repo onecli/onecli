@@ -2,7 +2,7 @@
 //!
 //! The gateway holds the (decrypted) 1Password Service-Account token and
 //! delegates the actual SDK work — validating a token and resolving an
-//! `op://` reference — to the Node API over an authenticated, VPC-internal
+//! `op://` reference — to the Node API over an authenticated, internal
 //! channel. This replaces the old `op` CLI wrapper: no subprocess, no
 //! third-party binary in the image, no macOS TCC prompts.
 
@@ -35,12 +35,11 @@ impl std::fmt::Display for OpError {
 
 /// Where the api-server answers when nothing overrides it — the bare-metal /
 /// dev default. Containerized layouts always set `INTERNAL_API_URL` (the
-/// self-host compose points it at the api service, cloud at the in-VPC
-/// api-server).
+/// self-host compose points it at the api service).
 const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10256";
 
-/// Base URL of the internal Node API: `INTERNAL_API_URL` when set (cloud points
-/// it at the in-VPC api-server, e.g. `http://api-server:10256`), else loopback.
+/// Base URL of the internal Node API: `INTERNAL_API_URL` when set (e.g.
+/// `http://api-server:10256`), else loopback.
 ///
 /// Deliberately **not** `APP_URL`. That is the *public* URL users browse to —
 /// a different concept, and since it can now name a real external host, using

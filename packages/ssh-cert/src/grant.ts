@@ -7,7 +7,7 @@ import { WireReader, WireWriter } from "./wire";
 
 /**
  * The session grant: a CA-signed capability the control plane issues at
- * session-open and the manager broker REQUIRES before minting exec
+ * session-open and the session broker REQUIRES before minting exec
  * credentials. It is what closes the compromised-terminator bypass — the
  * broker's own trust anchor (the CA public key) proves the control plane
  * blessed this exact (session, agent, sandbox, workspace) tuple, so caps,

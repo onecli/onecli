@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const jiraPermissions: AppPermissionDefinition = {
   provider: "jira",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

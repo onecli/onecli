@@ -2,7 +2,6 @@
 
 import { Globe, Loader2, ShieldBan, X } from "lucide-react";
 import { Badge } from "@onecli/ui/components/badge";
-import { toast } from "sonner";
 import {
   Accordion,
   AccordionContent,
@@ -14,8 +13,7 @@ import { Card } from "@onecli/ui/components/card";
 import { Switch } from "@onecli/ui/components/switch";
 import {
   useAppBlocklist,
-  useToggleBlocklistRule,
-  useActivateBlocklistHost,
+  useSetBlocklistHost,
 } from "@/hooks/use-app-blocklist";
 import type { BlocklistHostState } from "@/lib/api/app-blocklist";
 
@@ -30,13 +28,11 @@ const HostRow = ({
   host,
   onToggle,
   onRemove,
-  disabled,
   orgLocked,
 }: {
   host: BlocklistHostState;
   onToggle: (host: BlocklistHostState, enabled: boolean) => void;
   onRemove?: (host: BlocklistHostState) => void;
-  disabled?: boolean;
   orgLocked?: boolean;
 }) => (
   <div className="group flex items-center gap-3 py-3">
@@ -63,7 +59,6 @@ const HostRow = ({
           size="icon"
           className="size-7 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
           onClick={() => onRemove(host)}
-          disabled={disabled}
         >
           <X className="size-3.5" />
         </Button>
@@ -71,7 +66,8 @@ const HostRow = ({
       <Switch
         checked={host.enabled}
         onCheckedChange={(checked) => onToggle(host, checked)}
-        disabled={disabled || orgLocked}
+        // Locked only by the org, never by an in-flight write.
+        disabled={orgLocked}
       />
     </div>
   </div>
@@ -109,31 +105,16 @@ export const AppBlocklist = ({
     pageScope,
     isConnected,
   );
-  const toggleMutation = useToggleBlocklistRule(provider, pageScope);
-  const activateMutation = useActivateBlocklistHost(provider, pageScope);
+  const setHost = useSetBlocklistHost(provider, pageScope);
 
   const isOrgLocked = (host: BlocklistHostState) =>
     pageScope === "workspace" && host.scope === "organization";
 
-  const handleToggle = (host: BlocklistHostState, enabled: boolean) => {
-    if (host.ruleId) {
-      toggleMutation.mutate(
-        { ruleId: host.ruleId, enabled },
-        {
-          onSuccess: () =>
-            toast.success(
-              enabled ? `Blocking ${host.name}` : `Unblocked ${host.name}`,
-            ),
-        },
-      );
-    } else {
-      activateMutation.mutate(host.hostId, {
-        onSuccess: () => toast.success(`Blocking ${host.name}`),
-      });
-    }
-  };
-
-  const isMutating = toggleMutation.isPending || activateMutation.isPending;
+  // Instant: the switch IS the status. Writes per host run in click order
+  // (a never-blocked host's first write creates its rule; the next one flips
+  // it), and a failure puts that one switch back and says why.
+  const handleToggle = (host: BlocklistHostState, enabled: boolean) =>
+    setHost.mutate({ host, enabled });
 
   return (
     <Accordion
@@ -180,7 +161,6 @@ export const AppBlocklist = ({
                       key={host.hostId}
                       host={host}
                       onToggle={handleToggle}
-                      disabled={isMutating}
                       orgLocked={isOrgLocked(host)}
                     />
                   ))}

@@ -10,7 +10,7 @@
  *
  * `APP_URL` / `NEXT_PUBLIC_APP_URL` are permanent read-aliases; `API_URL` /
  * `GATEWAY_API_URL` are advanced per-origin overrides (split-host installs and
- * the cloud task defs). Nothing on the publish plane (`ONECLI_BIND_HOST`,
+ * managed deployments). Nothing on the publish plane (`ONECLI_BIND_HOST`,
  * ports) feeds a URL — except the warned legacy bind seed kept for one release
  * so compose-pull upgraders keep their pre-refactor behavior.
  *
@@ -183,12 +183,11 @@ const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
  *   - apps/web/next.config.js — the API_DOMAIN/GATEWAY_API_DOMAIN build
  *     fallback, plus turbo.json's "API_DOMAIN"/"GATEWAY_API_DOMAIN" rows
  *     (JSON, no marker possible — listed here instead)
- *   - packages/infra/lib/api-server-stack.ts — the duplicate legacy
- *     GATEWAY_BASE_URL row (droppable once the resolver image is deployed
- *     everywhere; cloud-only file)
+ *   - the hosted deployment's duplicate legacy GATEWAY_BASE_URL row
+ *     (droppable once the resolver image is deployed everywhere)
  *
  * (B) PERMANENT ALIASES — never delete (each costs one chain head, and
- *     removing them breaks cloud task defs and field .env files):
+ *     removing them breaks existing deployments and field .env files):
  *     APP_URL / NEXT_PUBLIC_APP_URL (external heads); API_URL /
  *     NEXT_PUBLIC_API_URL and GATEWAY_API_URL / NEXT_PUBLIC_GATEWAY_API_URL
  *     (per-origin overrides); GATEWAY_BASE_URL (agent-proxy read-alias);
@@ -401,7 +400,7 @@ export const resolvePublicOrigins = (
     agentProxySource = { source: "set", envVar: "ONECLI_AGENT_PROXY_ADDRESS" };
   } else if (proxyOld) {
     // Lenient by design: field values like `gateway:10255` and
-    // `<domain>:10255` (the cloud task defs) must keep working verbatim.
+    // `<domain>:10255` (existing deployments) must keep working verbatim.
     agentProxy = proxyOld;
     agentProxySource = { source: "alias", envVar: "GATEWAY_BASE_URL" };
     warnings.push(

@@ -15,10 +15,27 @@ import {
  */
 export type SessionAuthResult = AuthContext | { denied: SessionDenial } | null;
 
-export const authenticateSession = async (
+/** The person behind a session, before any tenancy is resolved. */
+export interface SessionUserContext {
+  userId: string;
+  userEmail: string;
+}
+
+export type SessionUserResult =
+  | SessionUserContext
+  | { denied: SessionDenial }
+  | null;
+
+/**
+ * The tenancy-free half of session auth: the session provider's user, their
+ * DB row, and the edition's session policy (enterprise "require SSO"). Shared
+ * by `authenticateSession` (which goes on to resolve a workspace/org) and the
+ * session-only surfaces that deliberately have NO tenancy — account-level
+ * routes must keep working for a user who belongs to no organization at all.
+ */
+export const resolveSessionUser = async (
   request: Request,
-  requireWorkspace: boolean,
-): Promise<SessionAuthResult> => {
+): Promise<SessionUserResult> => {
   const session = getSessionProvider();
   const user = await session.getSession(request);
   if (!user) return null;
@@ -37,7 +54,18 @@ export const authenticateSession = async (
     if (denial) return { denied: denial };
   }
 
-  const workspaceId = await resolveWorkspaceId(request, dbUser.id);
+  return { userId: dbUser.id, userEmail: user.email };
+};
+
+export const authenticateSession = async (
+  request: Request,
+  requireWorkspace: boolean,
+): Promise<SessionAuthResult> => {
+  const resolved = await resolveSessionUser(request);
+  if (!resolved || "denied" in resolved) return resolved;
+  const { userId, userEmail } = resolved;
+
+  const workspaceId = await resolveWorkspaceId(request, userId);
 
   if (!workspaceId && requireWorkspace) return null;
 
@@ -47,20 +75,20 @@ export const authenticateSession = async (
     if (!organizationId) return null;
 
     return {
-      userId: dbUser.id,
-      userEmail: user.email,
+      userId,
+      userEmail,
       workspaceId,
       organizationId,
       scope: "session",
     };
   }
 
-  const organizationId = await resolveOrganizationId(request, dbUser.id);
+  const organizationId = await resolveOrganizationId(request, userId);
   if (!organizationId) return null;
 
   return {
-    userId: dbUser.id,
-    userEmail: user.email,
+    userId,
+    userEmail,
     workspaceId: undefined,
     organizationId,
     scope: "session",

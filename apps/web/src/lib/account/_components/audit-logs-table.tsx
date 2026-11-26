@@ -33,8 +33,11 @@ const formatAction = (action: string, service: string) => {
       update: "Updated",
       delete: "Deleted",
       regenerate: "Regenerated",
+      restart: "Restarted",
       connect: "Connected",
       disconnect: "Disconnected",
+      view: "Viewed",
+      run: "Ran",
     }[action] ?? action;
 
   const noun =
@@ -47,6 +50,8 @@ const formatAction = (action: string, service: string) => {
       "app-config": "app config",
       deployment: "deployment",
       workspace: "workspace",
+      conversation: "private conversation",
+      eval: "eval",
     }[service] ?? service;
 
   return `${verb} ${noun}`;
@@ -243,8 +248,14 @@ export const AuditLogsTable = ({ logs }: Props) => {
                 <span>{selected.source}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">User</span>
-                <span>{selected.userEmail}</span>
+                <span className="text-muted-foreground">
+                  {selected.actorKind === "service" ? "Service" : "User"}
+                </span>
+                <span>
+                  {selected.actorKind === "service"
+                    ? (selected.serviceActor ?? "platform service")
+                    : selected.userEmail}
+                </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Scope</span>

@@ -49,6 +49,8 @@ const CONN_WORK = `${P}conn-work`;
 const CONN_PERSONAL = `${P}conn-personal`;
 const CONN_ORG = `${P}conn-orgshared`;
 const CONN_FOREIGN = `${P}conn-foreign`;
+/** A connection on a HELD catalog (no `unlistedReads` opt-in). */
+const CONN_HELD = `${P}conn-cloudflare`;
 const SECRET = `${P}secret`;
 
 const SCOPE = { workspaceId: WORKSPACE, organizationId: ORG };
@@ -150,6 +152,7 @@ beforeAll(async () => {
     organizationId: ORG,
   });
   await conn(CONN_FOREIGN, { workspaceId: OTHER_WORKSPACE });
+  await conn(CONN_HELD, { provider: "cloudflare" });
   await db.secret.create({
     data: {
       id: SECRET,
@@ -205,10 +208,11 @@ const decide = async (opts: {
   path: string;
   method: string;
   winner?: string;
+  host?: string;
 }) => {
   const rules = await engineRules();
   return evaluator.evaluateNew(rules, {
-    host: GMAIL_HOST,
+    host: opts.host ?? GMAIL_HOST,
     path: opts.path,
     method: opts.method,
     agentId: AGENT,
@@ -226,6 +230,76 @@ const grantRows = (extra: Record<string, unknown> = {}) =>
   });
 
 describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
+  it("default attach: reads (listed and unlisted) allowed, writes and unlisted writes need approval", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_WORK,
+      { access: "default" },
+      null,
+    );
+    const read = await decide({
+      path: "/gmail/v1/users/me/messages/abc",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(read.action).toBe("allow");
+    expect(read.requireApproval).toBeFalsy();
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/drafts",
+        method: "POST",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+    // An unlisted read rides on "Other reads", allowed by default.
+    const unlistedRead = await decide({
+      path: "/gmail/v1/users/me/history",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(unlistedRead.action).toBe("allow");
+    expect(unlistedRead.requireApproval).toBeFalsy();
+    // An unlisted write rides on "Other writes", still held for approval.
+    expect(
+      await decide({
+        path: "/gmail/v1/users/me/history",
+        method: "POST",
+        winner: CONN_WORK,
+      }),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
+  it("default attach on a held catalog: unlisted reads need approval, listed reads stay allowed", async () => {
+    await grants.setConnectionGrant(
+      SCOPE,
+      AGENT,
+      CONN_HELD,
+      { access: "default" },
+      null,
+    );
+    expect(
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_HELD,
+      ),
+    ).toMatchObject({ otherReads: "ask", otherWrites: "ask" });
+    const cloudflare = (path: string) =>
+      decide({
+        host: "api.cloudflare.com",
+        path,
+        method: "GET",
+        winner: CONN_HELD,
+      });
+    // A read tool the catalog lists is allowed outright.
+    const listed = await cloudflare("/client/v4/zones");
+    expect(listed.action).toBe("allow");
+    expect(listed.requireApproval).toBeFalsy();
+    // The tunnel token GET is outside the tool list: held for a human.
+    expect(
+      await cloudflare("/client/v4/accounts/a1/cfd_tunnel/t1/token"),
+    ).toMatchObject({ action: "allow", requireApproval: true });
+  });
+
   it("full attach: one whole-app allow rule that decides via the winner and injects", async () => {
     const result = await grants.setConnectionGrant(
       SCOPE,
@@ -266,7 +340,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     ).toBe(true);
   });
 
-  it("custom tri-state: allow / ask / blocked-complement / terminal, bound to the winner", async () => {
+  it("custom tri-state: allow / ask / blocked-complement, unlisted needs approval", async () => {
     await grants.setConnectionGrant(
       SCOPE,
       AGENT,
@@ -280,7 +354,10 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
 
     const draft = await grantRows({ status: "draft" });
+    // allow / ask / blocked / everything-else (needs approval).
     expect(draft).toHaveLength(4);
+    const terminal = draft.find((r) => r.name.endsWith(": everything else"));
+    expect(terminal).toMatchObject({ action: "allow", requireApproval: true });
 
     const allowed = await decide({
       path: "/gmail/v1/users/me/drafts",
@@ -297,8 +374,8 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     });
     expect(asked).toMatchObject({ action: "allow", requireApproval: true });
 
-    // Any other endpoint of the provider dies on the blocked complement or the
-    // terminal — an EXPLICIT block, not a default.
+    // A catalog tool the user did not pick (`search_messages`) dies on the
+    // blocked complement: an EXPLICIT block, not a default.
     const blocked = await decide({
       path: "/gmail/v1/users/me/messages",
       method: "GET",
@@ -306,6 +383,16 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     });
     expect(blocked.action).toBe("block");
     expect(blocked.byDefault).toBeFalsy();
+
+    // An endpoint the catalog does not describe at all (Gmail's `history`
+    // sync) is held for approval by the terminal: not refused outright, and
+    // not silently allowed by the workspace's allow default either.
+    const unlisted = await decide({
+      path: "/gmail/v1/users/me/history",
+      method: "GET",
+      winner: CONN_WORK,
+    });
+    expect(unlisted).toMatchObject({ action: "allow", requireApproval: true });
 
     // The step-1 winner-binding: the same request via the same-provider
     // SIBLING matches none of the stack and rides the workspace's allow default.
@@ -349,6 +436,60 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
       _max: { generation: true },
     });
     expect(genAfter._max.generation).toBe(genBefore._max.generation);
+  });
+
+  it("all other reads / writes: the split publishes its method, decides, reads back, and survives a tools-only save", async () => {
+    const save = (extra: Record<string, unknown> = {}) =>
+      grants.setConnectionGrant(
+        SCOPE,
+        AGENT,
+        CONN_WORK,
+        { access: "custom", allow: ["create_draft"], ask: [], ...extra },
+        null,
+      );
+    await save({ otherReads: "allow", otherWrites: "ask" });
+
+    // The narrowed (stricter, writes) row carries its method on BOTH the
+    // draft and the published copy the gateway loads.
+    for (const status of ["draft", "published"]) {
+      const rows = await grantRows({ status });
+      const writes = rows.find((r) => r.name.endsWith(": all other writes"));
+      const reads = rows.find((r) => r.name.endsWith(": all other reads"));
+      expect(writes?.targets[0]?.method, status).toBe("!GET,HEAD");
+      expect(reads?.targets[0]?.method ?? null, status).toBeNull();
+    }
+
+    // An unlisted read passes the grant, an unlisted write is held.
+    const read = { path: "/gmail/v1/users/me/history", winner: CONN_WORK };
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect(await decide({ ...read, method: "POST" })).toMatchObject({
+      action: "allow",
+      requireApproval: true,
+    });
+
+    const listed = async () =>
+      (await grants.getAgentGrants(SCOPE, AGENT)).connections.find(
+        (c) => c.connectionId === CONN_WORK,
+      );
+    expect(await listed()).toMatchObject({
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+
+    // A tools-only save (an older client, the SDK) keeps both choices, and
+    // the same save again writes nothing.
+    await save({ ask: ["get_message"] });
+    expect(await listed()).toMatchObject({
+      ask: ["get_message"],
+      otherReads: "allow",
+      otherWrites: "ask",
+    });
+    expect(await decide({ ...read, method: "GET" })).toEqual({
+      action: "allow",
+    });
+    expect((await save({ ask: ["get_message"] })).changed).toBe(false);
   });
 
   it("repairs hand-edit drift on the next write", async () => {
@@ -403,7 +544,7 @@ describe.skipIf(!PROOF_URL)("grant compiler over real PostgreSQL", () => {
     );
     expect(published.filter((r) => r.source === "grant")).toHaveLength(0);
 
-    // The stack (including its terminal block) is gone — back to the default.
+    // The whole stack is gone, so the request is back on the default.
     const after = await decide({
       path: "/gmail/v1/users/me/drafts",
       method: "POST",
@@ -809,24 +950,70 @@ describe.skipIf(!PROOF_URL)("a grant reaches the sandbox", () => {
 
   it("granting a secret marks a RUNNING sandbox for respawn", async () => {
     await seedSandbox("running");
+    await db.secret.update({
+      where: { id: SECRET },
+      data: { type: "anthropic" },
+    });
+
+    try {
+      await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+      // `unprovisioned` is what the dispatch seam's start arm claims — the next
+      // poll composes a fresh payload and the runner recreates the container.
+      expect(await sandboxStatus()).toBe("unprovisioned");
+    } finally {
+      await db.secret.update({
+        where: { id: SECRET },
+        data: { type: "generic" },
+      });
+    }
+  });
+
+  it("granting a GENERIC secret leaves the container alone", async () => {
+    // The spawn payload is built from LLM keys only; a generic (custom) secret
+    // is spliced at the wire like a connection. Every new workspace secret is
+    // now granted to every agent at once, so respawning on it would kill every
+    // live session in the workspace to change nothing.
+    await seedSandbox("running");
 
     await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
 
-    // `unprovisioned` is what the dispatch seam's start arm claims — the next
-    // poll composes a fresh payload and the runner recreates the container.
-    expect(await sandboxStatus()).toBe("unprovisioned");
+    expect(await sandboxStatus()).toBe("running");
   });
 
-  it("REVOKING a secret marks it for respawn too", async () => {
+  it("REVOKING an LLM key marks it for respawn too", async () => {
+    await db.secret.update({
+      where: { id: SECRET },
+      data: { type: "anthropic" },
+    });
+    try {
+      await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+      await seedSandbox("running");
+
+      await grants.removeSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
+
+      // Losing the only OAuth secret flips the placeholder back to
+      // `ANTHROPIC_API_KEY`; a container still advertising the old one would
+      // go on sending a header the gateway no longer fills.
+      expect(await sandboxStatus()).toBe("unprovisioned");
+    } finally {
+      await db.secret.update({
+        where: { id: SECRET },
+        data: { type: "generic" },
+      });
+    }
+  });
+
+  it("REVOKING a GENERIC secret leaves the container alone", async () => {
+    // Same reason as the grant: the payload never named it. A detach on every
+    // agent at once (turning a workspace secret off) must not kill every
+    // live session in the workspace.
     await grants.setSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
     await seedSandbox("running");
 
     await grants.removeSecretGrant(SCOPE, HOSTED_AGENT, SECRET, null);
 
-    // Losing the only OAuth secret flips the placeholder back to
-    // `ANTHROPIC_API_KEY`; a container still advertising the old one would go
-    // on sending a header the gateway no longer fills.
-    expect(await sandboxStatus()).toBe("unprovisioned");
+    expect(await sandboxStatus()).toBe("running");
   });
 
   it("an idempotent no-op grant does NOT recreate the container", async () => {

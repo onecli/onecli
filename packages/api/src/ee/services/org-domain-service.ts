@@ -3,40 +3,7 @@ import { resolveTxt } from "node:dns/promises";
 import { domainToASCII } from "node:url";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "../../services/errors";
-
-/**
- * Public email providers that can never be claimed as an organization's
- * domain — a verified domain grants org-level trust over every address on
- * it (SSO routing, JIT membership, identity linking), which must never
- * apply to a shared mailbox provider.
- */
-const PUBLIC_EMAIL_DOMAINS = new Set([
-  "gmail.com",
-  "googlemail.com",
-  "outlook.com",
-  "hotmail.com",
-  "live.com",
-  "msn.com",
-  "yahoo.com",
-  "ymail.com",
-  "icloud.com",
-  "me.com",
-  "mac.com",
-  "aol.com",
-  "proton.me",
-  "protonmail.com",
-  "pm.me",
-  "gmx.com",
-  "gmx.net",
-  "mail.com",
-  "zoho.com",
-  "yandex.com",
-  "yandex.ru",
-  "fastmail.com",
-  "hey.com",
-  "tutanota.com",
-  "tuta.io",
-]);
+import { isPublicEmailDomain } from "../../lib/email-org-name";
 
 /** Post-normalization shape: ascii labels + a 2+ char TLD. */
 const DOMAIN_SHAPE = /^([a-z0-9-]+\.)+[a-z0-9-]{2,}$/;
@@ -77,9 +44,9 @@ const normalizeDomain = (raw: string): string => {
  * or null when the email has no valid domain. Non-throwing: callers on
  * login paths skip rather than error.
  *
- * The PreSignUp Lambda re-implements this as `normalizeEmailDomain`
- * (packages/infra/lambdas/pre-signup/linking.ts) because it can't import this
- * package — keep the two in lockstep.
+ * The identity provider's pre-signup hook re-implements this as
+ * `normalizeEmailDomain` because it can't import this package — keep the
+ * two in lockstep.
  */
 export const emailDomainOf = (email: string): string | null => {
   const at = email.lastIndexOf("@");
@@ -107,7 +74,10 @@ export const createDomain = async (
   createdByUserId: string,
 ) => {
   const domain = normalizeDomain(rawDomain);
-  if (PUBLIC_EMAIL_DOMAINS.has(domain)) {
+  // A verified domain grants org-level trust over every address on it (SSO
+  // routing, JIT membership, identity linking): never for a shared mailbox
+  // provider, regional variants included.
+  if (isPublicEmailDomain(domain)) {
     throw new ServiceError(
       "BAD_REQUEST",
       "Public email providers can't be claimed. Use your company's domain.",

@@ -38,6 +38,11 @@ export const slackPresenceCredentialsSchema = z
     signingSecret: z.string().min(1).optional(),
     botToken: z.string().min(1).optional(),
     appToken: z.string().min(1).optional(),
+    /** True when the app's manifest was created with our OAuth redirect URL,
+     * so a consent URL can install it. Events apps always have one; a socket
+     * app has one only when created on a public HTTPS origin. Absent on
+     * apps created before socket installs existed: those keep the paste. */
+    oauthRedirect: z.boolean().optional(),
   })
   .strict();
 export type SlackPresenceCredentials = z.infer<

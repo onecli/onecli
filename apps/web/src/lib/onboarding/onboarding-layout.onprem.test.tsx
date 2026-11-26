@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // CAPS is resolved at module load — pin the onprem (no-billing) edition.
@@ -27,15 +27,22 @@ vi.mock("@/providers/auth-provider", () => ({
   }),
 }));
 
-const { getSubscriptionStatus, getActiveWorkspacePath } = vi.hoisted(() => ({
+const {
+  getSubscriptionStatus,
+  getActiveWorkspacePath,
+  checkOnboardingComplete,
+  getOnboardingProgress,
+} = vi.hoisted(() => ({
   getSubscriptionStatus: vi.fn(),
   getActiveWorkspacePath: vi.fn(),
+  checkOnboardingComplete: vi.fn(),
+  getOnboardingProgress: vi.fn(),
 }));
 
 vi.mock("@/ee/billing/actions", () => ({ getSubscriptionStatus }));
 vi.mock("@/lib/onboarding/actions", () => ({
-  checkOnboardingComplete: vi.fn(),
-  getOnboardingProgress: vi.fn(),
+  checkOnboardingComplete,
+  getOnboardingProgress,
 }));
 vi.mock("@/lib/workspaces/actions", () => ({ getActiveWorkspacePath }));
 
@@ -48,27 +55,39 @@ vi.mock("@/lib/onboarding/_components/flow-chrome", () => ({
 vi.mock("@/lib/onboarding/_components/onboarding-footer", () => ({
   OnboardingFooter: () => null,
 }));
-vi.mock("@/lib/onboarding/_components/onboarding-escape-hatch", () => ({
-  OnboardingEscapeHatch: () => null,
-}));
 
 import OnboardingLayout from "./onboarding-layout";
 
 beforeEach(() => {
   replace.mockReset();
   getSubscriptionStatus.mockReset();
-  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1/overview");
+  checkOnboardingComplete.mockReset().mockResolvedValue(false);
+  getOnboardingProgress.mockReset().mockResolvedValue({
+    discovery: [],
+    agentName: null,
+  });
+  getActiveWorkspacePath.mockReset().mockResolvedValue("/w/p1");
 });
 
 afterEach(cleanup);
 
 describe("onboarding layout (onprem)", () => {
-  it("bounces a direct visit home without ever touching the billing action", async () => {
+  it("bounces a direct visit home without booting the flow or touching billing", async () => {
     // MUTATION-TESTED (the onprem guard): drop the !CAPS.billing branch and a
-    // self-hosted direct visit runs the EE billing action head-on — the
-    // headerless 500 the release blocker asked to make unreachable.
+    // fresh, never-onboarded self-hosted owner who types /onboarding gets the
+    // cloud-only walkthrough booted for them. Onboarding is cloud-only.
     render(<OnboardingLayout>step</OnboardingLayout>);
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1/overview"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/w/p1"));
+    expect(screen.queryByText("step")).toBeNull();
     expect(getSubscriptionStatus).not.toHaveBeenCalled();
+    expect(checkOnboardingComplete).not.toHaveBeenCalled();
+    expect(getOnboardingProgress).not.toHaveBeenCalled();
+  });
+
+  it("fails OPEN when the workspace lookup rejects: home, never a spinner", async () => {
+    getActiveWorkspacePath.mockRejectedValue(new Error("500"));
+    render(<OnboardingLayout>step</OnboardingLayout>);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    expect(screen.queryByText("step")).toBeNull();
   });
 });

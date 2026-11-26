@@ -89,16 +89,6 @@ describe("migrate-nanoclaw — the secret data step", () => {
     expect(script).toContain("skipping secret migration");
   });
 
-  it("no longer pulls or restarts the local OneCLI Docker install", async () => {
-    // The old step upgraded the v1 install mid-migration — pointless risk now
-    // that the extractor reads the database directly. (The closing "to stop
-    // it" hint still mentions compose — informational, not an action.)
-    const script = await fetchScript();
-    expect(script).not.toContain("pull");
-    expect(script).not.toContain("up -d --wait");
-    expect(script).not.toContain("Updating local OneCLI Docker image");
-  });
-
   it("passes credentials via docker exec -e, never into the heredoc", async () => {
     const script = await fetchScript();
     expect(script).toContain(

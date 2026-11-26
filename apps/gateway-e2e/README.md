@@ -70,6 +70,21 @@ pnpm --filter @onecli/gateway-e2e test:e2e
 
 Teardown: `docker rm -f gwe2e-db gwe2e-redis`.
 
+### Real approval expiration
+
+The normal approval suite covers explicit review decisions. To also exercise the
+shipped 180-second approval deadline and verify a subsequent request needs fresh
+approval, run the opt-in slow test with the same database/Redis environment:
+
+```bash
+E2E_APPROVAL_EXPIRATION=1 pnpm --filter @onecli/gateway-e2e test:e2e:no-build tests/approval-expiration.test.ts
+```
+
+This runs both Redis and in-memory approval stores, taking just over six minutes
+when run serially. Neither lane shortens the gateway timer. The HTTP client's
+deadline is longer than the approval deadline so the tests observe the gateway's
+expiration response rather than a client-side timeout.
+
 ## Isolation
 
 Two mechanisms, and both are required.
@@ -95,7 +110,7 @@ every file underneath it moved.
 Two properties are worth calling out because nothing else in the repo guards them, and both
 fail **open** — a regression in either is silent, and every other test stays green:
 
-- **`has_injections`** (`src/gateway/forward.rs`) feeds the deny-by-default carve. If it goes
+- **`has_injections`** (`apps/gateway/crates/proxy/src/forward.rs`) feeds the deny-by-default carve. If it goes
   false, every Default-Rule Block stops enforcing. Pinned by the pair in `policy.test.ts` — same
   org default rule, granted credential present vs absent.
 - **Grant-driven injection** (attach-model step 7): nothing from the org/workspace tiers injects
@@ -103,7 +118,7 @@ fail **open** — a regression in either is silent, and every other test stays g
   dropped outright). Pinned by `grants.test.ts`. The silent-vacuity trap inverted with step 7:
   a world that seeds credentials but forgets `grantAll` (or granting rules) makes every
   injection assertion pass against a gateway that injects nothing at all — say `grantAll`.
-- **`needs_body_buffer`** (`policy_engine/enforce.rs`) feeds body buffering. If the body
+- **`needs_body_buffer`** (`apps/gateway/crates/policy-engine/src/enforce.rs`) feeds body buffering. If the body
   is not buffered, a `body contains` block rule sees `None` and never matches. Pinned by the
   pair in `policy.test.ts` — same rule, body with and without the value.
 
@@ -119,12 +134,18 @@ Known gaps, all deliberate:
   bidirectional piping and the non-101 passthrough — is covered against a live stub.
 - **No provider-catalog host logic.** Fixtures use generic secrets on `127.0.0.1`, so the
   catalog's host-coverage rules are not exercised.
-- **No app-connection injection reaching an upstream.** Provider hosts cannot be redirected to
-  a local stub — no `host_rewrite` is set by any provider, and the HTTP client installs no DNS
-  override — so asserting an OAuth credential _arrived_ would need real egress. The
-  resolution outcomes (ambiguity, not-found) are covered instead, since they answer before any
-  socket opens.
-- **No approval timeout.** It is 180 seconds.
+- **No app-connection injection reaching an upstream over TLS.** Provider hosts cannot be
+  redirected to a local stub: no `host_rewrite` is set by any provider, and the HTTP client
+  installs no DNS override. The exceptions are `oauth-refresh.test.ts` and
+  `credential-refresh.test.ts`: they point the gateway's outbound clients at a recording
+  forward proxy (`src/forward-proxy.ts`, via `HTTPS_PROXY`/`HTTP_PROXY`), which counts
+  token-refresh attempts as refused `CONNECT`s and reads the credential injected into a
+  plain-`http://` request, still with no egress. A client-credentials connection stores its
+  own token URL, so `credential-refresh.test.ts` also completes a real re-mint against a
+  local stub (exempted with `NO_PROXY`). The resolution outcomes (ambiguity, not-found) are
+  covered elsewhere, since they answer before any socket opens.
+- **No approval timeout in the default run.** The opt-in expiration suite above
+  exercises the real 180-second deadline on both approval backends.
 - **No live KMS decryption.** The KMS backend is hosted-cloud plumbing; its envelope format
   is unit-pinned cross-language (see above), and the live AWS round-trip is proven by cloud
   deploys, not this suite.

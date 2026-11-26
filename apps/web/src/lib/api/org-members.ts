@@ -5,7 +5,6 @@ import type {
   DirectoryPage,
   DirectoryListParams,
   OrgMemberListRow,
-  GroupRow,
 } from "./types";
 
 // Member lifecycle (suspend/reinstate) + break-glass SSO exemption, plus the
@@ -29,7 +28,3 @@ export const list = (
     `${base}${qs ? `?${qs}` : ""}`,
   );
 };
-
-/** Reverse lookup: the groups a member belongs to. */
-export const groupsFor = (userId: string) =>
-  apiGet<DirectoryPage<GroupRow>>(`${base}/${userId}/groups`);

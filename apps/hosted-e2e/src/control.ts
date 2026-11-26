@@ -44,13 +44,6 @@ export const pendingApprovals = async (
 ): Promise<ReadonlyArray<PendingApproval>> =>
   fetchPending(gw, apiKey, "/v1/approvals/pending");
 
-/** The org feed, polled with a bare `oc_org_` key (no workspace header). */
-export const pendingOrgApprovals = async (
-  gw: GatewayHandle,
-  orgApiKey: string,
-): Promise<ReadonlyArray<PendingApproval>> =>
-  fetchPending(gw, orgApiKey, "/v1/org/approvals/pending");
-
 export interface DecisionResult {
   readonly status: number;
   readonly body: unknown;
@@ -90,19 +83,4 @@ export const waitForApproval = async (
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(`no approval appeared within ${String(timeoutMs)}ms`);
-};
-
-/** Poll the ORG feed until an approval shows up. */
-export const waitForOrgApproval = async (
-  gw: GatewayHandle,
-  orgApiKey: string,
-  timeoutMs = 15_000,
-): Promise<PendingApproval> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const pending = await pendingOrgApprovals(gw, orgApiKey);
-    if (pending[0] !== undefined) return pending[0];
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`no org approval appeared within ${String(timeoutMs)}ms`);
 };

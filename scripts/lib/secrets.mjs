@@ -56,12 +56,21 @@ export const SECRET_SPECS = [
     comment: "The channel adapter's rnr_ twin: same one-value-two-processes deal.",
   },
   {
+    key: "RUNNER_SESSION_KEY",
+    // `kid.secret`: the runner reads a comma-separated keyring (FIRST entry
+    // signs, all verify), so rotation is `k2.<new>,k1.<old>` then `k2.<new>`.
+    generate: () => `k1.${randomBytes(32).toString("hex")}`,
+    isValid: nonEmpty,
+    comment:
+      "Signs supervisor-session credentials so a runner restart keeps every sandbox channel. Only the runner reads it.",
+  },
+  {
     key: "SSH_TERMINATOR_SECRET",
     generate: base64Key,
     isValid: nonEmpty,
     // The api and the ssh-terminator share this ONE value (the terminator's
     // control-plane token = the api's SSH_TERMINATOR_SECRET). Cloud injects
-    // it from Secrets Manager, and the coupled SSH key material (CA key,
+    // it as a deployment secret, and the coupled SSH key material (CA key,
     // host key) is provisioned only outside cloud by ensureSshEnv — so mint
     // this only outside cloud too, or the surface half-arms (a live
     // /v1/ssh-terminator with no CA behind it).

@@ -9,17 +9,17 @@ import { logger } from "./logger";
 const log = logger.child({ component: "terminator-metrics" });
 
 /**
- * The terminator's session metrics, in the per-env platform namespace.
- * DRAINED, never per-event (changed at step 6): the SSH listener is the
- * platform's only internet-facing unauthenticated port, and a per-event
- * PutMetricData turns an auth-failure flood into a metered-API amplification
- * that throttles away exactly the datapoints the ssh-auth-failures alarm
- * needs. Counters accumulate in-process and one flush per pump tick
- * publishes everything; a failed publish restores the counters (parkd's
- * drain law — a flaky CloudWatch must not under-count failures exactly when
- * observability matters). Wake-wait samples ride one Values/Counts array
- * datum (raw values, so percentile stats keep working); sample loss on a
- * failed publish is accepted — latency telemetry, never correctness state.
+ * The terminator's session metrics, in the configured namespace.
+ * DRAINED, never per-event: the SSH listener is an internet-facing
+ * unauthenticated port, and a per-event publish turns an auth-failure flood
+ * into a metered-API amplification that throttles away exactly the
+ * datapoints an auth-failure alarm needs. Counters accumulate in-process and
+ * one flush per pump tick publishes everything; a failed publish restores
+ * the counters (a flaky metrics backend must not under-count failures
+ * exactly when observability matters). Wake-wait samples ride one
+ * Values/Counts array datum (raw values, so percentile stats keep working);
+ * sample loss on a failed publish is accepted — latency telemetry, never
+ * correctness state.
  */
 
 /** PutMetricData caps Values at 150 entries per datum; drop-oldest past it. */
@@ -35,15 +35,15 @@ export interface TerminatorMetrics {
   /**
    * Drain-and-publish one PutMetricData call. `liveSessions` is sampled at
    * flush time and published every tick, zero included — the dimensionless
-   * series doubles as the terminator's liveness heartbeat (prod-only
-   * terminator-silent alarm). The pump's ticks fire-and-forget the returned
+   * series doubles as the terminator's liveness heartbeat (a liveness alarm
+   * can watch it). The pump's ticks fire-and-forget the returned
    * promise; the shutdown path AWAITS it so the drain's final counters land
    * before the process exits. Always resolves (a failed publish restores the
    * counters and logs — it never throws).
    */
   flush(liveSessions: number): Promise<void>;
   /**
-   * One flush per minute (parkd's cadence — the terminator-silent liveness
+   * One flush per minute (the terminator-silent liveness
    * alarm reads the SshSessionsLive series this keeps continuous). The
    * returned stop clears the timer and runs (and returns) the FINAL flush,
    * so a rollout's drain-window counters are never lost with the process —
@@ -132,7 +132,7 @@ export const createTerminatorMetrics = (
         )
         .then(() => undefined)
         .catch((error: unknown) => {
-          // Restore the counters so a flaky CloudWatch cannot under-count;
+          // Restore the counters so a flaky metrics backend cannot under-count;
           // wake-wait samples are accepted loss (telemetry, bounded buffer).
           opened += drained.opened;
           closed += drained.closed;
@@ -147,9 +147,9 @@ export const createTerminatorMetrics = (
 
 /**
  * The non-cloud arm: a deliberate no-op. A self-host or dev run has no
- * CloudWatch (and often no AWS credentials at all) — publishing would just
- * warn-loop once a minute forever. Selected by config presence (no
- * Secrets-Manager host-key ARN), never by edition.
+ * metrics backend (and often no AWS credentials at all) — publishing would
+ * just warn-loop once a minute forever. Selected by config presence (no
+ * host-key secret ARN), never by edition.
  */
 export const createNoopTerminatorMetrics = (): TerminatorMetrics => ({
   sessionOpened: () => undefined,

@@ -3,10 +3,10 @@ import type Stripe from "stripe";
 
 // The webhook is the source of truth for subscriptionStatus. These tests drive
 // the real route with Stripe + the DB mocked, and assert the write behavior of
-// customer.subscription.updated (immediate plan reconcile) and .deleted
-// (downgrade to free). Plan *resolution* is unit-tested in
-// subscription-plan.test.ts; here it's stubbed so assertions read the status
-// gating, not the price map.
+// customer.subscription.updated (immediate plan reconcile, free on a failed
+// payment) and .deleted (downgrade to free). Plan *resolution* is unit-tested
+// in subscription-plan.test.ts; here it's stubbed so assertions read the
+// status gating, not the price map.
 
 // The router is edition-dark off cloud and `IS_CLOUD` freezes at module load,
 // so pin cloud before the graph loads — this file tests the in-cloud
@@ -25,6 +25,8 @@ const state = vi.hoisted(() => ({
   /** Per-id retrieve responses (falls back to retrieveSub). */
   retrieveSubById: {} as Record<string, unknown>,
   retrieveThrows: false,
+  /** Subscription ids passed to subscriptions.retrieve, in order. */
+  retrieveCalls: [] as string[],
   /** Ordered log of subscription update/cancel calls. */
   subscriptionOps: [] as string[],
   subscriptionUpdates: [] as Array<{ id: string; params: unknown }>,
@@ -35,6 +37,10 @@ const state = vi.hoisted(() => ({
   listThrows: false,
   /** Subscriptions returned by subscriptions.search (org-metadata backstop). */
   searchSubs: [] as unknown[],
+  /** invoicePayments.list response for the invoice.paid PM adoption. */
+  invoicePayments: [] as unknown[],
+  /** paymentIntents.retrieve response (expanded payment_method). */
+  paymentIntent: null as unknown,
   /** The org row's stored Stripe customer (deleted-handler lookup scope). */
   orgStripeCustomerId: "cus_1" as string | null,
 }));
@@ -50,7 +56,10 @@ vi.mock("@onecli/db", () => ({
         return { count: 1 };
       },
       findUnique: async () => ({
+        name: "Org One",
+        subscriptionStatus: "pro",
         stripeCustomerId: state.orgStripeCustomerId,
+        members: [],
       }),
     },
   },
@@ -61,6 +70,7 @@ vi.mock("../billing/stripe", () => ({
     webhooks: { constructEvent: (body: string) => JSON.parse(body) },
     subscriptions: {
       retrieve: async (id: string) => {
+        state.retrieveCalls.push(id);
         if (state.retrieveThrows) throw new Error("stripe unavailable");
         return (state.retrieveSubById[id] ??
           state.retrieveSub) as unknown as Stripe.Subscription;
@@ -82,6 +92,12 @@ vi.mock("../billing/stripe", () => ({
         return { data: state.listSubs };
       },
       search: async () => ({ data: state.searchSubs }),
+    },
+    invoicePayments: {
+      list: async () => ({ data: state.invoicePayments }),
+    },
+    paymentIntents: {
+      retrieve: async () => state.paymentIntent,
     },
     customers: {
       retrieve: async () => ({
@@ -130,10 +146,19 @@ const updatedEvent = (
   data: { object },
 });
 
+/** The freshly retrieved subscription after a payment on it failed. */
+const pastDueSub = (status: "past_due" | "unpaid") => ({
+  id: "sub_1",
+  status,
+  customer: "cus_1",
+  metadata: { organizationId: "org-1" },
+});
+
 beforeEach(() => {
   state.updateManyCalls = [];
   state.retrieveSub = null;
   state.retrieveSubById = {};
+  state.retrieveCalls = [];
   state.retrieveThrows = false;
   state.subscriptionOps = [];
   state.subscriptionUpdates = [];
@@ -141,6 +166,8 @@ beforeEach(() => {
   state.listSubsByCustomer = {};
   state.listThrows = false;
   state.searchSubs = [];
+  state.invoicePayments = [];
+  state.paymentIntent = null;
   state.orgStripeCustomerId = "cus_1";
   vi.mocked(notifyDiscord).mockClear();
 });
@@ -178,9 +205,10 @@ describe("customer.subscription.updated", () => {
     expect(state.updateManyCalls[0]!.data.subscriptionStatus).toBe("team");
   });
 
-  it("does NOT change the plan while a payment is retrying (past_due)", async () => {
-    // Dunning is non-terminal: hold the current plan and let retries resolve.
-    state.retrieveSub = { status: "past_due" };
+  it("drops the org to free as soon as a payment fails (past_due)", async () => {
+    // The product rule: a failed payment means free right away, not after
+    // Stripe's retries run out. The plan comes back when a payment succeeds.
+    state.retrieveSub = pastDueSub("past_due");
     const res = await post(
       updatedEvent({
         id: "sub_1",
@@ -189,8 +217,168 @@ describe("customer.subscription.updated", () => {
       }),
     );
     expect(res.status).toBe(200);
-    expect(state.updateManyCalls).toHaveLength(0);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+    // Still a subscriber while Stripe retries: not churn.
+    expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
   });
+
+  it("drops the org to free when retries stopped without canceling (unpaid)", async () => {
+    state.retrieveSub = pastDueSub("unpaid");
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+  });
+
+  it("restores the plan when the payment succeeds after a failure", async () => {
+    const event = updatedEvent({
+      id: "sub_1",
+      metadata: { organizationId: "org-1" },
+      cancel_at_period_end: false,
+    });
+
+    state.retrieveSub = pastDueSub("past_due");
+    await post(event);
+    state.retrieveSub = { ...pastDueSub("past_due"), status: "active" };
+    await post(event);
+
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+      { subscriptionStatus: "team" },
+    ]);
+  });
+
+  it("keeps the plan of another live subscription the org still holds", async () => {
+    state.retrieveSub = pastDueSub("past_due");
+    state.searchSubs = [
+      {
+        id: "sub_live",
+        status: "active",
+        customer: "cus_other",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(
+      state.updateManyCalls.find((c) => "subscriptionStatus" in c.data)?.data,
+    ).toEqual({ subscriptionStatus: "team" });
+    expect(
+      state.updateManyCalls.find((c) => "stripeCustomerId" in c.data)?.data,
+    ).toEqual({ stripeCustomerId: "cus_other" });
+  });
+
+  it("still drops to free when the search only echoes the failing subscription", async () => {
+    // Stripe's search index lags: it can still report the failing sub as
+    // active. That echo must not count as another live subscription.
+    state.retrieveSub = pastDueSub("past_due");
+    state.searchSubs = [
+      {
+        id: "sub_1",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-1" },
+      },
+    ];
+
+    await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+    ]);
+  });
+
+  it("ignores another org's live subscription on a shared customer", async () => {
+    // Cross-tenant fence: a shared customer's sub labeled with ANOTHER org's
+    // id must never keep this past-due org on a paid plan.
+    state.retrieveSub = pastDueSub("past_due");
+    state.listSubs = [
+      {
+        id: "sub_other",
+        status: "active",
+        customer: "cus_1",
+        metadata: { organizationId: "org-2" },
+      },
+    ];
+
+    await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(state.updateManyCalls).toEqual([
+      {
+        where: { id: "org-1", subscriptionStatus: { not: "aws-marketplace" } },
+        data: { subscriptionStatus: "free" },
+      },
+    ]);
+  });
+
+  it("falls back to free when the remaining-subscription lookup fails", async () => {
+    state.retrieveSub = pastDueSub("past_due");
+    state.listThrows = true;
+
+    const res = await post(
+      updatedEvent({
+        id: "sub_1",
+        metadata: { organizationId: "org-1" },
+        cancel_at_period_end: false,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(state.updateManyCalls.map((c) => c.data)).toEqual([
+      { subscriptionStatus: "free" },
+    ]);
+  });
+
+  it.each(["incomplete", "incomplete_expired", "paused"])(
+    "leaves the plan alone for a %s subscription",
+    async (status) => {
+      state.retrieveSub = { status };
+      const res = await post(
+        updatedEvent({
+          id: "sub_1",
+          metadata: { organizationId: "org-1" },
+          cancel_at_period_end: false,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(state.updateManyCalls).toHaveLength(0);
+    },
+  );
 
   it("does NOT re-provision when a stale update arrives after cancellation", async () => {
     // The event payload can look active, but webhooks are unordered — we act on
@@ -549,5 +737,142 @@ describe("customer.subscription.deleted", () => {
       state.updateManyCalls.find((c) => "subscriptionStatus" in c.data)?.data,
     ).toEqual({ subscriptionStatus: "team" });
     expect(vi.mocked(notifyDiscord)).not.toHaveBeenCalled();
+  });
+});
+
+describe("invoice.paid: adopt the paying payment method", () => {
+  // billing_reason "manual" keeps notifyPaymentCollected out of the way; the
+  // adoption runs for any paid subscription invoice.
+  const paidEvent = (overrides: Record<string, unknown> = {}) => ({
+    type: "invoice.paid",
+    data: {
+      object: {
+        id: "in_1",
+        amount_paid: 1250,
+        billing_reason: "manual",
+        parent: { subscription_details: { subscription: "sub_1" } },
+        ...overrides,
+      },
+    },
+  });
+
+  const paidWith = (pm: Record<string, unknown>) => {
+    state.invoicePayments = [
+      { payment: { type: "payment_intent", payment_intent: "pi_1" } },
+    ];
+    state.paymentIntent = { id: "pi_1", payment_method: pm };
+  };
+
+  it("pins the new card as the subscription default (the dead-Link incident)", async () => {
+    paidWith({ id: "pm_card", customer: "cus_1" });
+    state.retrieveSubById = {
+      sub_1: {
+        id: "sub_1",
+        customer: "cus_1",
+        default_payment_method: "pm_link",
+      },
+    };
+
+    const res = await post(paidEvent());
+
+    expect(res.status).toBe(200);
+    expect(state.subscriptionUpdates).toEqual([
+      { id: "sub_1", params: { default_payment_method: "pm_card" } },
+    ]);
+  });
+
+  it("does nothing when the paying method is already the default", async () => {
+    paidWith({ id: "pm_card", customer: "cus_1" });
+    state.retrieveSubById = {
+      sub_1: {
+        id: "sub_1",
+        customer: "cus_1",
+        default_payment_method: "pm_card",
+      },
+    };
+
+    await post(paidEvent());
+
+    expect(state.subscriptionUpdates).toHaveLength(0);
+  });
+
+  it("leaves a subscription without its own default alone", async () => {
+    // It already follows the customer default; pinning would freeze it.
+    paidWith({ id: "pm_card", customer: "cus_1" });
+    state.retrieveSubById = {
+      sub_1: { id: "sub_1", customer: "cus_1", default_payment_method: null },
+    };
+
+    await post(paidEvent());
+
+    expect(state.subscriptionUpdates).toHaveLength(0);
+  });
+
+  it("never pins a method belonging to a different customer", async () => {
+    paidWith({ id: "pm_other", customer: "cus_other" });
+    state.retrieveSubById = {
+      sub_1: {
+        id: "sub_1",
+        customer: "cus_1",
+        default_payment_method: "pm_link",
+      },
+    };
+
+    await post(paidEvent());
+
+    expect(state.subscriptionUpdates).toHaveLength(0);
+  });
+
+  it("skips zero-amount invoices", async () => {
+    paidWith({ id: "pm_card", customer: "cus_1" });
+    state.retrieveSubById = {
+      sub_1: { id: "sub_1", customer: "cus_1", default_payment_method: null },
+    };
+
+    await post(paidEvent({ amount_paid: 0 }));
+
+    expect(state.subscriptionUpdates).toHaveLength(0);
+  });
+
+  it("acks (200) when the Stripe lookup fails", async () => {
+    state.invoicePayments = [
+      { payment: { type: "payment_intent", payment_intent: "pi_1" } },
+    ];
+    state.paymentIntent = {
+      id: "pi_1",
+      payment_method: { id: "pm_card", customer: "cus_1" },
+    };
+    state.retrieveThrows = true;
+
+    const res = await post(paidEvent());
+
+    expect(res.status).toBe(200);
+    expect(state.subscriptionUpdates).toHaveLength(0);
+  });
+
+  it("renewal (subscription_cycle): one retrieve feeds both the adoption and the notification", async () => {
+    paidWith({ id: "pm_card", customer: "cus_1" });
+    state.retrieveSubById = {
+      sub_1: {
+        id: "sub_1",
+        customer: "cus_1",
+        default_payment_method: "pm_link",
+        metadata: { organizationId: "org-1" },
+      },
+    };
+
+    const res = await post(paidEvent({ billing_reason: "subscription_cycle" }));
+
+    expect(res.status).toBe(200);
+    expect(state.retrieveCalls).toEqual(["sub_1"]);
+    expect(state.subscriptionUpdates).toEqual([
+      { id: "sub_1", params: { default_payment_method: "pm_card" } },
+    ]);
+    expect(vi.mocked(notifyDiscord)).toHaveBeenCalledWith(
+      "payment_collected",
+      // The paid subscription's plan (stubbed "team"), not the org row's
+      // ("pro"): a recovery payment can land while the row still says free.
+      expect.objectContaining({ organizationName: "Org One", plan: "team" }),
+    );
   });
 });

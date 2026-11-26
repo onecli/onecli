@@ -2,7 +2,7 @@
  * THE SANDBOX BACKEND SEAM (plans/hosted-agents-v2.md §3.14 rule 2, §3.9).
  *
  * The runner's lifecycle logic speaks only this interface. v2 ships local
- * Docker; gVisor, microVMs, Fly, and managed substrates are ADDED backends,
+ * Docker; other runtimes and managed substrates are ADDED backends,
  * never edits to the runner — and the home contract is part of the same
  * interface, so a new substrate brings its own durability implementation
  * behind the same opaque ref.
@@ -11,6 +11,13 @@
  * container runtime, and no runtime library may be imported outside its own
  * backend directory (the review greps for it, same rule as invariant 9).
  */
+
+import type {
+  SandboxResourceObservation,
+  SandboxResourceSupport,
+  SandboxResourceBounds,
+  SandboxStartResources,
+} from "@onecli/agent-protocol";
 
 /**
  * The backend could not OBTAIN the sandbox image — it is not present where
@@ -35,8 +42,9 @@ export class ImageUnavailableError extends Error {
  * (the ImageUnavailableError pattern) so the runner can classify it
  * `reasonCode: "at_capacity"` — the control plane's honest "too many agents
  * are running right now" copy — without knowing any substrate's error
- * shapes. On the cloud backend this carries the manager's 422
- * `workspace_quota_exceeded` (the per-workspace ResourceQuota, step 6).
+ * shapes. On the cloud backend this carries the remote service's 422
+ * `workspace_quota_exceeded` (its per-workspace capacity limit), which
+ * only the wake (the one call that allocates a home) can hit.
  */
 export class SandboxCapacityError extends Error {
   constructor(detail: string) {
@@ -47,6 +55,41 @@ export class SandboxCapacityError extends Error {
 
 /** Where a home lives, as far as anything above the backend knows. */
 export type HomeRef = string;
+
+/**
+ * The typed reasons a wake may be HELD by its backend (a `waking` answer
+ * that carries a reason), forwarded verbatim as the start's `reasonCode`:
+ * `waiting_for_capacity` is "capacity is being brought up for this home",
+ * `enrollment_required` is "the control plane has not committed this
+ * home's enrollment yet". Neither is a failure: the runner keeps polling
+ * under its own ceiling instead of the ordinary wake budget, so a slow
+ * control plane can no more turn a healthy wake into a start failure than
+ * slow capacity can. A backend answering any other word is making
+ * ordinary progress.
+ */
+export const WAKE_HOLD_REASONS = [
+  "waiting_for_capacity",
+  "enrollment_required",
+] as const;
+export type WakeHoldReason = (typeof WAKE_HOLD_REASONS)[number];
+
+/**
+ * A wake stayed HELD for capacity past the backend's capacity ceiling: the
+ * backend never found capacity for the home in time. A sibling of
+ * `SandboxCapacityError` (the runner reports it `at_capacity`, the honest
+ * copy, and the control plane's patience window applies), kept distinct
+ * so the operator trail names the hold reason and the ceiling it exhausted.
+ */
+export class WakeCapacityTimeoutError extends SandboxCapacityError {
+  constructor(
+    readonly homeRef: HomeRef,
+    readonly reason: WakeHoldReason,
+    readonly ceilingSeconds: number,
+  ) {
+    super(`home ${homeRef} stayed ${reason} for more than ${ceilingSeconds}s`);
+    this.name = "WakeCapacityTimeoutError";
+  }
+}
 
 /** Where a running (or stopped) sandbox lives. */
 export type ContainerRef = string;
@@ -65,10 +108,11 @@ export interface SandboxFileSpec {
 }
 
 export interface SandboxSpec {
+  resources?: SandboxStartResources;
   sandboxId: string;
   /**
    * The workspace the sandbox's agent lives in — a DOMAIN id, not a runtime
-   * concept. Namespaced backends (the cloud manager) fence every sandbox
+   * concept. Namespaced backends fence every sandbox
    * inside its workspace; the Docker backend ignores it. Optional because an
    * older control plane may not send it — a backend that requires it refuses
    * loudly instead of guessing.
@@ -86,22 +130,43 @@ export interface SandboxSpec {
    * "credentials changed, recreate it".
    */
   payloadHash: string;
+  /**
+   * Whether the runner that spawned this sandbox hands out supervisor
+   * sessions (the resumable channel). Persisted ON the container, because
+   * the fact outlives the process: a restarted runner must grant the
+   * resume grace only to a sandbox whose supervisor can actually hold a
+   * session. One spawned by a keyless runner is retrying a token that died
+   * with that process, and waiting for it only delays the old recovery.
+   */
+  resumable: boolean;
 }
 
 /** What the backend currently holds for a sandbox — the reconcile input. */
 export interface SandboxSnapshot {
+  resourceObservation?: SandboxResourceObservation;
   sandboxId: string;
   containerRef: ContainerRef;
   running: boolean;
   payloadHash: string | null;
+  /** The spawn-time `SandboxSpec.resumable` mark; false when the container
+   * predates it (spawned by a pre-feature runner) or the substrate lost it. */
+  resumable: boolean;
   /**
-   * The substrate's own lifecycle phase, when it has one (a Kubernetes pod
-   * phase). Absent/null on substrates without the concept — consumers must
+   * The substrate's own lifecycle phase, when it has one (an orchestrator's
+   * pod phase). Absent/null on substrates without the concept — consumers must
    * treat that as "running is the whole truth". The boot-crash classifier
    * reads it to tell a genuinely TERMINAL container from one that is merely
    * not running yet (Pending while its image pulls).
    */
   phase?: string | null;
+  /**
+   * The machine the substrate placed this sandbox on, when it has the
+   * concept (a cluster's node name). Absent on single-host substrates.
+   * Rides a read-only-home report so the control plane can tell one bad
+   * machine from a fleet-wide problem; always the substrate's word, never
+   * the guest's.
+   */
+  node?: string;
 }
 
 /**
@@ -129,6 +194,15 @@ export interface ManagedObject {
 }
 
 export interface SandboxBackend {
+  /** Only advertise axes this backend actually enforces. */
+  readonly resourceSupport?: SandboxResourceSupport;
+  readonly resourceBounds?: SandboxResourceBounds;
+  readonly defaultHomeGiB?: number;
+  /** Read substrate state, never synthesize an observation from a request. */
+  resourceObservation?(
+    ref: ContainerRef,
+    resources: SandboxStartResources,
+  ): Promise<SandboxResourceObservation | undefined>;
   /** Backend id, reported at registration (never a routing key). */
   readonly id: string;
 
@@ -154,11 +228,48 @@ export interface SandboxBackend {
   identify(runnerId: string): void;
 
   // ── Homes (the §3.9 seam) ────────────────────────────────────────
-  provisionHome(sandboxId: string): Promise<HomeRef>;
+  /**
+   * The ref of a sandbox's home: a pure function of the id, with no I/O,
+   * and always exactly what `provisionHome` returns for that id. Every
+   * per-sandbox home operation addresses the home by this name, never by
+   * enumerating homes, whose cost grows with the fleet. `listHomes` is for
+   * reconcile's reap alone.
+   */
+  homeRefFor(sandboxId: string): HomeRef;
+  /**
+   * Ensure the sandbox's home exists and return its ref. An IDEMPOTENT
+   * ensure: provisioning an existing home returns that same home, untouched.
+   * The start path relies on this to resolve the home in one call.
+   */
+  provisionHome(
+    sandboxId: string,
+    resources?: SandboxStartResources,
+  ): Promise<HomeRef>;
   destroyHome(ref: HomeRef): Promise<void>;
   /** No-ops on `resident` backends; archive/restore on `snapshot` ones. */
   parkHome(ref: HomeRef): Promise<void>;
-  wakeHome(ref: HomeRef): Promise<void>;
+  /**
+   * Make the home mountable, awaited to `ready`. `workspaceId` (the
+   * `stopSandbox` optional-hint precedent) is where the sandbox will run:
+   * a `snapshot` backend may BIRTH a brand-new home here (carve its disk
+   * and bring up its device before the sandbox exists), and that needs a
+   * placement only the caller knows. A home that already exists (local or
+   * archived) is always placed by the backend's own truth, never by this
+   * hint; `resident` backends ignore it.
+   *
+   * `onHold` (optional, additive) is told each time the backend learns the
+   * wake is HELD rather than progressing (a typed reason the backend
+   * answers, e.g. `waiting_for_capacity` while capacity is being brought
+   * up for the home). The runner forwards it as the start's `reasonCode` so
+   * the control plane can show an honest wait instead of a silent
+   * "starting". Backends that wake synchronously never call it.
+   */
+  wakeHome(
+    ref: HomeRef,
+    workspaceId?: string,
+    resources?: SandboxStartResources,
+    onHold?: (reason: WakeHoldReason) => void,
+  ): Promise<void>;
   listHomes(): Promise<Array<{ sandboxId: string; ref: HomeRef }>>;
 
   // ── Sandboxes ─────────────────────────────────────────────────────────

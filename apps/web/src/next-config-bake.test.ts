@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // The build-time env bake in next.config.js: full URLs pass through first
-// (what cloud CI sends), the bare-domain vars remain a deprecated fallback,
+// (what a cloud build sends), the bare-domain vars remain a deprecated fallback,
 // and a var-less build (the published self-host images) bakes the localhost
 // last resorts. Nothing pinned this before — the only proof the cloud bundle
 // baked the right origins was a deployed image.

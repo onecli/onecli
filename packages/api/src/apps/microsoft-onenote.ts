@@ -8,7 +8,10 @@ import {
 
 export const microsoftOnenote: AppDefinition = {
   id: "microsoft-onenote",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/microsoft-onenote",
   name: "Microsoft OneNote",
+  apiDocsUrl:
+    "https://learn.microsoft.com/en-us/graph/api/resources/onenote-api-overview?view=graph-rest-1.0",
   icon: "/icons/microsoft-onenote.svg",
   description:
     "Read and manage notebooks, sections, and pages in Microsoft OneNote.",
@@ -55,6 +58,7 @@ export const microsoftOnenote: AppDefinition = {
   },
   configurable: {
     fields: microsoftConfigFields,
+    group: "microsoft",
     envDefaults: microsoftEnvDefaults,
   },
 };

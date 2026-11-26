@@ -11,6 +11,7 @@ import {
   PopoverTrigger,
 } from "@onecli/ui/components/popover";
 import { useGroups } from "@/hooks/use-groups";
+import { usePlanGate } from "@/lib/plan-gate";
 import { useOrgMembersList } from "@/hooks/use-org-members";
 
 interface Option {
@@ -41,6 +42,11 @@ export interface IdentityMultiSelectProps {
  * rule applies to. Selections show as removable chips; the popover is a
  * searchable checkbox list grouped by kind. Only the org's own directory is
  * offered (the reads are admin-gated).
+ *
+ * Availability itself sells from Scale, but the GROUP half needs the
+ * directory, which stays Enterprise — so when groups are locked this degrades
+ * to a people-only picker rather than offering a selection the save would
+ * reject.
  */
 export const IdentityMultiSelect = ({
   userIds,
@@ -50,7 +56,9 @@ export const IdentityMultiSelect = ({
 }: IdentityMultiSelectProps) => {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
-  const { data: groups = [] } = useGroups();
+  const planGate = usePlanGate();
+  const groupsLocked = planGate.isLocked("groups");
+  const { data: groups = [] } = useGroups(!groupsLocked);
   const { data: members = [] } = useOrgMembersList(true);
 
   const options = useMemo<Option[]>(
@@ -162,7 +170,7 @@ export const IdentityMultiSelect = ({
             className="text-muted-foreground hover:border-foreground/30 hover:text-foreground focus-visible:ring-ring/50 inline-flex items-center gap-1 rounded-md border border-dashed px-2 py-1 text-sm transition-colors focus-visible:ring-[3px] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
           >
             <Plus className="size-3.5" aria-hidden />
-            Add people or groups
+            {groupsLocked ? "Add people" : "Add people or groups"}
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-80 max-w-[90vw] p-0">
@@ -171,7 +179,9 @@ export const IdentityMultiSelect = ({
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search…"
-              aria-label="Search people and groups"
+              aria-label={
+                groupsLocked ? "Search people" : "Search people and groups"
+              }
               className="h-8"
               autoFocus
             />
@@ -179,7 +189,7 @@ export const IdentityMultiSelect = ({
           <div className="max-h-64 overflow-y-auto overscroll-contain p-1">
             {filtered.length === 0 ? (
               <p className="text-muted-foreground px-2 py-6 text-center text-xs">
-                No users or groups found.
+                {groupsLocked ? "No users found." : "No users or groups found."}
               </p>
             ) : (
               SECTIONS.map(({ kind, title, Icon }) => {
@@ -217,6 +227,24 @@ export const IdentityMultiSelect = ({
               })
             )}
           </div>
+          {groupsLocked && (
+            // Says WHY there are no groups here rather than silently leaving
+            // them out, and the action opens the same Groups paywall (or
+            // license dialog) every other group surface uses.
+            <div className="text-muted-foreground flex items-center justify-between gap-2 border-t px-3 py-2 text-xs">
+              <span>Targeting groups is an Enterprise feature.</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  planGate.guard("groups");
+                }}
+                className="text-brand focus-visible:ring-ring/50 shrink-0 rounded-sm font-medium hover:underline focus-visible:ring-[3px] focus-visible:outline-none"
+              >
+                Learn more
+              </button>
+            </div>
+          )}
         </PopoverContent>
       </Popover>
     </div>

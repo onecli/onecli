@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@onecli/ui/components/dropdown-menu";
 import { useUpdateAgentImage } from "@/hooks/use-agents";
+import { cn } from "@onecli/ui/lib/utils";
 
 /**
  * The avatar's upload/replace/remove door (the agent page header) — the
@@ -22,23 +23,38 @@ import { useUpdateAgentImage } from "@/hooks/use-agents";
  */
 export const AgentAvatarEditor = ({
   agent,
+  renderFrame,
+  className,
 }: {
   agent: {
     id: string;
     name: string;
     imageUrl?: string | null;
     /** Attached channel presences. A channel carrying a provider-served
-     * `settingsUrl` gets a deep-link menu item — the only door to things the
-     * provider exposes no API for (Slack's app PROFILE icon). */
+     * `settingsUrl` (opened where the app's PROFILE icon is set) gets a
+     * deep-link menu item. */
     channels?: { provider: string; settingsUrl?: string | null }[];
   };
+  /** A different mark inside the same door (the sidebar header's initials
+   *  square). Receives the in-flight signal. */
+  renderFrame?: (pending: boolean) => React.ReactNode;
+  /** Extra classes on the trigger (its radius must match the mark's). */
+  className?: string;
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const update = useUpdateAgentImage();
   const settingsChannel = agent.channels?.find((c) => c.settingsUrl);
 
-  const frame = <AgentAvatar agent={agent} pending={update.isPending} />;
+  const frame = renderFrame ? (
+    renderFrame(update.isPending)
+  ) : (
+    <AgentAvatar agent={agent} pending={update.isPending} />
+  );
+  const triggerClass = cn(
+    "focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none",
+    className,
+  );
 
   const onFile = (file: File | undefined) => {
     // The crop runs inside the mutation, so isPending covers it end to end.
@@ -57,13 +73,14 @@ export const AgentAvatarEditor = ({
           e.target.value = "";
         }}
       />
-      {agent.imageUrl ? (
+      {agent.imageUrl || settingsChannel ? (
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label="Change agent image"
-              className="focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
+              title="Change photo"
+              className={triggerClass}
               disabled={update.isPending}
             >
               {frame}
@@ -71,19 +88,13 @@ export const AgentAvatarEditor = ({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             <DropdownMenuItem onClick={() => inputRef.current?.click()}>
-              <Upload className="size-4" /> Replace image
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={() => update.mutate({ agentId: agent.id, file: null })}
-            >
-              <Trash2 className="size-4" /> Remove image
+              <Upload className="size-4" />{" "}
+              {agent.imageUrl ? "Replace image" : "Upload image"}
             </DropdownMenuItem>
             {settingsChannel?.settingsUrl && (
               // The provider shows an app's PROFILE mark (sidebar, search)
-              // from its own settings page, not from per-message icons — and
-              // offers no API to set it. The honest door is a deep link, so
-              // the item renders for any provider that serves one.
+              // from its own settings page, not from per-message icons. The
+              // item renders for any provider that serves that page.
               <DropdownMenuItem asChild>
                 <a
                   href={settingsChannel.settingsUrl}
@@ -107,13 +118,22 @@ export const AgentAvatarEditor = ({
                 </a>
               </DropdownMenuItem>
             )}
+            {agent.imageUrl && (
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={() => update.mutate({ agentId: agent.id, file: null })}
+              >
+                <Trash2 className="size-4" /> Remove image
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
         <button
           type="button"
           aria-label="Upload agent image"
-          className="focus-visible:ring-ring cursor-pointer rounded-lg transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
+          title="Change photo"
+          className={triggerClass}
           disabled={update.isPending}
           onClick={() => inputRef.current?.click()}
         >

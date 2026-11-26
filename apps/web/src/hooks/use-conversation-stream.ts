@@ -7,7 +7,12 @@ import {
   type StreamFatalError,
   type StreamStatus,
 } from "@/lib/chat/conversation-stream";
-import { highestSeq, mergeEvents } from "@/lib/chat/transcript";
+import {
+  highestSeq,
+  mergeEvents,
+  movesTurnStatus,
+  raisesApproval,
+} from "@/lib/chat/transcript";
 import type { TurnEvent } from "@/lib/api/types";
 
 const NO_EVENTS: TurnEvent[] = [];
@@ -40,15 +45,24 @@ export const useConversationStream = (
   conversationId: string | undefined,
   options: {
     /**
-     * Fires once per network read that carried a turn-boundary event —
-     * `turn.started` | `turn.done` | `error` — batched, never per event, so
-     * a mount replay of N turns costs one call, not N invalidation sweeps.
-     * `turn.started` is what makes a turn opened elsewhere (another tab;
-     * later Slack/cron) appear while it runs instead of when it ends. The
-     * turns poll owns the no-event failure gap; this callback makes the
-     * happy path snappy.
+     * Fires once per network read that carried an event that moves a turn
+     * row's status (`movesTurnStatus`: a turn opened or closed, a mid-run
+     * follow-up picked up), batched, never per event, so a mount replay
+     * of N turns costs one call, not N invalidation sweeps. `turn.started`
+     * is what makes a turn opened elsewhere (another tab; later Slack/cron)
+     * appear while it runs instead of when it ends; `message.joined` is what
+     * flips a follow-up's bubble from waiting to joined the moment the agent
+     * has it. The turns poll owns the no-event failure gap; this callback
+     * makes the happy path snappy.
      */
     onTurnBoundary?: () => void;
+    /**
+     * Fires once per network read that carried a FINISHED platform tool that
+     * can raise an approval card (`raisesApproval`). The card rides a 15s
+     * poll; this refetches it the moment the agent says it is up, so the
+     * text and the card appear together.
+     */
+    onApprovalRaised?: () => void;
     /**
      * The lowest seq the first connect must replay FROM (exclusive) — the
      * turns window's `oldestSeq - 1`, so the server replays only the turns
@@ -90,15 +104,11 @@ export const useConversationStream = (
   const handleEvents = useEffectEvent((incoming: TurnEvent[]) => {
     heldRef.current = mergeEvents(heldRef.current, incoming);
     setEvents(heldRef.current); // one setState per network read
-    if (
-      incoming.some(
-        (e) =>
-          e.type === "turn.started" ||
-          e.type === "turn.done" ||
-          e.type === "error",
-      )
-    ) {
+    if (incoming.some(movesTurnStatus)) {
       options.onTurnBoundary?.();
+    }
+    if (incoming.some(raisesApproval)) {
+      options.onApprovalRaised?.();
     }
   });
 

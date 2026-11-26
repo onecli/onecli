@@ -1,16 +1,11 @@
-import AppAvailabilityPage from "@/ee/app-availability/app-availability-page";
-import { isEntitled } from "@onecli/api/lib/entitlements";
-import { EnterpriseLockedCard } from "@/lib/components/enterprise-locked-card";
+import { redirectToSettingsModal } from "@/lib/settings-modal/redirect-to-modal";
 
-export default function Page() {
-  // The app availability allowlist (#29) is licensed — dark unlicensed.
-  if (!isEntitled()) {
-    return (
-      <EnterpriseLockedCard
-        feature="app_availability"
-        description="Restrict which apps each workspace may connect, based on who has access to it."
-      />
-    );
-  }
-  return <AppAvailabilityPage />;
+interface Props {
+  params: Promise<{ orgId: string }>;
+}
+
+/** An old URL: the allowlist lives under Settings > Shared apps. */
+export default async function Page({ params }: Props) {
+  const { orgId } = await params;
+  await redirectToSettingsModal({ organizationId: orgId }, "shared-apps");
 }

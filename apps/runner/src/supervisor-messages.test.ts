@@ -6,8 +6,19 @@ import type {
 } from "@onecli/agent-protocol";
 import {
   createSupervisorMessageHandler,
+  FILE_UPLOAD_STALE_MS,
+  MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
   MAX_INFLIGHT_MEMORY_WRITES_PER_SANDBOX,
+  type OutboundFile,
 } from "./supervisor-messages";
+import { createHash } from "node:crypto";
+import {
+  ATTACHMENT_CHUNK_RAW_BYTES,
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_SESSION_REF_CHARS,
+  runnerEventSchema,
+  type RunnerAttachmentUploadResponse,
+} from "@onecli/agent-protocol";
 
 /**
  * The supervisor→control-plane mapping. Its interesting cases are the ones a
@@ -25,6 +36,13 @@ interface DriveOptions {
   ) => Promise<RunnerMemoryWriteResponse>;
   /** Step 10: the runner's container map (undefined ⇒ "no record"). */
   containerRefOf?: (sandboxId: string) => string | undefined;
+  /** The runner's node map, from the backend's snapshot. */
+  nodeOf?: (sandboxId: string) => string | undefined;
+  uploadAttachment?: (
+    sandboxId: string,
+    file: OutboundFile,
+  ) => Promise<RunnerAttachmentUploadResponse>;
+  now?: () => number;
 }
 
 const drive = (messages: SupervisorMessage[], options: DriveOptions = {}) => {
@@ -40,14 +58,19 @@ const drive = (messages: SupervisorMessage[], options: DriveOptions = {}) => {
     },
     toolCall: options.toolCall ?? (async () => ({ ok: true, result: null })),
     memoryWrite: options.memoryWrite ?? (async () => ({ ok: true })),
+    uploadAttachment:
+      options.uploadAttachment ??
+      (async () => ({ ok: true, attachmentId: "att-1" })),
     sendToSandbox: (sandboxId, item) => {
       sent.push({ sandboxId, item });
       return true;
     },
     containerRefOf: options.containerRefOf ?? (() => "cont-default"),
+    ...(options.nodeOf && { nodeOf: options.nodeOf }),
+    ...(options.now && { now: options.now }),
   });
   for (const message of messages) handle("sb-1", message);
-  return { reported, added, flushed, sent };
+  return { reported, added, flushed, sent, handle };
 };
 
 describe("supervisor message handler", () => {
@@ -66,15 +89,83 @@ describe("supervisor message handler", () => {
         sandboxId: "sb-1",
         status: "stopped",
         error: "harness connection closed",
+        // Stamped with the container its socket authenticated as: the copy
+        // holding the socket need not own the sandbox's lifecycle, and the
+        // control plane applies an observed-container report only while that
+        // container is still the sandbox's (a late one never hits a new one).
+        observedContainerRef: "cont-default",
       },
     ]);
+  });
+
+  it("an unhealthy report with no known container is dropped, never sent unstamped", () => {
+    // Unstamped, it would be read as the reporting copy's own lifecycle
+    // report and fenced off unless this copy happens to own the sandbox.
+    const { reported } = drive([{ kind: "unhealthy", reason: "gone" }], {
+      containerRefOf: () => undefined,
+    });
+    expect(reported).toEqual([]);
+  });
+
+  it("forwards a read-only home as the stop's reasonCode, with the runner's own node", () => {
+    // The one stop the control plane budgets: it needs the code to pick the
+    // storage copy and count the restart, and the node to tell one bad
+    // machine from a fleet-wide problem. The node is the runner's (from the
+    // substrate's snapshot), never anything the supervisor said.
+    const { reported } = drive(
+      [
+        {
+          kind: "unhealthy",
+          reason: "the agent's home is mounted read-only",
+          code: "home_read_only",
+        },
+      ],
+      { nodeOf: () => "node-1.example.test" },
+    );
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        error: "the agent's home is mounted read-only",
+        observedContainerRef: "cont-default",
+        reasonCode: "home_read_only",
+        node: "node-1.example.test",
+      },
+    ]);
+  });
+
+  it("forwards no code and no node for any other unhealthy report", () => {
+    // An unknown code from a newer (or hostile) supervisor must not reach
+    // the control plane's reason slot: only the read-only code is budgeted.
+    const { reported } = drive(
+      [{ kind: "unhealthy", reason: "gone", code: "something_else" }],
+      { nodeOf: () => "node-1.example.test" },
+    );
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.status",
+        sandboxId: "sb-1",
+        status: "stopped",
+        error: "gone",
+        observedContainerRef: "cont-default",
+      },
+    ]);
+  });
+
+  it("sends a read-only stop without a node when the runner has not seen one", () => {
+    const { reported } = drive([
+      { kind: "unhealthy", reason: "ro", code: "home_read_only" },
+    ]);
+    expect(reported[0]).toMatchObject({ reasonCode: "home_read_only" });
+    expect(reported[0]).not.toHaveProperty("node");
   });
 
   it("relays a progress heartbeat as its own report, never through the collector", () => {
     // Its own single-event post on purpose: an old control plane rejecting
     // the unknown kind must lose one heartbeat, not a transcript batch. And
     // the sandboxId is the channel's, whatever the body claimed.
-    const { reported, added, flushed } = drive([
+    const { reported, added } = drive([
       { kind: "progress", turnId: "t1", conversationId: "cv1" },
     ]);
 
@@ -87,7 +178,118 @@ describe("supervisor message handler", () => {
       },
     ]);
     expect(added).toEqual([]);
-    expect(flushed).toEqual([]);
+  });
+
+  it("forwards the heartbeat's session ref verbatim: the control plane's resume handle for a turn whose sandbox may die before it reports", () => {
+    const { reported } = drive([
+      {
+        kind: "progress",
+        turnId: "t1",
+        conversationId: "cv1",
+        sessionRef: "session-abc",
+      },
+    ]);
+
+    expect(reported).toEqual([
+      {
+        kind: "turn.progress",
+        sandboxId: "sb-1",
+        conversationId: "cv1",
+        turnId: "t1",
+        sessionRef: "session-abc",
+      },
+    ]);
+  });
+
+  it("drops a session ref the runner wire would refuse, never the heartbeat or terminal report it rides on", () => {
+    // An oversized ref would fail the control plane's parse of the whole
+    // event. Dropped, not truncated: a cut ref names no real session.
+    const huge = "s".repeat(MAX_SESSION_REF_CHARS + 1);
+    const { reported } = drive([
+      {
+        kind: "progress",
+        turnId: "t1",
+        conversationId: "cv1",
+        sessionRef: huge,
+      },
+      {
+        kind: "turn.result",
+        turnId: "t1",
+        conversationId: "cv1",
+        status: "done",
+        sessionRef: huge,
+      },
+    ]);
+    expect(reported.map((event) => event.kind)).toEqual([
+      "turn.progress",
+      "turn.finished",
+    ]);
+    for (const event of reported) {
+      expect(runnerEventSchema.safeParse(event).success).toBe(true);
+      expect(event).not.toHaveProperty("sessionRef");
+    }
+  });
+
+  it("flushes the turn's buffered events ahead of its heartbeat", () => {
+    // The first beat follows `turn.started` on the wire, but that event is
+    // still buffered in the collector when the beat arrives. The control
+    // plane stamps only a RUNNING turn, so the beat must post behind it.
+    // MUTATION-PROOF: dropping the flush reports the beat first.
+    const order: string[] = [];
+    const handle = createSupervisorMessageHandler({
+      report: (event) => order.push(`report:${event.kind}`),
+      collector: {
+        add: () => {},
+        flush: (turnId) => order.push(`flush:${turnId}`),
+      },
+      toolCall: async () => ({ ok: true, result: null }),
+      memoryWrite: async () => ({ ok: true }),
+      uploadAttachment: async () => ({ ok: true, attachmentId: "att-1" }),
+      sendToSandbox: () => true,
+      containerRefOf: () => "cont-default",
+    });
+
+    handle("sb-1", { kind: "progress", turnId: "t1", conversationId: "cv1" });
+
+    expect(order).toEqual(["flush:t1", "report:turn.progress"]);
+  });
+
+  it("flushes the follow-ups' replies, then the turn, before reporting the close", () => {
+    // A reply is stored under its FOLLOW-UP's id, so it buffers apart from
+    // the turn. The close is what the channel mirror waits on, so every
+    // reply must be on its way first. MUTATION-PROOF: flushing only the
+    // turn leaves a reply buffered behind the close (posted late, or never).
+    const order: string[] = [];
+    const handle = createSupervisorMessageHandler({
+      report: (event) => order.push(`report:${event.kind}`),
+      collector: {
+        add: () => {},
+        flush: (turnId) => order.push(`flush:${turnId}`),
+      },
+      toolCall: async () => ({ ok: true, result: null }),
+      memoryWrite: async () => ({ ok: true }),
+      uploadAttachment: async () => ({ ok: true, attachmentId: "att-1" }),
+      sendToSandbox: () => true,
+      containerRefOf: () => "cont-default",
+    });
+
+    handle("sb-1", {
+      kind: "turn.result",
+      turnId: "t1",
+      conversationId: "cv-1",
+      status: "done",
+      followUps: [
+        { turnId: "f1", outcome: "joined" },
+        { turnId: "f2", outcome: "missed" },
+      ],
+    });
+
+    expect(order).toEqual([
+      "flush:f1",
+      "flush:f2",
+      "flush:t1",
+      "report:turn.finished",
+    ]);
   });
 
   it("attributes every message to the AUTHENTICATED sandbox", () => {
@@ -385,5 +587,326 @@ describe("process.state forwarding (step 10)", () => {
   it("DROPS a frame when the container is unknown — no unstamped fact ships", () => {
     const { reported } = drive([frame], { containerRefOf: () => undefined });
     expect(reported).toEqual([]);
+  });
+});
+
+describe("ports.state forwarding (sandbox ports)", () => {
+  const frame = { kind: "ports.state" as const, ports: [80, 8080] };
+
+  it("forwards the guest's listening ports as a stamped sandbox.ports event", () => {
+    const { reported } = drive([frame], { containerRefOf: () => "cont-xyz" });
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.ports",
+        sandboxId: "sb-1",
+        containerRef: "cont-xyz",
+        ports: [80, 8080],
+      },
+    ]);
+  });
+
+  it("DROPS the frame when the container is unknown (the re-send heals it)", () => {
+    const { reported } = drive([frame], { containerRefOf: () => undefined });
+    expect(reported).toEqual([]);
+  });
+});
+
+describe("desktop.state forwarding (desktop takeover)", () => {
+  const frame = { kind: "desktop.state" as const, viewable: true };
+
+  it("forwards the screen's viewability as a stamped sandbox.desktop event", () => {
+    const { reported } = drive([frame], { containerRefOf: () => "cont-xyz" });
+    expect(reported).toEqual([
+      {
+        kind: "sandbox.desktop",
+        sandboxId: "sb-1",
+        containerRef: "cont-xyz",
+        viewable: true,
+      },
+    ]);
+  });
+
+  it("DROPS the frame when the container is unknown (the re-send heals it)", () => {
+    const { reported } = drive([frame], { containerRefOf: () => undefined });
+    expect(reported).toEqual([]);
+  });
+});
+
+/**
+ * The send_file arm: chunk-run reassembly (one in-progress run per sandbox,
+ * fail-closed on any discontinuity), the checksum/size belts, the in-flight
+ * relay ceiling, the stale sweep — and the law that EVERY run gets exactly
+ * one file.result, so the supervisor's correlator never waits out a timeout.
+ */
+describe("the file.part arm (send_file)", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+
+  /** Split bytes into legal file.part frames for one upload. */
+  const partsFor = (
+    uploadId: string,
+    bytes: Buffer,
+    overrides: Partial<Extract<SupervisorMessage, { kind: "file.part" }>> = {},
+  ): Extract<SupervisorMessage, { kind: "file.part" }>[] => {
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < bytes.byteLength; i += ATTACHMENT_CHUNK_RAW_BYTES) {
+      chunks.push(bytes.subarray(i, i + ATTACHMENT_CHUNK_RAW_BYTES));
+    }
+    if (chunks.length === 0) chunks.push(Buffer.alloc(0));
+    return chunks.map((chunk, i) => ({
+      kind: "file.part" as const,
+      uploadId,
+      conversationId: "cv-1",
+      turnId: "t-1",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: bytes.byteLength,
+      sha256: sha(bytes),
+      part: i + 1,
+      of: chunks.length,
+      dataBase64: chunk.toString("base64"),
+      ...overrides,
+    }));
+  };
+
+  const results = (sent: { item: unknown }[]) =>
+    sent
+      .map((s) => s.item as { kind: string })
+      .filter((i) => i.kind === "file.result") as Extract<
+      WorkItemLike,
+      { kind: "file.result" }
+    >[];
+  type WorkItemLike = {
+    kind: "file.result";
+    uploadId: string;
+    ok: boolean;
+    attachmentId?: string;
+    retryable?: boolean;
+    error?: string;
+  };
+
+  it("reassembles a multi-part run byte-exactly, relays it once, and answers ok with the attachment id", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2 + 5, 7);
+    const uploaded: OutboundFile[] = [];
+    const { sent } = drive(partsFor("up-1", bytes), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "att-9" };
+      },
+    });
+    await settle();
+    expect(uploaded).toHaveLength(1);
+    expect(Buffer.compare(uploaded[0]!.bytes, bytes)).toBe(0);
+    expect(uploaded[0]).toMatchObject({
+      uploadId: "up-1",
+      conversationId: "cv-1",
+      turnId: "t-1",
+      name: "report.pdf",
+      sha256: sha(bytes),
+    });
+    expect(results(sent)).toEqual([
+      {
+        kind: "file.result",
+        uploadId: "up-1",
+        ok: true,
+        attachmentId: "att-9",
+      },
+    ]);
+  });
+
+  it("carries the caption through when present, and omits it when absent", async () => {
+    const bytes = Buffer.from("x");
+    const uploaded: OutboundFile[] = [];
+    drive(partsFor("up-c", bytes, { caption: "look" }), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    });
+    await settle();
+    expect(uploaded[0]?.caption).toBe("look");
+    drive(partsFor("up-d", bytes), {
+      uploadAttachment: async (_sb, file) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    });
+    await settle();
+    expect("caption" in uploaded[1]!).toBe(false);
+  });
+
+  it("carries a staged run's purpose through, and omits it for a reply's file", async () => {
+    // A runner that dropped it would attach a send_message file to the
+    // reply instead (the reason `stagedAttachments` is advertised).
+    const bytes = Buffer.from("x");
+    const uploaded: OutboundFile[] = [];
+    const capture = {
+      uploadAttachment: async (_sb: string, file: OutboundFile) => {
+        uploaded.push(file);
+        return { ok: true, attachmentId: "a" };
+      },
+    };
+    drive(partsFor("up-s", bytes, { purpose: "send" }), capture);
+    await settle();
+    expect(uploaded[0]?.purpose).toBe("send");
+    drive(partsFor("up-r", bytes), capture);
+    await settle();
+    expect("purpose" in uploaded[1]!).toBe(false);
+  });
+
+  it("CHECKSUM: a run whose bytes do not hash to the declared sha is refused and never relayed", async () => {
+    const bytes = Buffer.from("real bytes");
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive(
+      partsFor("up-2", bytes, { sha256: sha(Buffer.from("other")) }),
+      { uploadAttachment: relayed },
+    );
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)).toEqual([
+      expect.objectContaining({ uploadId: "up-2", ok: false }),
+    ]);
+    expect(results(sent)[0]!.error).toMatch(/checksum/);
+  });
+
+  it("SIZE: a declared size over the cap is refused on part 1 before any byte is buffered", async () => {
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive(
+      partsFor("up-3", Buffer.from("x"), {
+        sizeBytes: MAX_OUTBOUND_ATTACHMENT_BYTES + 1,
+      }),
+      { uploadAttachment: relayed },
+    );
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)[0]).toMatchObject({ uploadId: "up-3", ok: false });
+    expect(results(sent)[0]!.error).toMatch(/capped/);
+  });
+
+  it("SIZE: more bytes than declared abandons the run; fewer is refused at the end", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES + 10, 1);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    // Lie small: declared size is one chunk, but two arrive.
+    const over = partsFor("up-4", bytes, {
+      sizeBytes: ATTACHMENT_CHUNK_RAW_BYTES,
+    });
+    const { sent: s1 } = drive(over, { uploadAttachment: relayed });
+    await settle();
+    expect(results(s1)[0]).toMatchObject({ uploadId: "up-4", ok: false });
+    expect(results(s1)[0]!.error).toMatch(/exceeded/);
+    // Lie big: declared larger than what arrives.
+    const under = partsFor("up-5", Buffer.from("abc"), { sizeBytes: 999 });
+    const { sent: s2 } = drive(under, { uploadAttachment: relayed });
+    await settle();
+    expect(results(s2)[0]).toMatchObject({ uploadId: "up-5", ok: false });
+    expect(results(s2)[0]!.error).toMatch(/shorter/);
+    expect(relayed).not.toHaveBeenCalled();
+  });
+
+  it("DISCONTINUITY: an out-of-order part abandons the run fail-closed, answering it", async () => {
+    const bytes = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 3, 2);
+    const [p1, , p3] = partsFor("up-6", bytes);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive([p1!, p3!], { uploadAttachment: relayed });
+    await settle();
+    expect(relayed).not.toHaveBeenCalled();
+    expect(results(sent)).toEqual([
+      expect.objectContaining({ uploadId: "up-6", ok: false }),
+    ]);
+    expect(results(sent)[0]!.error).toMatch(/out of order/);
+  });
+
+  it("DISCONTINUITY: a new run starting mid-run abandons the old one (answered) and proceeds with the new", async () => {
+    const big = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2, 3);
+    const small = Buffer.from("small");
+    const [first] = partsFor("up-7", big);
+    const relayed = vi.fn(async () => ({ ok: true, attachmentId: "a" }));
+    const { sent } = drive([first!, ...partsFor("up-8", small)], {
+      uploadAttachment: relayed,
+    });
+    await settle();
+    const r = results(sent);
+    expect(r.map((x) => [x.uploadId, x.ok])).toEqual([
+      ["up-7", false],
+      ["up-8", true],
+    ]);
+    expect(relayed).toHaveBeenCalledTimes(1);
+  });
+
+  it("IN-FLIGHT CEILING: past MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX, a complete run is refused retryable without a round-trip", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const relayed = vi.fn(async () => {
+      await gate;
+      return { ok: true, attachmentId: "a" };
+    });
+    const runs = Array.from(
+      { length: MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX + 1 },
+      (_, i) => partsFor(`up-f${i}`, Buffer.from(`f${i}`)),
+    ).flat();
+    const { sent } = drive(runs, { uploadAttachment: relayed });
+    await settle();
+    expect(relayed).toHaveBeenCalledTimes(
+      MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
+    );
+    const refused = results(sent).filter((x) => !x.ok);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ retryable: true });
+    release();
+    await settle();
+    expect(results(sent).filter((x) => x.ok)).toHaveLength(
+      MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX,
+    );
+  });
+
+  it("TRANSPORT: a relay that throws is answered retryable, never silently", async () => {
+    const { sent } = drive(partsFor("up-9", Buffer.from("x")), {
+      uploadAttachment: async () => {
+        throw new Error("ECONNRESET");
+      },
+    });
+    await settle();
+    expect(results(sent)[0]).toMatchObject({
+      uploadId: "up-9",
+      ok: false,
+      retryable: true,
+    });
+    expect(results(sent)[0]!.error).toMatch(/could not be reached/);
+  });
+
+  it("STALE SWEEP: a run with no part for FILE_UPLOAD_STALE_MS is dropped and answered when the next frame arrives", async () => {
+    let clock = 1_000_000;
+    const big = Buffer.alloc(ATTACHMENT_CHUNK_RAW_BYTES * 2, 4);
+    const [first] = partsFor("up-stale", big);
+    const { sent, handle } = drive([first!], { now: () => clock });
+    clock += FILE_UPLOAD_STALE_MS + 1;
+    // Any frame from another sandbox triggers the sweep.
+    handle("sb-2", partsFor("up-other", Buffer.from("y"))[0]!);
+    await settle();
+    expect(results(sent).map((x) => [x.uploadId, x.ok])).toContainEqual([
+      "up-stale",
+      false,
+    ]);
+    expect(results(sent).find((x) => x.uploadId === "up-stale")!.error).toMatch(
+      /stalled/,
+    );
+  });
+
+  it("answers the api's refusal verbatim (caps, fence) with the ok:false shape", async () => {
+    const { sent } = drive(partsFor("up-10", Buffer.from("x")), {
+      uploadAttachment: async () => ({
+        ok: false,
+        error: "You can send at most 10 files per reply.",
+      }),
+    });
+    await settle();
+    expect(results(sent)[0]).toEqual({
+      kind: "file.result",
+      uploadId: "up-10",
+      ok: false,
+      error: "You can send at most 10 files per reply.",
+    });
   });
 });

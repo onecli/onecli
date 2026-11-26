@@ -1,7 +1,6 @@
 "use client";
 
 import { ShieldBan, ShieldCheck, Users } from "lucide-react";
-import { Badge } from "@onecli/ui/components/badge";
 import { TableCell, TableRow } from "@onecli/ui/components/table";
 import { cn } from "@onecli/ui/lib/utils";
 import { useSetPolicyDefault } from "@/hooks/use-policy";
@@ -12,20 +11,17 @@ export interface DefaultRuleRowProps {
   rule: PolicyRuleV2;
   /** Editable scope shows an Allowed/Blocked toggle; guardrails show a verdict. */
   editable: boolean;
-  /** Staged-change chip: the default's action differs from the published one. */
-  changed?: boolean;
 }
 
 /**
  * The terminal Default Rule as an ordinary row (same plain background as the
  * rest) — it's the last thing checked in its section. Its action cell is an
- * inline Allowed/Blocked toggle when editable, staged like any other edit.
+ * inline Allowed/Blocked toggle when editable, saved on click.
  */
 export const DefaultRuleRow = ({
   scope,
   rule,
   editable,
-  changed = false,
 }: DefaultRuleRowProps) => {
   const setDefault = useSetPolicyDefault(scope);
   const set = (action: "allow" | "block") => {
@@ -37,17 +33,7 @@ export const DefaultRuleRow = ({
         Default
       </TableCell>
       <TableCell>
-        <span className="inline-flex items-center gap-1.5">
-          <span className="text-sm font-medium">Default Rule</span>
-          {changed && (
-            <Badge
-              variant="outline"
-              className="rounded border-amber-500/40 px-1.5 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
-            >
-              Changed
-            </Badge>
-          )}
-        </span>
+        <span className="text-sm font-medium">Default Rule</span>
       </TableCell>
       <TableCell>
         <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
@@ -67,7 +53,6 @@ export const DefaultRuleRow = ({
           >
             <DefaultOption
               selected={rule.action === "allow"}
-              disabled={setDefault.isPending}
               onClick={() => set("allow")}
               icon={
                 <ShieldCheck
@@ -80,7 +65,6 @@ export const DefaultRuleRow = ({
             />
             <DefaultOption
               selected={rule.action === "block"}
-              disabled={setDefault.isPending}
               onClick={() => set("block")}
               icon={
                 <ShieldBan className="size-3.5 text-destructive" aria-hidden />
@@ -108,7 +92,6 @@ export const DefaultRuleRow = ({
 
 interface DefaultOptionProps {
   selected: boolean;
-  disabled: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
@@ -117,7 +100,6 @@ interface DefaultOptionProps {
 
 const DefaultOption = ({
   selected,
-  disabled,
   onClick,
   icon,
   label,
@@ -126,10 +108,9 @@ const DefaultOption = ({
   <button
     type="button"
     aria-pressed={selected}
-    disabled={disabled}
     onClick={onClick}
     className={cn(
-      "focus-visible:ring-ring inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 disabled:opacity-60",
+      "focus-visible:ring-ring inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2",
       selected
         ? tone === "emerald"
           ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"

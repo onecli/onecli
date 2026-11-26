@@ -90,6 +90,12 @@ export interface StubUpstream {
   readonly port: number;
   /** `127.0.0.1:<port>` — what a request's Host header and target carry. */
   readonly authority: string;
+  /**
+   * The stub's own certificate (PEM) when started with `tls: true`, so a
+   * client can verify the ORIGIN the way a browser would: the proof that
+   * nothing in between terminated TLS. `undefined` for a plain-HTTP stub.
+   */
+  readonly cert: string | undefined;
   url(path: string): string;
   /** What the stub answers with. Defaults to `200 {}`. */
   respond(response: StubResponse): void;
@@ -417,6 +423,7 @@ export const startStubUpstream = async (
     host: "127.0.0.1",
     port,
     authority,
+    cert: tls?.cert,
     url: (path: string) =>
       `${scheme}://${authority}${path.startsWith("/") ? path : `/${path}`}`,
     respond: (response: StubResponse) => {

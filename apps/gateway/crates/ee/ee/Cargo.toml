@@ -15,6 +15,7 @@ aws-config = { workspace = true }
 aws-sdk-kms = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
+form_urlencoded = { workspace = true }
 futures-util = { workspace = true }
 approval = { path = "../../approval" }
 apps = { path = "../../apps" }

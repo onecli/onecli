@@ -22,11 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  INSTALLATION_LABEL,
-  MANAGED_LABEL,
-  installationFingerprint,
-} from "./lib/sandbox-reap.mjs";
+import { installationFingerprint } from "./lib/sandbox-reap.mjs";
 import { agentImageRef, isPullableRef } from "./lib/upgrade.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -81,21 +77,10 @@ test("the runner stamps the label both doors filter on", () => {
   assert.ok(DOCKER_BACKEND_TS.includes("sh.onecli.managed"));
 });
 
-test("both doors fence the sweep on BOTH labels", () => {
-  for (const [name, body] of [
-    ["install.sh", INSTALL_SH],
-    ["sandbox-reap.mjs", REAP_MJS],
-  ]) {
-    assert.ok(
-      body.includes(MANAGED_LABEL),
-      `${name} is missing the managed label`,
-    );
-    assert.ok(
-      body.includes(INSTALLATION_LABEL),
-      `${name} is missing the installation fence`,
-    );
-  }
-});
+// The BOTH-labels fence of the sweep is asserted on the real docker
+// invocation by install-sh.test.mjs ("the reap stops this installation's
+// sandboxes, fenced on BOTH labels") and lib/sandbox-reap.test.mjs ("the
+// filter always carries BOTH labels"), not by substring presence here.
 
 /**
  * Executable lines only. These files DOCUMENT the destructive commands they
@@ -137,10 +122,13 @@ test("neither door can destroy a durable home", () => {
 });
 
 test("both doors honor ONECLI_KEEP_SANDBOXES", () => {
-  assert.ok(INSTALL_SH.includes("ONECLI_KEEP_SANDBOXES"));
-  assert.ok(read("scripts/setup/wizard.mjs").includes("ONECLI_KEEP_SANDBOXES"));
-  // And it is documented where an operator would look.
-  assert.ok(read("docs/self-hosting.md").includes("ONECLI_KEEP_SANDBOXES"));
+  // The Node door's wiring, the one check it has (install.sh's behavior is
+  // driven through its hooks in install-sh.test.mjs: "ONECLI_KEEP_SANDBOXES
+  // leaves every sandbox alone").
+  assert.match(
+    read("scripts/setup/wizard.mjs"),
+    /keep:\s*Boolean\(resolved\.ONECLI_KEEP_SANDBOXES\)/,
+  );
 });
 
 /** Run one of install.sh's hidden hooks against a scratch HOME and .env. */

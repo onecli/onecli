@@ -23,19 +23,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sdk = vi.hoisted(() => ({
   bundled: undefined as string | undefined,
+  /** How often the SDK's bundled lookup ran: a pinned boot must never ask. */
+  bundledLookups: 0,
 }));
 
 vi.mock("@1jehuang/jcode-sdk", () => ({
-  bundledJcodeBinary: () => sdk.bundled,
+  bundledJcodeBinary: () => {
+    sdk.bundledLookups += 1;
+    return sdk.bundled;
+  },
   JcodeClient: class {},
   launchInstance: () => Promise.reject(new Error("not launched in this suite")),
 }));
 
 const {
+  buildOpenAiOAuthPlaceholder,
+  cleanJcodeCloudEnvironment,
   cleanJcodeKnowledgeStores,
   cleanJcodeUpdaterState,
   createJcodeHarness,
-  JCODE_DISABLED_TOOLS_VALUE,
+  hasOpenAiOAuthGrant,
+  resolveAnthropicCredential,
   resolveJcodeBinary,
 } = await import("./jcode");
 
@@ -46,6 +54,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "jcode-home-"));
   outside = mkdtempSync(join(tmpdir(), "jcode-outside-"));
   sdk.bundled = undefined;
+  sdk.bundledLookups = 0;
   delete process.env.ONECLI_JCODE_BINARY;
 });
 
@@ -64,6 +73,11 @@ describe("resolveJcodeBinary", () => {
     sdk.bundled = bundled;
 
     expect(resolveJcodeBinary()).toBe(pinned);
+    // The image installs the SDK's platform package and deletes its binary
+    // (docker/agent.Dockerfile), so the SDK's lookup is never consulted
+    // under a pin: a boot on the vendored runtime cannot be steered by
+    // whatever the npm package happens to ship.
+    expect(sdk.bundledLookups).toBe(0);
   });
 
   it("a pin pointing at a missing file is a LOUD boot failure, never a fallback", () => {
@@ -90,6 +104,116 @@ describe("resolveJcodeBinary", () => {
     // …and a resolved-but-deleted one (the image prunes the npm binary).
     sdk.bundled = join(outside, "deleted-bundled");
     expect(() => resolveJcodeBinary()).toThrow("No jcode runtime");
+  });
+});
+
+describe("hasOpenAiOAuthGrant", () => {
+  // The control plane marks a ChatGPT (Codex) login with CODEX_HOME and an
+  // API-key grant with OPENAI_API_KEY (container-config-service).
+  it.each([
+    {
+      name: "a Codex login grant",
+      env: { CODEX_HOME: "/home/node/.codex" },
+      expected: true,
+    },
+    {
+      name: "an API-key grant",
+      env: { OPENAI_API_KEY: "placeholder" },
+      expected: false,
+    },
+    {
+      name: "both set: the API key wins",
+      env: { OPENAI_API_KEY: "placeholder", CODEX_HOME: "/home/node/.codex" },
+      expected: false,
+    },
+    {
+      name: "no OpenAI grant",
+      env: { ANTHROPIC_API_KEY: "placeholder" },
+      expected: false,
+    },
+    {
+      name: "empty values count as unset",
+      env: { CODEX_HOME: "" },
+      expected: false,
+    },
+    {
+      name: "an empty API key does not mask a Codex login",
+      env: { OPENAI_API_KEY: "", CODEX_HOME: "/home/node/.codex" },
+      expected: true,
+    },
+  ])("$name", ({ env, expected }) => {
+    expect(hasOpenAiOAuthGrant(env)).toBe(expected);
+  });
+});
+
+describe("buildOpenAiOAuthPlaceholder", () => {
+  const claims = (jwt: string) =>
+    JSON.parse(Buffer.from(jwt.split(".")[1] ?? "", "base64url").toString());
+
+  it("is jcode's own openai-auth.json shape, with one active account", () => {
+    const file = JSON.parse(buildOpenAiOAuthPlaceholder());
+    expect(file.active_openai_account).toBe("onecli");
+    expect(file.openai_accounts).toHaveLength(1);
+    const [account] = file.openai_accounts;
+    expect(account.label).toBe("onecli");
+    expect(account.refresh_token).toBe("onecli-managed");
+    expect(account.account_id).toBe("onecli-managed");
+  });
+
+  it("never expires and carries only placeholder claims (no credential)", () => {
+    const [account] = JSON.parse(buildOpenAiOAuthPlaceholder()).openai_accounts;
+    expect(account.expires_at).toBe(4102444800000);
+    for (const jwt of [account.access_token, account.id_token]) {
+      expect(claims(jwt)).toEqual({
+        exp: 4102444800,
+        "https://api.openai.com/auth": { chatgpt_account_id: "onecli-managed" },
+      });
+      expect(jwt.split(".")[2]).toBe("onecli-managed");
+    }
+  });
+});
+
+describe("resolveAnthropicCredential", () => {
+  // The route values are jcode's own `JCODE_RUNTIME_PROVIDER` vocabulary:
+  // `claude` pins the Claude subscription (OAuth) route, `claude-api` the
+  // direct API-key route. Anything else would be silently ignored upstream
+  // and leave the runtime in automatic mode, the defect this pin closes.
+  it.each([
+    {
+      name: "an OAuth grant pins the subscription route and keeps the stub",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "placeholder" },
+      expected: { route: "claude", oauthStub: true },
+    },
+    {
+      name: "an API-key grant pins the key route and has no stub",
+      env: { ANTHROPIC_API_KEY: "placeholder" },
+      expected: { route: "claude-api", oauthStub: false },
+    },
+    {
+      name: "both set: the API key wins, never a half-OAuth launch",
+      env: {
+        ANTHROPIC_API_KEY: "placeholder",
+        CLAUDE_CODE_OAUTH_TOKEN: "placeholder",
+      },
+      expected: { route: "claude-api", oauthStub: false },
+    },
+    {
+      name: "no Anthropic grant (e.g. OpenAI only) pins nothing",
+      env: { OPENAI_API_KEY: "placeholder" },
+      expected: { route: undefined, oauthStub: false },
+    },
+    {
+      name: "empty values count as unset",
+      env: { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "" },
+      expected: { route: undefined, oauthStub: false },
+    },
+    {
+      name: "an empty API key does not mask an OAuth grant",
+      env: { ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: "placeholder" },
+      expected: { route: "claude", oauthStub: true },
+    },
+  ])("$name", ({ env, expected }) => {
+    expect(resolveAnthropicCredential(env)).toEqual(expected);
   });
 });
 
@@ -155,6 +279,64 @@ describe("cleanJcodeUpdaterState", () => {
       undefined,
     );
     expect(readFileSync(join(target, "keep.txt"), "utf8")).toBe("keep");
+  });
+});
+
+describe("cleanJcodeCloudEnvironment", () => {
+  // jcode (v1.0+) refuses EVERY bash command when any component of
+  // `<home>/cloud-environment/<sha>.json` is a symlink. These pin the boot
+  // heal for both components that sit on the agent-writable volume.
+  const isRealDir = (path: string) => {
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    return Boolean(stat?.isDirectory() && !stat.isSymbolicLink());
+  };
+
+  it("replaces a planted cloud-environment link and leaves its target alone", () => {
+    const target = join(outside, "elsewhere");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep.json"), "keep");
+    symlinkSync(target, join(home, "cloud-environment"));
+    writeFileSync(join(home, "config.toml"), "#");
+
+    cleanJcodeCloudEnvironment(home);
+
+    expect(
+      lstatSync(join(home, "cloud-environment"), { throwIfNoEntry: false }),
+    ).toBe(undefined);
+    expect(readFileSync(join(target, "keep.json"), "utf8")).toBe("keep");
+    expect(existsSync(join(home, "config.toml"))).toBe(true);
+  });
+
+  it("clears a stale overlay the hosted agent never uses", () => {
+    mkdirSync(join(home, "cloud-environment"));
+    writeFileSync(join(home, "cloud-environment", "abc.json"), "{}");
+
+    cleanJcodeCloudEnvironment(home);
+
+    expect(existsSync(join(home, "cloud-environment"))).toBe(false);
+  });
+
+  it("makes a linked or missing home a real directory, target untouched", () => {
+    const linked = join(outside, "linked-home");
+    const target = join(outside, "real-target");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep.txt"), "keep");
+    symlinkSync(target, linked);
+
+    cleanJcodeCloudEnvironment(linked);
+
+    expect(isRealDir(linked)).toBe(true);
+    expect(readFileSync(join(target, "keep.txt"), "utf8")).toBe("keep");
+
+    const fresh = join(outside, "fresh-home");
+    cleanJcodeCloudEnvironment(fresh);
+    expect(isRealDir(fresh)).toBe(true);
+  });
+
+  it("is idempotent on the steady state", () => {
+    expect(() => cleanJcodeCloudEnvironment(home)).not.toThrow();
+    expect(() => cleanJcodeCloudEnvironment(home)).not.toThrow();
+    expect(isRealDir(home)).toBe(true);
   });
 });
 
@@ -247,24 +429,6 @@ describe("cleanJcodeKnowledgeStores", () => {
 
     expect(existsSync(join(home, "memory"))).toBe(false);
     expect(readFileSync(join(outside, "precious.txt"), "utf8")).toBe("keep me");
-  });
-});
-
-describe("the disabled native tools", () => {
-  it("memory is in the exact constant the launch env reads", () => {
-    // The write-back amendment's lockdown: [features] memory=false alone
-    // leaves the native tool callable (v0.71.1, still true in v0.78.1) —
-    // only this list removes it from the model's definitions.
-    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("memory");
-  });
-
-  it("browser is in the list — the Firefox-bridge trap is removed", () => {
-    // The native browser tool needs a Firefox extension plus a native-
-    // messaging host, neither of which can exist in a headless guest, and
-    // its own description sends the model into setup attempts (observed
-    // live). Chromium is baked into the agent image instead; disabling the
-    // tool removes it from the model's definitions entirely.
-    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).toContain("browser");
   });
 });
 

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { db } from "@onecli/db";
 import { defaultAgentSection } from "@/lib/agents/agent-sections";
-import { agentSectionPath } from "@/lib/navigation";
+import { agentPagePath, agentSectionPath } from "@/lib/navigation";
 import { AgentIndexRedirect } from "./_components/agent-index-redirect";
 
 export const metadata: Metadata = {
@@ -20,9 +20,9 @@ interface Props {
  *
  * Resolved on the SERVER wherever possible. The client redirect it replaces
  * could only run after the agent list query resolved, so every arrival here
- * (an agent card, a pasted link, the crumb switcher) rendered an empty content
- * pane first — and if that query was slow, errored, or served a cache without
- * this agent, the pane just stayed empty. Reading the one field the decision
+ * (a pasted link, the crumb switcher) rendered an empty content pane first —
+ * and if that query was slow, errored, or served a cache without this agent,
+ * the pane just stayed empty. Reading the one field the decision
  * needs, `kind`, turns the index into a real redirect that never paints.
  *
  * The client component stays as the fallback for the case the server cannot
@@ -44,7 +44,7 @@ export default async function AgentIndexPage({ params }: Props) {
   if (agent) {
     redirect(
       agentSectionPath(
-        `/w/${workspaceId}/agents/${agentId}`,
+        agentPagePath(workspaceId, agentId),
         agentId,
         defaultAgentSection(agent.kind),
       ),

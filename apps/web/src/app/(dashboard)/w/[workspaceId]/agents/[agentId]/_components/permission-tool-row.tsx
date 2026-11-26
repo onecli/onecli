@@ -21,7 +21,6 @@ interface PermissionToolRowProps {
    * reflection here — modifiers are org/policy business). */
   effective: EffectiveToolResult | undefined;
   readOnly: boolean;
-  askLocked: boolean;
   onSelect: (choice: ToolChoice) => void;
 }
 
@@ -31,7 +30,6 @@ export const PermissionToolRow = ({
   ceiling,
   effective,
   readOnly,
-  askLocked,
   onSelect,
 }: PermissionToolRowProps) => {
   const orgBlocked = ceiling === "block";
@@ -101,7 +99,6 @@ export const PermissionToolRow = ({
           onSelect={onSelect}
           isOptionDisabled={isOptionDisabled}
           disabled={readOnly}
-          askLocked={askLocked}
         />
       </div>
     </div>

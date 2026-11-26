@@ -8,7 +8,10 @@ import {
 
 export const googleSearchConsole: AppDefinition = {
   id: "google-search-console",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-search-console",
   name: "Google Search Console",
+  apiDocsUrl:
+    "https://developers.google.com/webmaster-tools/v1/api_reference_index",
   icon: "/icons/google-search-console.svg",
   description: "View search traffic data and manage site presence.",
   connectionMethod: {
@@ -44,6 +47,7 @@ export const googleSearchConsole: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
     envDefaults: googleEnvDefaults,
   },
 };

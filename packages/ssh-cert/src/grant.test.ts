@@ -1,15 +1,7 @@
-import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { signGrant, verifyGrant } from "./grant";
-import { ed25519SignerFromPrivateKeyPem } from "./keys";
-
-const newSigner = () => {
-  const { privateKey } = generateKeyPairSync("ed25519");
-  return ed25519SignerFromPrivateKeyPem(
-    privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
-  );
-};
+import { newSigner } from "./test-support";
 
 const ca = newSigner();
 

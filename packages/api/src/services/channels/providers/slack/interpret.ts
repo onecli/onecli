@@ -1,6 +1,11 @@
-import { groupThreadId, userMentionToken } from "@onecli/channels/slack";
+import {
+  directThreadId,
+  groupThreadId,
+  userMentionToken,
+} from "@onecli/channels/slack";
 import { z } from "zod";
 import type { ChannelFileRef, SpeakerKind } from "../../types";
+import { messageText } from "./table-text";
 
 /**
  * Slack event → door call, in ONE place for BOTH transports: the HTTP events
@@ -63,6 +68,10 @@ const messageEvent = z.object({
   subtype: z.string().optional(),
   text: z.string().optional(),
   files: z.array(slackFileRef).optional(),
+  // Read only for the tables they carry (./table-text), as `unknown`: no
+  // block shape may make an otherwise valid message unparseable.
+  blocks: z.array(z.unknown()).optional(),
+  attachments: z.array(z.unknown()).optional(),
   ts: z.string().min(1),
   thread_ts: z.string().optional(),
 });
@@ -79,6 +88,8 @@ const appMentionEvent = z.object({
   // defensively (a mention with a file must not lose it; the message twin
   // that also carries it is dropped as the twin).
   files: z.array(slackFileRef).optional(),
+  blocks: z.array(z.unknown()).optional(),
+  attachments: z.array(z.unknown()).optional(),
   ts: z.string().min(1),
   thread_ts: z.string().optional(),
 });
@@ -99,12 +110,109 @@ const memberLeftEvent = z.object({
   user: z.string().min(1),
 });
 
+/**
+ * The bot's OWN removal, the form Slack actually delivers to a removed bot
+ * (docs.slack.dev/reference/events/channel_left + group_left, checked
+ * 2026-10-18): `channel_left` for a public channel, `group_left` for a
+ * private one. Seen in prod (2026-10-18): a bot kicked from a private
+ * channel produced no `member_left_channel` leave at all - only Slack's own
+ * system DM - so `member_left_channel` alone is not a reliable leave
+ * signal. These are addressed to the app's own user by construction, so no
+ * user check is needed.
+ */
+const selfLeftEvent = z.object({
+  type: z.enum(["channel_left", "group_left"]),
+  channel: z.string().min(1),
+});
+
+/**
+ * Slack's own SYSTEM accounts. `USLACKBOT` is Slackbot; `USLACK` is the
+ * "Slack" system user that DMs notices to apps ("You have been removed from
+ * #channel by @x"), in a read-only IM. Neither is a person: they must never
+ * reach a door that treats the author as a speaker (the person knock would
+ * otherwise ask an owner to "allow @Slack", and any reply fails with
+ * `restricted_action_read_only_channel`).
+ */
+export const SLACK_SYSTEM_USER_IDS: ReadonlySet<string> = new Set([
+  "USLACK",
+  "USLACKBOT",
+]);
+
+export const isSlackSystemUser = (userId: string | undefined | null) =>
+  userId != null && SLACK_SYSTEM_USER_IDS.has(userId);
+
+/**
+ * The app's own removal from the workspace (docs.slack.dev/reference/events/
+ * app_uninstalled, checked 2026-09-14): sent when the app is COMPLETELY
+ * uninstalled. Slack also sends `tokens_revoked`, in no guaranteed order
+ * relative to this one, so both doors converge on one idempotent handler.
+ */
+const appUninstalledEvent = z.object({
+  type: z.literal("app_uninstalled"),
+});
+
+/**
+ * Token revocation (docs.slack.dev/reference/events/tokens_revoked): `tokens`
+ * is keyed by token kind, each an array of USER IDS (never token strings).
+ * `bot` non-empty = the bot token is dead = the presence is gone; `oauth`
+ * alone names PEOPLE whose "Connect your Slack" read token died.
+ */
+const tokensRevokedEvent = z.object({
+  type: z.literal("tokens_revoked"),
+  tokens: z
+    .object({
+      oauth: z.array(z.string()).optional(),
+      bot: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+
+/**
+ * The native Stop (docs.slack.dev/reference/events/agent_session_stopped,
+ * checked 2026-10-14): a person clicked the stop button Slack shows beside
+ * an agent session in `processing`. Names the session by its conversation
+ * and thread root and the person by `user`; nothing else is read.
+ */
+const agentSessionStoppedEvent = z.object({
+  type: z.literal("agent_session_stopped"),
+  channel: z.string().min(1),
+  thread_ts: z.string().min(1),
+  user: z.string().min(1),
+});
+
+/**
+ * A reaction on a message (docs.slack.dev/reference/events/reaction_added,
+ * checked 2026-11-09; needs `reactions:read`). Parsed strictly in its
+ * branch below, like the Stop: its loose fallback in the union also matches
+ * the type name, and a reaction naming no message names nothing to read.
+ * `item_user` is the reacted message's author, and Slack OMITS it for a
+ * post no user authored: the agent's own answers posted with its avatar
+ * (`icon_url`) come back as `bot_message` with no user. `channel_type`
+ * rides Slack's example payload but not its item reference, so it is read
+ * when present and never required.
+ */
+const reactionAddedEvent = z.object({
+  type: z.literal("reaction_added"),
+  user: z.string().min(1),
+  reaction: z.string().min(1),
+  item_user: z.string().optional(),
+  item: z.object({
+    type: z.literal("message"),
+    channel: z.string().min(1),
+    ts: z.string().min(1),
+    channel_type: z.string().optional(),
+  }),
+});
+
 /** One event as it arrives — from the HTTP envelope or the socket payload. */
 export const slackEventSchema = z.union([
   messageEvent,
   appMentionEvent,
   memberJoinedEvent,
   memberLeftEvent,
+  selfLeftEvent,
+  appUninstalledEvent,
+  tokensRevokedEvent,
   // Anything else classifies as ignore below; parse it loosely so an unknown
   // event type is a non-event, never a 500.
   z.object({ type: z.string() }).passthrough(),
@@ -130,14 +238,19 @@ export type SlackDoorCall =
        * WHERE THIS MESSAGE WAS ASKED: the DM thread's root when the person
        * typed inside a thread, else null for the top-level DM.
        *
-       * A DM is ONE conversation (§3.18: the same row their web chat reads),
-       * and that stays true — threads inside it are a presentation of the
-       * same exchange, not separate contexts. What they DO change is the
-       * address the answer belongs at: a reply typed in a thread is owed an
-       * answer in that thread, not at the bottom of the DM where nobody is
-       * looking.
+       * The DM's top level is the person's ONE direct conversation (§3.18:
+       * the same row their web chat reads). A thread opened inside it is
+       * its own conversation (`threadExternalId`), run beside the top
+       * level; the answer is owed in that thread either way.
        */
       replyThreadTs: string | null;
+      /**
+       * The THREAD's own address (`directThreadId`), when the person typed
+       * inside one: the conversation and link key of that thread, distinct
+       * from the DM's (`externalThreadId`, the bare IM). Null at the top
+       * level.
+       */
+      threadExternalId: string | null;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
     }
@@ -154,10 +267,16 @@ export type SlackDoorCall =
       replyThreadTs: string;
       /** The triggering message's own ts — where the receipt reaction sits. */
       messageTs: string;
+      /** What the speaker typed, without the tables `text` appends: a name
+       * inside a pasted table is data, not someone calling the agent. */
+      typedText: string;
       /** True when the event was an `app_mention` — addressed to the bot.
        * Plain thread follow-ups (no mention) are false; the dispatchers use
        * this to fence unjoined/unbound thread chatter. */
       isMention: boolean;
+      /** A TOP-LEVEL channel message with no mention. Heard only where the
+       * channel is promoted (listen = "all"); dropped otherwise. */
+      overheard?: boolean;
     }
   | {
       door: "invite";
@@ -168,6 +287,51 @@ export type SlackDoorCall =
       /** The bot was removed from a group surface - presence cleanup. */
       door: "leave";
       channel: string;
+    }
+  | {
+      /**
+       * A DM from Slack's own system user (see `SLACK_SYSTEM_USER_IDS`).
+       * Never a speaker: no turn, no reply, no person knock. Its only use is
+       * as a HINT that the bot's channel membership may have changed (the
+       * removal notice): the dispatcher re-verifies membership with the
+       * provider rather than trusting or parsing the notice text.
+       */
+      door: "system_notice";
+    }
+  | {
+      /** The app itself was removed from the workspace (uninstalled, or its
+       * bot token revoked) - the presence is dead until re-attached. */
+      door: "removed";
+      reason: "app_uninstalled" | "tokens_revoked";
+    }
+  | {
+      /** Only PEOPLE's tokens died (a member revoked their own grant, or was
+       * deactivated): their personal read access through this app goes. */
+      door: "user-tokens-revoked";
+      externalUserIds: string[];
+    }
+  | {
+      /** A person clicked the native Stop on the agent session rooted at
+       * `threadTs` in `channel` (a DM or a channel thread alike). */
+      door: "stop";
+      externalUserId: string;
+      channel: string;
+      threadTs: string;
+    }
+  | {
+      /** A person reacted to a message that MAY be the agent's own (Slack
+       * names no author for an icon-posted answer, so the dispatcher
+       * re-reads the message to decide). It enters through the DM or
+       * joined-thread door as a short note, never as a new conversation. */
+      door: "reaction";
+      externalUserId: string;
+      channel: string;
+      /** Whether `channel` is the person's DM with the agent. */
+      inDm: boolean;
+      /** The reacted-to message's ts. */
+      itemTs: string;
+      /** Slack's emoji name, without colons (e.g. "+1::skin-tone-2"). */
+      reaction: string;
     }
   | { door: "ignore"; reason: string };
 
@@ -197,6 +361,10 @@ const resolveSpeaker = (
   }
   if (!event.user) return { reason: "no-speaker" };
   if (ctx.botUserId && event.user === ctx.botUserId) return { reason: "self" };
+  // Slack's own system accounts are never speakers (no person to knock
+  // for, nobody to answer). The DM branch turns them into a membership
+  // hint before reaching here; anywhere else they are dropped.
+  if (isSlackSystemUser(event.user)) return { reason: "slack-system-user" };
   return {
     externalUserId: event.user,
     speakerKind: event.bot_id ? "app" : "person",
@@ -238,6 +406,84 @@ export const interpretSlackEvent = (
     return { door: "leave", channel: left.channel };
   }
 
+  if (event.type === "channel_left" || event.type === "group_left") {
+    const left = selfLeftEvent.safeParse(event);
+    if (!left.success) return { door: "ignore", reason: "unparseable" };
+    return { door: "leave", channel: left.data.channel };
+  }
+
+  if (event.type === "app_uninstalled") {
+    return { door: "removed", reason: "app_uninstalled" };
+  }
+
+  if (event.type === "tokens_revoked") {
+    const revoked = event as z.infer<typeof tokensRevokedEvent>;
+    // Only the BOT token dying kills the presence. User-token revocations
+    // (the `oauth` list) name people whose "Connect your Slack" read
+    // grant died: their personal token rows go, the presence lives on.
+    if ((revoked.tokens?.bot?.length ?? 0) > 0) {
+      return { door: "removed", reason: "tokens_revoked" };
+    }
+    const users = (revoked.tokens?.oauth ?? []).filter(Boolean);
+    if (users.length > 0) {
+      return { door: "user-tokens-revoked", externalUserIds: users };
+    }
+    return { door: "ignore", reason: "tokens_revoked:empty" };
+  }
+
+  if (event.type === "agent_session_stopped") {
+    // Parsed strictly here rather than through the union above: its loose
+    // fallback also matches this type name, and half a stop (no thread, no
+    // clicker) names no session to stop.
+    const stopped = agentSessionStoppedEvent.safeParse(event);
+    if (!stopped.success) return { door: "ignore", reason: "stop:malformed" };
+    // Only a person clicks Stop; one naming our own bot user is not a click.
+    if (ctx.botUserId && stopped.data.user === ctx.botUserId) {
+      return { door: "ignore", reason: "stop:self" };
+    }
+    return {
+      door: "stop",
+      externalUserId: stopped.data.user,
+      channel: stopped.data.channel,
+      threadTs: stopped.data.thread_ts,
+    };
+  }
+
+  if (event.type === "reaction_added") {
+    const parsed = reactionAddedEvent.safeParse(event);
+    if (!parsed.success) {
+      return { door: "ignore", reason: "reaction:not-a-message" };
+    }
+    const { user, reaction, item_user: author, item } = parsed.data;
+    // Our own identity unknown: the "seen" receipt the agent puts on every
+    // message could not be told from a person's reaction.
+    if (!ctx.botUserId) {
+      return { door: "ignore", reason: "reaction:unverifiable-self" };
+    }
+    if (user === ctx.botUserId) return { door: "ignore", reason: "self" };
+    if (isSlackSystemUser(user)) {
+      return { door: "ignore", reason: "slack-system-user" };
+    }
+    // A message some PERSON wrote is never the agent's: other people's
+    // messages stay private. No author at all is how the agent's own
+    // icon-posted answer arrives, so that one goes on to the re-read.
+    if (author !== undefined && author !== ctx.botUserId) {
+      return { door: "ignore", reason: "reaction:not-on-agent-message" };
+    }
+    return {
+      door: "reaction",
+      externalUserId: user,
+      channel: item.channel,
+      // Slack's own label when it sends one; otherwise its id convention
+      // (a DM's id starts with D). A proactive DM has no link row to ask.
+      inDm: item.channel_type
+        ? item.channel_type === "im"
+        : item.channel.startsWith("D"),
+      itemTs: item.ts,
+      reaction,
+    };
+  }
+
   if (event.type === "app_mention") {
     const mention = event as z.infer<typeof appMentionEvent>;
     const speaker = resolveSpeaker(mention, ctx);
@@ -247,11 +493,12 @@ export const interpretSlackEvent = (
       door: "group",
       ...speaker,
       externalThreadId: groupThreadId(mention.channel, threadRoot),
-      text: mention.text ?? "",
+      text: messageText(mention),
       files: normalizeFiles(mention.files),
       replyChannel: mention.channel,
       replyThreadTs: threadRoot,
       messageTs: mention.ts,
+      typedText: mention.text ?? "",
       isMention: true,
     };
   }
@@ -270,6 +517,12 @@ export const interpretSlackEvent = (
     if (message.subtype && message.subtype !== "file_share") {
       return { door: "ignore", reason: `subtype:${message.subtype}` };
     }
+    // Slack's system DM (the removal notice and its kin): a membership
+    // hint, never a speaker. Checked BEFORE the speaker walk so the person
+    // knock can never see it.
+    if (message.channel_type === "im" && isSlackSystemUser(message.user)) {
+      return { door: "system_notice" };
+    }
     const speaker = resolveSpeaker(message, ctx);
     if ("reason" in speaker) return { door: "ignore", reason: speaker.reason };
 
@@ -287,15 +540,17 @@ export const interpretSlackEvent = (
         door: "direct",
         externalUserId: speaker.externalUserId,
         externalThreadId: message.channel,
-        text: message.text ?? "",
+        text: messageText(message),
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
-        // The thread the person actually typed in, when they typed in one.
-        // The CONVERSATION is still the DM's single direct row — only the
-        // reply address narrows — so a threaded DM keeps one continuous
-        // context and simply answers where it was asked. Before this, every
-        // DM thread reply was answered at the bottom of the DM instead.
+        // The thread the person actually typed in, when they typed in one:
+        // the answer goes there, and the thread is its own conversation
+        // (`threadExternalId`), opened off the DM's direct row and run
+        // beside it. The top level keeps the one direct row.
         replyThreadTs: message.thread_ts ?? null,
+        threadExternalId: message.thread_ts
+          ? directThreadId(message.channel, message.thread_ts)
+          : null,
         messageTs: message.ts,
       };
     }
@@ -313,23 +568,41 @@ export const interpretSlackEvent = (
       return { door: "ignore", reason: "mention-twin" };
     }
 
-    // Channel/group message WITHOUT a mention: only a follow-up inside a
-    // thread the agent already joined counts (the dispatcher checks the link
-    // exists); everything else in a channel is other people talking.
+    // Channel/group message WITHOUT a mention: a follow-up inside a thread
+    // the agent already joined counts (the dispatcher checks the link
+    // exists). A TOP-LEVEL message is "overheard": it counts only where a
+    // person promoted the agent to hear every message (listen = "all"),
+    // which the dispatcher checks against the channel's reach row.
     if (message.thread_ts) {
       return {
         door: "group",
         ...speaker,
         externalThreadId: groupThreadId(message.channel, message.thread_ts),
-        text: message.text ?? "",
+        text: messageText(message),
         files: normalizeFiles(message.files),
         replyChannel: message.channel,
         replyThreadTs: message.thread_ts,
         messageTs: message.ts,
+        typedText: message.text ?? "",
         isMention: false,
       };
     }
-    return { door: "ignore", reason: "channel-chatter" };
+    return {
+      door: "group",
+      ...speaker,
+      // The message's own thread address: an @mention-style reply would go
+      // under it. A point-of-contact answer uses the channel's room instead
+      // (the dispatcher decides where it lands).
+      externalThreadId: groupThreadId(message.channel, message.ts),
+      text: messageText(message),
+      files: normalizeFiles(message.files),
+      replyChannel: message.channel,
+      replyThreadTs: message.ts,
+      messageTs: message.ts,
+      typedText: message.text ?? "",
+      isMention: false,
+      overheard: true,
+    };
   }
 
   return { door: "ignore", reason: `event:${event.type}` };

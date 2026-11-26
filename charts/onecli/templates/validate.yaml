@@ -1,0 +1,6 @@
+{{- /*
+Fails the render with a clear message when the values cannot produce a
+working install. Evaluated first (file order) so the message is the only
+output, not one error among a hundred template lines.
+*/ -}}
+{{- include "onecli.validate" . -}}

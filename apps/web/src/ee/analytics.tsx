@@ -7,7 +7,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { AnalyticsPageview } from "@/ee/analytics-pageview";
 import { FathomAnalytics } from "@/ee/fathom";
 
-// Baked at build time by the cloud image (deploy.yml build-args). Unset —
+// Baked at build time by the cloud image (build args). Unset —
 // every self-host build — means analytics never initializes: the provider
 // renders its children plain and no identifier ships in the bundle.
 const POSTHOG_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY;

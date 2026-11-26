@@ -1,26 +1,20 @@
 "use client";
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AgentIcon } from "@/lib/agents/agent-icon";
 import { Button } from "@onecli/ui/components/button";
-import { Skeleton } from "@onecli/ui/components/skeleton";
 import { matchAgentPage, withWorkspacePrefix } from "@/lib/navigation";
-import {
-  agentSectionBlocked,
-  isFullHeightAgentSection,
-} from "@/lib/agents/agent-sections";
-import { useAgents } from "@/hooks/use-agents";
-import { AgentPageHeader } from "./agent-page-header";
-import { AgentSectionRail } from "./agent-section-rail";
+import { agentSectionBlocked } from "@/lib/agents/agent-sections";
+import { useAgents, useWarmAgent } from "@/hooks/use-agents";
+import { AgentSectionCell } from "./agent-section-cell";
+import { AgentSectionSkeleton } from "./agent-section-skeleton";
 import { EmptyState } from "./empty-state";
-import { SectionShell } from "./section-shell";
 
 /**
  * The agent row the list query actually yields — derived from the hook rather
- * than restated, so it cannot drift from it (the rows come from a server
- * action, so dates are `Date`s and `kind` is Prisma's `string`).
+ * than restated, so it cannot drift from it (`GET /v1/agents`'s `Agent`).
  */
 export type AgentPageAgent = NonNullable<
   ReturnType<typeof useAgents>["data"]
@@ -46,31 +40,11 @@ export const useAgentPageAgent = (): AgentPageAgent => {
 export const useAgentPageAgentMaybe = (): AgentPageAgent | null =>
   useContext(AgentPageContext);
 
-const FrameSkeleton = () => (
-  <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-    <div className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
-      <Skeleton className="size-8 rounded-lg" />
-      <Skeleton className="h-5 w-40" />
-    </div>
-    <div className="flex min-h-0 flex-1">
-      <div className="hidden w-52 shrink-0 space-y-2 border-r p-3 md:block">
-        {[1, 2, 3, 4].map((i) => (
-          <Skeleton key={i} className="h-8 w-full" />
-        ))}
-      </div>
-      <SectionShell className="space-y-3">
-        {[1, 2, 3].map((i) => (
-          <Skeleton key={i} className="h-14 w-full" />
-        ))}
-      </SectionShell>
-    </div>
-  </div>
-);
-
 /**
  * The client frame behind the agent-page layout: it resolves the agent once
- * and renders the header + rail around whichever section is mounted, so every
- * section can assume its agent exists and is one this kind of agent has.
+ * and renders the section inside it, so every section can assume its agent
+ * exists and is one this kind of agent has. The dashboard's sidebar names
+ * the agent and lists its sections, so the frame adds no chrome of its own.
  */
 export const AgentPageFrame = ({
   agentId,
@@ -84,7 +58,25 @@ export const AgentPageFrame = ({
   const agent = agents.find((a) => a.id === agentId);
   const section = matchAgentPage(pathname)?.section ?? "";
 
-  if (isPending) return <FrameSkeleton />;
+  // A person on ANY section of a hosted agent's page is likely heading for
+  // its chat (or a section that needs the machine: Computer, SSH, Ports):
+  // warm it now, so the message they type after reading Schedules does not
+  // pay the boot. Once per agent per page load (the hook dedupes); a BYO
+  // agent has no machine and sends nothing.
+  const warm = useWarmAgent();
+  const agentIdentity = agent?.id;
+  const agentKind = agent?.kind;
+  useEffect(() => {
+    if (agentIdentity && agentKind)
+      warm({ id: agentIdentity, kind: agentKind });
+  }, [warm, agentIdentity, agentKind]);
+
+  if (isPending)
+    return (
+      <AgentSectionCell section={section}>
+        <AgentSectionSkeleton section={section} />
+      </AgentSectionCell>
+    );
 
   if (isError) {
     // A failed read is not a missing agent — saying "not found" here would
@@ -111,8 +103,8 @@ export const AgentPageFrame = ({
         description="It may have been deleted, or the link points at another workspace."
         action={
           <Button variant="outline" size="sm" asChild>
-            <Link href={withWorkspacePrefix(pathname, "/agents")}>
-              Back to Agents
+            <Link href={withWorkspacePrefix(pathname, "")}>
+              Back to workspace
             </Link>
           </Button>
         }
@@ -121,30 +113,22 @@ export const AgentPageFrame = ({
   }
 
   // A section this kind of agent doesn't have (a hand-typed URL, or a stale
-  // link after switching agents). The rail never offers it; this is the
+  // link after switching agents). The sidebar never offers it; this is the
   // backstop, in one place rather than in each section.
   const blocked = agentSectionBlocked(section, agent.kind);
 
   return (
     <AgentPageContext.Provider value={agent}>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <AgentPageHeader agent={agent} />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-          <AgentSectionRail agent={agent} />
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {blocked ? (
-              <EmptyState
-                tone="quiet"
-                title="That section is only available for hosted agents."
-              />
-            ) : isFullHeightAgentSection(section) ? (
-              children
-            ) : (
-              <SectionShell>{children}</SectionShell>
-            )}
-          </div>
-        </div>
-      </div>
+      {blocked ? (
+        <AgentSectionCell section={section} shell={false}>
+          <EmptyState
+            tone="quiet"
+            title="That section is only available for hosted agents."
+          />
+        </AgentSectionCell>
+      ) : (
+        <AgentSectionCell section={section}>{children}</AgentSectionCell>
+      )}
     </AgentPageContext.Provider>
   );
 };

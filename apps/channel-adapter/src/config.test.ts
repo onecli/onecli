@@ -39,14 +39,15 @@ describe("defaults", () => {
   it("fills every address and cadence from the local-dev defaults", () => {
     expect(loadConfig(base)).toEqual({
       token: "cha_secret",
-      // Unset name derives a per-host identity: unique per ECS task/container
-      // with zero configuration, so N cloud instances never collide on the
+      // Unset name derives a per-host identity: unique per instance/container
+      // with zero configuration, so N instances never collide on the
       // registration row (compose and `pnpm dev` set explicit names).
       name: `channel-adapter-${hostname()}`,
       controlPlaneUrl: "http://localhost:10256",
       gatewayUrl: "http://localhost:10255",
       configPollMs: 10_000,
       workPollMs: 2_000,
+      drainMs: 3_000,
       approvalsPollSeconds: 25,
       appUrl: "",
       appUrlFromLegacyBind: false,
@@ -70,6 +71,7 @@ describe("overrides", () => {
         GATEWAY_API_URL: "https://gw.example.com",
         CHANNEL_ADAPTER_CONFIG_POLL_MS: "500",
         CHANNEL_ADAPTER_WORK_POLL_MS: "250",
+        CHANNEL_ADAPTER_DRAIN_MS: "100",
         CHANNEL_ADAPTER_APPROVALS_POLL_SECONDS: "10",
         APP_URL: "https://app.example.com/",
       }),
@@ -80,6 +82,7 @@ describe("overrides", () => {
       gatewayUrl: "https://gw.example.com",
       configPollMs: 500,
       workPollMs: 250,
+      drainMs: 100,
       approvalsPollSeconds: 10,
       appUrl: "https://app.example.com",
       appUrlFromLegacyBind: false,

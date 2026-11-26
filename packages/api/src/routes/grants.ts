@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { ApiEnv } from "../types";
 import type { AuthContext } from "../providers";
 import { authMiddleware, requireWorkspaceId } from "../middleware/auth";
@@ -11,7 +11,7 @@ import {
 } from "../services/audit-service";
 import {
   connectionGrantSchema,
-  type ConnectionGrantInput,
+  type ConnectionGrantRequest,
 } from "../validations/grants";
 import {
   getAgentGrants,
@@ -59,13 +59,69 @@ const parseGrantBody = async (c: { req: { json: () => Promise<unknown> } }) => {
 /** Audit marker for the grant's resources tri-state — never the values
  * themselves (repo/folder names stay out of the audit log). */
 const resourcesAudit = (
-  input: ConnectionGrantInput,
+  input: ConnectionGrantRequest,
 ): "preserved" | "cleared" | "set" =>
   input.resources === undefined
     ? "preserved"
     : input.resources === null
       ? "cleared"
       : "set";
+
+// Both orientations write the same grant, so the agent side and the
+// connection side share one handler per verb (same params, same audit row).
+// Hono types route params from the path; both paths carry these two.
+type ConnectionGrantContext = Context<ApiEnv, "/:agentId/:connectionId">;
+
+const putConnectionGrant = async (c: ConnectionGrantContext) => {
+  const auth = c.get("auth");
+  const agentId = c.req.param("agentId");
+  const connectionId = c.req.param("connectionId");
+  const input = await parseGrantBody(c);
+  const result = await withAudit(
+    () =>
+      setConnectionGrant(
+        grantScope(auth),
+        agentId,
+        connectionId,
+        input,
+        auth.userId,
+      ),
+    (r) => ({
+      ...auditBase(auth),
+      action: AUDIT_ACTIONS.UPDATE,
+      metadata: {
+        agentId,
+        connectionId,
+        access: input.access,
+        resources: resourcesAudit(input),
+        changed: r.changed,
+        ruleIds: r.ruleIds,
+      },
+    }),
+  );
+  return c.json(result.grants);
+};
+
+const deleteConnectionGrant = async (c: ConnectionGrantContext) => {
+  const auth = c.get("auth");
+  const agentId = c.req.param("agentId");
+  const connectionId = c.req.param("connectionId");
+  await withAudit(
+    () =>
+      removeConnectionGrant(
+        grantScope(auth),
+        agentId,
+        connectionId,
+        auth.userId,
+      ),
+    (r) => ({
+      ...auditBase(auth),
+      action: AUDIT_ACTIONS.DELETE,
+      metadata: { agentId, connectionId, changed: r.changed },
+    }),
+  );
+  return c.body(null, 204);
+};
 
 export const agentGrantsRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -80,57 +136,13 @@ export const agentGrantsRoutes = () => {
   });
 
   // PUT /agents/:agentId/grants/connections/:connectionId — attach or rewrite.
-  app.put("/:agentId/grants/connections/:connectionId", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const connectionId = c.req.param("connectionId");
-    const input = await parseGrantBody(c);
-    const result = await withAudit(
-      () =>
-        setConnectionGrant(
-          grantScope(auth),
-          agentId,
-          connectionId,
-          input,
-          auth.userId,
-        ),
-      (r) => ({
-        ...auditBase(auth),
-        action: AUDIT_ACTIONS.UPDATE,
-        metadata: {
-          agentId,
-          connectionId,
-          access: input.access,
-          resources: resourcesAudit(input),
-          changed: r.changed,
-          ruleIds: r.ruleIds,
-        },
-      }),
-    );
-    return c.json(result.grants);
-  });
+  app.put("/:agentId/grants/connections/:connectionId", putConnectionGrant);
 
   // DELETE /agents/:agentId/grants/connections/:connectionId — detach.
-  app.delete("/:agentId/grants/connections/:connectionId", async (c) => {
-    const auth = c.get("auth");
-    const agentId = c.req.param("agentId");
-    const connectionId = c.req.param("connectionId");
-    await withAudit(
-      () =>
-        removeConnectionGrant(
-          grantScope(auth),
-          agentId,
-          connectionId,
-          auth.userId,
-        ),
-      (r) => ({
-        ...auditBase(auth),
-        action: AUDIT_ACTIONS.DELETE,
-        metadata: { agentId, connectionId, changed: r.changed },
-      }),
-    );
-    return c.body(null, 204);
-  });
+  app.delete(
+    "/:agentId/grants/connections/:connectionId",
+    deleteConnectionGrant,
+  );
 
   // PUT /agents/:agentId/grants/secrets/:secretId — attach (assign-only).
   app.put("/:agentId/grants/secrets/:secretId", async (c) => {
@@ -180,57 +192,10 @@ export const connectionGrantsRoutes = () => {
   });
 
   // PUT /connections/:connectionId/grants/agents/:agentId — the dialog's toggle.
-  app.put("/:connectionId/grants/agents/:agentId", async (c) => {
-    const auth = c.get("auth");
-    const connectionId = c.req.param("connectionId");
-    const agentId = c.req.param("agentId");
-    const input = await parseGrantBody(c);
-    const result = await withAudit(
-      () =>
-        setConnectionGrant(
-          grantScope(auth),
-          agentId,
-          connectionId,
-          input,
-          auth.userId,
-        ),
-      (r) => ({
-        ...auditBase(auth),
-        action: AUDIT_ACTIONS.UPDATE,
-        metadata: {
-          agentId,
-          connectionId,
-          access: input.access,
-          resources: resourcesAudit(input),
-          changed: r.changed,
-          ruleIds: r.ruleIds,
-        },
-      }),
-    );
-    return c.json(result.grants);
-  });
+  app.put("/:connectionId/grants/agents/:agentId", putConnectionGrant);
 
   // DELETE /connections/:connectionId/grants/agents/:agentId — detach.
-  app.delete("/:connectionId/grants/agents/:agentId", async (c) => {
-    const auth = c.get("auth");
-    const connectionId = c.req.param("connectionId");
-    const agentId = c.req.param("agentId");
-    await withAudit(
-      () =>
-        removeConnectionGrant(
-          grantScope(auth),
-          agentId,
-          connectionId,
-          auth.userId,
-        ),
-      (r) => ({
-        ...auditBase(auth),
-        action: AUDIT_ACTIONS.DELETE,
-        metadata: { agentId, connectionId, changed: r.changed },
-      }),
-    );
-    return c.body(null, 204);
-  });
+  app.delete("/:connectionId/grants/agents/:agentId", deleteConnectionGrant);
 
   return app;
 };

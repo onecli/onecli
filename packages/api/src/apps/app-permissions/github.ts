@@ -148,12 +148,17 @@ const githubGroups: AppToolGroup[] = [
   },
 ];
 
+// Other reads stay on Always allow: the one GET family that returns a secret
+// (secret scanning alerts) is held by the gateway whatever a grant allows
+// (`catalog-unlisted-reads.test.ts`).
 export const githubPermissions: AppPermissionDefinition = {
   provider: "github",
+  unlistedReads: "allow",
   groups: githubGroups,
 };
 
 export const githubAppPermissions: AppPermissionDefinition = {
   provider: "github-app",
+  unlistedReads: "allow",
   groups: githubGroups,
 };

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const xPermissions: AppPermissionDefinition = {
   provider: "x",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

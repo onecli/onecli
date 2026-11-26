@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@onecli/ui/components/input";
 import { Checkbox } from "@onecli/ui/components/checkbox";
@@ -10,10 +10,13 @@ import { cn } from "@onecli/ui/lib/utils";
 import type { PolicyDialogContentProps } from "@/lib/granular-access/types";
 import { coveredBy } from "@onecli/api/lib/resource-axis";
 import { UpgradeToTeamButton } from "@/ee/billing/_components/upgrade-to-team-button";
-import { getCurrentPlan } from "@/lib/user-plan";
-import { isPlanAtLeast, normalizePlan } from "@onecli/api/ee/billing/plans";
+import { useHasTeamFeatures } from "../use-has-team-features";
+import { useGitHubConnectionRepos } from "@/hooks/use-github-app-share";
+import { useOrgMembership } from "@/hooks/use-org";
 
 export const GithubAppPolicyDialogContent = ({
+  connectionId,
+  connectionScope = "workspace",
   metadata,
   policy,
   orgBoundary = null,
@@ -21,9 +24,27 @@ export const GithubAppPolicyDialogContent = ({
   onSave,
   onCancel,
 }: PolicyDialogContentProps) => {
+  // Opening reads the installation live, so repos added on GitHub show up
+  // with no Refresh button. Admins only (the route is); everyone else, and
+  // a failed read, falls back to the connection's stored list.
+  const { data: membership } = useOrgMembership();
+  const refresh = useGitHubConnectionRepos(
+    connectionId,
+    connectionScope,
+    membership?.isAdmin === true,
+  );
+  const live = refresh.data;
+  const available = new Map(
+    (live?.available ?? []).map((repo) => [repo.toLowerCase(), repo]),
+  );
+  const liveRepos = live
+    ? (live.selected?.flatMap(
+        (repo) => available.get(repo.toLowerCase()) ?? [],
+      ) ?? live.available)
+    : null;
   const repos = useMemo(
-    () => (metadata.repos as string[]) ?? [],
-    [metadata.repos],
+    () => liveRepos ?? (metadata.repos as string[]) ?? [],
+    [liveRepos, metadata.repos],
   );
   // Selecting a repository the organization doesn't allow would compose to a
   // narrower scope than asked for — the server refuses it, so don't offer it.
@@ -33,19 +54,7 @@ export const GithubAppPolicyDialogContent = ({
   const selectedRepos = new Set((policy?.repositories as string[]) ?? []);
   const isAllRepos = !policy || !policy.repositories;
   const [search, setSearch] = useState("");
-  const [hasTeamFeatures, setHasTeamFeatures] = useState(true);
-
-  useEffect(() => {
-    // Entitlement via the shared user-plan seam (cloud → real plan). Team-tier features unlock at team OR above,
-    // so rank-compare instead of exact-matching. Only downgrade from the
-    // optimistic default on a DEFINITE plan — getCurrentPlan returns null on
-    // error (stay optimistic so a transient fetch error doesn't flash an
-    // upgrade CTA).
-    getCurrentPlan().then((plan) => {
-      if (plan !== null)
-        setHasTeamFeatures(isPlanAtLeast(normalizePlan(plan), "team"));
-    });
-  }, []);
+  const hasTeamFeatures = useHasTeamFeatures();
 
   const filteredRepos = useMemo(() => {
     if (!search.trim()) return repos;
@@ -76,6 +85,7 @@ export const GithubAppPolicyDialogContent = ({
                 key={value}
                 type="button"
                 onClick={value === "all" ? setAllRepos : setSelectedMode}
+                aria-pressed={active}
                 className={cn(
                   "rounded-md px-3 py-1 text-xs font-medium transition-colors",
                   active
@@ -89,12 +99,23 @@ export const GithubAppPolicyDialogContent = ({
           })}
         </div>
 
+        {membership?.isAdmin === true && refresh.isFetching && (
+          <p role="status" className="mt-3 text-xs">
+            Refreshing repositories...
+          </p>
+        )}
+        {membership?.isAdmin === true && refresh.isError && (
+          <p role="alert" className="text-destructive mt-3 text-xs">
+            Couldn&apos;t refresh repositories. Reopen this dialog to try again.
+          </p>
+        )}
         {!isAllRepos && (
           <div className="mt-3 space-y-2">
             {repos.length > 8 && (
               <div className="relative">
                 <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
                 <Input
+                  aria-label="Search repositories"
                   placeholder="Search repositories..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -172,7 +193,14 @@ export const GithubAppPolicyDialogContent = ({
           Cancel
         </Button>
         {hasTeamFeatures ? (
-          <Button size="sm" onClick={onSave}>
+          <Button
+            size="sm"
+            onClick={onSave}
+            disabled={
+              membership?.isAdmin === true &&
+              (refresh.isPending || refresh.isFetching || refresh.isError)
+            }
+          >
             Save
           </Button>
         ) : (

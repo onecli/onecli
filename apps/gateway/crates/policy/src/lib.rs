@@ -50,9 +50,7 @@ pub struct PolicyRule {
 #[derive(Debug, Clone)]
 pub struct MatchedRule {
     pub logical_id: String,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub name: String,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub scope: String,
 }
 
@@ -161,9 +159,9 @@ pub fn matches_request(
     // `info/refs?service=<pack-service>` discovery followed by the POST to the
     // pack service itself. A rule on the POST endpoint must also match the
     // discovery - for a push block, so the push dies with a clear policy error
-    // instead of at the POST; for a clone/pull ALLOW under a deny-by-default
-    // grant stack, so the permitted clone's discovery isn't eaten by the
-    // terminal block (which would break the clone the user explicitly allowed).
+    // instead of at the POST; for a clone/pull ALLOW in a customized grant
+    // stack, so the permitted clone's discovery isn't left to the stack's
+    // terminal (held for approval, or blocked) and the clone just works.
     if method.eq_ignore_ascii_case("GET") {
         for service in ["git-receive-pack", "git-upload-pack"] {
             if rule.path_pattern.ends_with(&format!("/{service}"))
@@ -404,7 +402,7 @@ mod tests {
         // The upload-pack bridge: a rule on POST git-upload-pack (an allow in a
         // grant stack, or a block) also matches the preceding GET info/refs
         // clone discovery - so an ALLOWED clone's discovery isn't eaten by the
-        // stack's terminal block, and a BLOCKED clone dies with a clear policy
+        // stack's terminal, and a BLOCKED clone dies with a clear policy
         // error at discovery.
         let rule = PolicyRule {
             name: "clone".to_string(),

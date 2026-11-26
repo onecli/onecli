@@ -63,6 +63,14 @@ const calls = vi.hoisted(() => ({
   reorder: 0,
   publish: 0,
   del: 0,
+  homeBumps: [] as unknown[],
+}));
+
+// The route refreshes agent homes after every write (a write publishes).
+vi.mock("../services/home-sync-service", () => ({
+  bumpHomeForScope: async (scope: unknown) => {
+    calls.homeBumps.push(scope);
+  },
 }));
 
 vi.mock("../services/policy-service", async () => {
@@ -153,6 +161,7 @@ beforeEach(() => {
   calls.reorder = 0;
   calls.publish = 0;
   calls.del = 0;
+  calls.homeBumps = [];
 });
 
 const validRule = {
@@ -308,6 +317,8 @@ describe("default + publish", () => {
       body: JSON.stringify({ action: "block" }),
     });
     expect(res.status).toBe(200);
+    // Enforced immediately, so the org's agent homes are refreshed.
+    expect(calls.homeBumps).toEqual([{ organizationId: "org-1" }]);
   });
 
   it("422s an invalid default action", async () => {
@@ -319,7 +330,7 @@ describe("default + publish", () => {
     expect(res.status).toBe(422);
   });
 
-  it("publishes the draft set (200)", async () => {
+  it("keeps the publish endpoint for older CLIs (200)", async () => {
     const res = await app.request("/v1/org/policy/publish", {
       ...authed,
       method: "POST",

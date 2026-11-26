@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleClassroomPermissions: AppPermissionDefinition = {
   provider: "google-classroom",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

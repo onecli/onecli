@@ -1,41 +1,57 @@
 import { Hono } from "hono";
 import type { ApiEnv } from "../types";
-import { auth, requireWorkspaceId } from "../middleware/auth";
+import { auth, requireWorkspaceId, sessionAuth } from "../middleware/auth";
 import { getUser, updateProfile } from "../services/user-service";
-import { ensureApiKey, regenerateApiKey } from "../services/api-key-service";
 import {
-  recordAuditEvent,
+  ensureWorkspaceApiKey,
+  regenerateApiKey,
+} from "../services/api-key-service";
+import {
   AUDIT_ACTIONS,
   AUDIT_SERVICES,
   AUDIT_SOURCE,
+  recordAuditEvent,
 } from "../services/audit-service";
 import {
   createSshKey,
   deleteSshKey,
   listSshKeys,
 } from "../services/ssh-key-service";
+import {
+  deleteAccount,
+  planAccountDeletion,
+} from "../services/account-deletion-service";
 import { ServiceError } from "../services/errors";
 import { updateProfileSchema } from "../validations/user";
 import { createSshKeySchema } from "../validations/ssh-keys";
 
+// Identity routes work without a workspace: an ORG key carries no workspace of
+// its own, and `onecli auth login` verifies keys via GET /user — with the
+// default requireWorkspace it read every org key as invalid. The api-key
+// sub-routes stay workspace-scoped through their requireWorkspaceId calls
+// (400 with the header hint, instead of the blanket 401). Per-handler rather
+// than `use("*")` so the account-deletion pair below can run under the
+// session-only `sessionAuth()` instead.
+const identity = auth({ requireWorkspace: false });
+
+// The account itself belongs to the PERSON, not to any tenant: these two
+// must answer a user who belongs to no organization at all (an org-scoped
+// auth could not even resolve their session), and an API key — which acts
+// for a workspace or an org — may never delete the account that owns it.
+const person = sessionAuth();
+
 export const userRoutes = () => {
   const app = new Hono<ApiEnv>();
-  // Identity routes work without a workspace: an ORG key carries no workspace of
-  // its own, and `onecli auth login` verifies keys via GET /user — with the
-  // default requireWorkspace it read every org key as invalid. The api-key
-  // sub-routes stay workspace-scoped through their requireWorkspaceId calls
-  // (400 with the header hint, instead of the blanket 401).
-  app.use("*", auth({ requireWorkspace: false }));
 
   // GET /user
-  app.get("/", async (c) => {
+  app.get("/", identity, async (c) => {
     const auth = c.get("auth");
     const user = await getUser(auth.userId);
     return c.json(user);
   });
 
   // PATCH /user
-  app.patch("/", async (c) => {
+  app.patch("/", identity, async (c) => {
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => null);
     const parsed = updateProfileSchema.safeParse(body);
@@ -50,32 +66,48 @@ export const userRoutes = () => {
     return c.json(user);
   });
 
+  // DELETE /user — the account, tearing down the user's organizations on the
+  // way out (sole-member orgs deleted, shared orgs left). Refuses with 409
+  // while the user owns an org that has other members. No audit row: every
+  // row this user authored goes with the account.
+  app.delete("/", person, async (c) => {
+    await deleteAccount(c.get("sessionUser"));
+    return c.body(null, 204);
+  });
+
+  // GET /user/deletion-impact — what DELETE /user would do to each of the
+  // user's organizations, for the dialog to acknowledge one by one.
+  app.get("/deletion-impact", person, async (c) => {
+    const { userId } = c.get("sessionUser");
+    return c.json({ organizations: await planAccountDeletion(userId) });
+  });
+
   // GET /user/api-key
-  app.get("/api-key", async (c) => {
+  app.get("/api-key", identity, async (c) => {
     const auth = c.get("auth");
-    const workspaceId = requireWorkspaceId(auth);
-    const { apiKey, created } = await ensureApiKey(auth.userId, {
-      workspaceId,
+    const apiKey = await ensureWorkspaceApiKey({
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      workspaceId: requireWorkspaceId(auth),
     });
-    if (created) {
-      await recordAuditEvent({
-        workspaceId,
-        userId: auth.userId,
-        userEmail: auth.userEmail,
-        action: AUDIT_ACTIONS.CREATE,
-        service: AUDIT_SERVICES.API_KEY,
-        source: AUDIT_SOURCE.API,
-        metadata: { scope: "workspace", autoProvisioned: true },
-      });
-    }
     return c.json({ apiKey });
   });
 
-  // POST /user/api-key/regenerate
-  app.post("/api-key/regenerate", async (c) => {
+  // POST /user/api-key/regenerate: rotates the caller's personal key for this
+  // workspace. Audited: it is a credential lifecycle event (the old key stops
+  // working at once), and the dashboard's API Key page and the CLI share
+  // this one door.
+  app.post("/api-key/regenerate", identity, async (c) => {
     const auth = c.get("auth");
-    const result = await regenerateApiKey(auth.userId, {
-      workspaceId: requireWorkspaceId(auth),
+    const workspaceId = requireWorkspaceId(auth);
+    const result = await regenerateApiKey(auth.userId, { workspaceId });
+    await recordAuditEvent({
+      workspaceId,
+      userId: auth.userId,
+      userEmail: auth.userEmail,
+      action: AUDIT_ACTIONS.REGENERATE,
+      service: AUDIT_SERVICES.API_KEY,
+      source: AUDIT_SOURCE.API,
     });
     return c.json(result);
   });
@@ -87,13 +119,13 @@ export const userRoutes = () => {
   // bare-string 400s.
 
   // GET /user/ssh-keys
-  app.get("/ssh-keys", async (c) => {
+  app.get("/ssh-keys", identity, async (c) => {
     const auth = c.get("auth");
     return c.json({ sshKeys: await listSshKeys(auth.userId) });
   });
 
   // POST /user/ssh-keys
-  app.post("/ssh-keys", async (c) => {
+  app.post("/ssh-keys", identity, async (c) => {
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => null);
     const parsed = createSshKeySchema.safeParse(body);
@@ -115,7 +147,7 @@ export const userRoutes = () => {
   });
 
   // DELETE /user/ssh-keys/:keyId
-  app.delete("/ssh-keys/:keyId", async (c) => {
+  app.delete("/ssh-keys/:keyId", identity, async (c) => {
     const auth = c.get("auth");
     await deleteSshKey(
       {

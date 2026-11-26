@@ -1,59 +1,45 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@onecli/ui/components/button";
-import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
+import { Switch } from "@onecli/ui/components/switch";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@onecli/ui/components/select";
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@onecli/ui/components/tooltip";
+import { Info } from "lucide-react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { agentChatDraftPath } from "@/lib/navigation";
+
 import { Textarea } from "@onecli/ui/components/textarea";
 import { useCreateCron, useDeleteCron, useUpdateCron } from "@/hooks/use-crons";
 import type { AgentCron } from "@/lib/api";
+import { browserTimezone } from "@/lib/agents/schedule-timezone";
+import {
+  ScheduleWhenField,
+  useScheduleWhen,
+  whenFrom,
+  type ScheduleWhen,
+} from "./schedule-when-field";
+import { ScheduleDialogFrame } from "./schedule-dialog-frame";
+import { ScheduleAdvanced } from "./schedule-advanced";
+import { ScheduleTimezoneField } from "./schedule-timezone-field";
+import { DisabledReason } from "./disabled-reason";
+import { AskAgentLink } from "./ask-agent-link";
+
+/** The chat draft that hands a schedule's run condition to the agent. */
+const setUpConditionDraft = (name: string) =>
+  `For the schedule "${name}", only run it when `;
 
 /**
- * Create/edit a schedule. No date libraries exist in this app, deliberately —
- * the presets compose a cron expression from two small inputs, and "Custom"
- * exposes the expression directly. The server (croner) is the validator; its
+ * Create/edit a task schedule: a name, what to do, and When (the shared
+ * `ScheduleWhenField`). The server (croner) stays the validator; its
  * message surfaces verbatim on refusal.
  */
-
-type Preset = "daily" | "hourly" | "once" | "custom";
-
-/** The one-shot form: an ISO 8601 local datetime (croner reads it as a
- * fire-once pattern in the schedule's timezone; no offset by design — the
- * timezone field governs). */
-const ONCE_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/;
-
-const presetOf = (schedule: string): Preset => {
-  if (/^\d{1,2} \d{1,2} \* \* \*$/.test(schedule)) return "daily";
-  if (/^\d{1,2} \* \* \* \*$/.test(schedule)) return "hourly";
-  if (ONCE_SHAPE.test(schedule)) return "once";
-  return "custom";
-};
-
-const timeOf = (schedule: string): string => {
-  const daily = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(schedule);
-  if (!daily) return "09:00";
-  return `${daily[2]!.padStart(2, "0")}:${daily[1]!.padStart(2, "0")}`;
-};
-
-const browserTimezone = (): string =>
-  Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 export interface CronDialogProps {
   agentId: string;
@@ -75,11 +61,9 @@ export const CronDialog = ({
 
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [preset, setPreset] = useState<Preset>("daily");
-  const [time, setTime] = useState("09:00");
-  const [minute, setMinute] = useState("0");
-  const [onceAt, setOnceAt] = useState("");
-  const [custom, setCustom] = useState("0 9 * * *");
+  // The run condition is set by the agent; here it can only be turned off.
+  const [keepGate, setKeepGate] = useState(true);
+  const [when, setWhen] = useState<ScheduleWhen>(() => whenFrom(null));
   const [timezone, setTimezone] = useState(browserTimezone());
 
   // Re-seed the form whenever the dialog opens on a different target.
@@ -88,70 +72,55 @@ export const CronDialog = ({
     if (editing) {
       setName(editing.name);
       setPrompt(editing.prompt);
+      setKeepGate(true);
       setTimezone(editing.timezone);
-      const detected = presetOf(editing.schedule);
-      setPreset(detected);
-      if (detected === "daily") setTime(timeOf(editing.schedule));
-      if (detected === "hourly")
-        setMinute(editing.schedule.split(" ")[0] ?? "0");
-      if (detected === "once") setOnceAt(editing.schedule.slice(0, 16));
-      if (detected === "custom") setCustom(editing.schedule);
+      setWhen(whenFrom(editing.schedule));
     } else {
       setName("");
       setPrompt("");
-      setPreset("daily");
-      setTime("09:00");
-      setMinute("0");
-      setOnceAt("");
-      setCustom("0 9 * * *");
+      setWhen(whenFrom(null));
       setTimezone(browserTimezone());
     }
   }, [open, editing]);
 
-  const schedule = (): string | null => {
-    if (preset === "custom") return custom.trim() || null;
-    if (preset === "once") {
-      // datetime-local yields "YYYY-MM-DDTHH:mm"; croner wants full seconds.
-      const value = onceAt.trim();
-      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
-      return `${value}:00`;
-    }
-    if (preset === "hourly") {
-      const parsed = Number.parseInt(minute, 10);
-      if (Number.isNaN(parsed) || parsed < 0 || parsed > 59) return null;
-      return `${parsed} * * * *`;
-    }
-    const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
-    if (!match) return null;
-    return `${Number.parseInt(match[2]!, 10)} ${Number.parseInt(match[1]!, 10)} * * *`;
-  };
+  const read = useScheduleWhen(agentId, when, timezone);
 
-  const busy = create.isPending || update.isPending || remove.isPending;
+  // A save holds the dialog (the server validates it); a delete is instant.
+  const busy = create.isPending || update.isPending;
+  // Saving needs a name, a task and a When it understood: both save buttons
+  // share this.
+  const canSave =
+    name.trim() !== "" && prompt.trim() !== "" && read.expression !== null;
+  const router = useRouter();
+  const pathname = usePathname();
+  // A double click (or Enter + click) must never save twice: the pending flag
+  // only flips after the request is under way, this ref flips at once.
+  const submitting = useRef(false);
 
-  const submit = () => {
-    const expression = schedule();
-    if (!expression) {
-      toast.error(
-        preset === "daily"
-          ? "Enter a time like 14:00"
-          : preset === "once"
-            ? "Pick a date and time"
-            : "Enter a valid schedule",
-      );
-      return;
-    }
+  const submit = (then?: (saved: { name: string }) => void) => {
+    const expression = read.expression;
+    // Both save buttons are disabled until the When is understood.
+    if (submitting.current || !expression) return;
     const input = {
       name: name.trim(),
       prompt: prompt.trim(),
+      // Sent only to remove it; otherwise an edit leaves the check as is.
+      ...(editing?.gate && !keepGate && { gate: null }),
       schedule: expression,
       timezone: timezone.trim(),
     };
+    submitting.current = true;
     const handlers = {
       onSuccess: () => {
+        submitting.current = false;
         toast.success(editing ? "Schedule updated" : "Schedule created");
         onOpenChange(false);
+        then?.({ name: input.name });
       },
-      onError: (error: Error) => toast.error(String(error.message)),
+      onError: (error: Error) => {
+        submitting.current = false;
+        toast.error(String(error.message));
+      },
     };
     if (editing) {
       update.mutate({ cronId: editing.id, input }, handlers);
@@ -161,171 +130,180 @@ export const CronDialog = ({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* The FRAME is fixed and the fields scroll inside it: a schedule's
-          prompt is a whole runbook in practice, and a dialog that grows with
-          it would carry its own title and Save button off-screen — with
-          nothing to scroll, since the dialog is positioned `fixed`. */}
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>
-            {editing ? "Edit schedule" : "New schedule"}
-          </DialogTitle>
-          <DialogDescription>
-            The agent runs this on schedule and reports back to the chat the
-            schedule was created from.
-          </DialogDescription>
-        </DialogHeader>
+    <ScheduleDialogFrame
+      open={open}
+      onOpenChange={onOpenChange}
+      title={editing ? "Edit schedule" : "New schedule"}
+      // A new schedule reports to the creator's own chat; an edited one keeps
+      // reporting where it was created (an agent-made or a teammate's
+      // schedule reports elsewhere).
+      description={
+        editing
+          ? "The agent runs this on schedule and reports back to the chat the schedule was created from."
+          : "The agent runs this on schedule and sends the result to your chat with it."
+      }
+      busy={busy}
+      saving={create.isPending || update.isPending}
+      canSave={canSave}
+      saveLabel={editing ? "Save" : "Create"}
+      onSave={() => submit()}
+      {...(editing && {
+        // Instant: the row leaves the list and the dialog closes on click;
+        // the hook confirms, or puts the row back and says why.
+        onDelete: () => {
+          remove.mutate(editing.id);
+          onOpenChange(false);
+        },
+      })}
+    >
+      <div className="space-y-1.5">
+        <Label htmlFor="cron-name">Name</Label>
+        <Input
+          id="cron-name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder="Daily inbox check"
+          maxLength={100}
+        />
+      </div>
 
-        {/* `-m-1 p-1` buys the scroll box a 4px gutter: a focus ring is a
-            box-shadow, which adds nothing to scrollable overflow, so a ring on
-            an edge field would otherwise be shaved off by `overflow-y-auto`. */}
-        <DialogBody className="-m-1 space-y-4 p-1">
-          <div className="space-y-1.5">
-            <Label htmlFor="cron-name">Name</Label>
-            <Input
-              id="cron-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Daily inbox check"
-              maxLength={100}
-            />
-          </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="cron-prompt">What should it do?</Label>
+        <Textarea
+          id="cron-prompt"
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+          placeholder="Check the support inbox and summarize anything urgent."
+          rows={3}
+          // `field-sizing-content` grows this field with what you type, so
+          // it needs a ceiling of its own: uncapped, a long prompt claims
+          // the whole body and pushes the schedule fields out of reach.
+          className="max-h-[min(18rem,32dvh)]"
+          maxLength={10_000}
+        />
+      </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="cron-prompt">What should it do?</Label>
-            <Textarea
-              id="cron-prompt"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Check the support inbox and summarize anything urgent."
-              rows={3}
-              // `field-sizing-content` grows this field with what you type, so
-              // it needs a ceiling of its own: uncapped, a long prompt claims
-              // the whole body and pushes the schedule fields out of reach.
-              className="max-h-[min(18rem,32dvh)]"
-              maxLength={10_000}
-            />
-          </div>
+      <ScheduleWhenField
+        id="cron-when"
+        when={when}
+        onChange={setWhen}
+        hint={read.hint}
+        hintIsError={read.hintIsError}
+        expression={read.expression}
+      />
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Runs</Label>
-              <Select
-                value={preset}
-                onValueChange={(value) => setPreset(value as Preset)}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="daily">Every day</SelectItem>
-                  <SelectItem value="hourly">Every hour</SelectItem>
-                  <SelectItem value="once">Once, at a set time</SelectItem>
-                  <SelectItem value="custom">Custom (cron)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              {preset === "daily" && (
-                <>
-                  <Label htmlFor="cron-time">At</Label>
-                  <Input
-                    id="cron-time"
-                    value={time}
-                    onChange={(event) => setTime(event.target.value)}
-                    placeholder="14:00"
-                  />
-                </>
-              )}
-              {preset === "hourly" && (
-                <>
-                  <Label htmlFor="cron-minute">At minute</Label>
-                  <Input
-                    id="cron-minute"
-                    value={minute}
-                    onChange={(event) => setMinute(event.target.value)}
-                    placeholder="0"
-                  />
-                </>
-              )}
-              {preset === "once" && (
-                <>
-                  <Label htmlFor="cron-once">On</Label>
-                  <Input
-                    id="cron-once"
-                    type="datetime-local"
-                    value={onceAt}
-                    onChange={(event) => setOnceAt(event.target.value)}
-                  />
-                </>
-              )}
-              {preset === "custom" && (
-                <>
-                  <Label htmlFor="cron-custom">Expression</Label>
-                  <Input
-                    id="cron-custom"
-                    value={custom}
-                    onChange={(event) => setCustom(event.target.value)}
-                    placeholder="0 14 * * 1-5"
-                    className="font-mono"
-                  />
-                </>
+      {/* Open from the start when a run condition is set: it changes
+          what the schedule does, so it is never folded out of sight. */}
+      <ScheduleAdvanced
+        defaultOpen={Boolean(editing?.gate)}
+        summary={`${timezone.replace(/_/g, " ")}, ${editing?.gate && keepGate ? "only when needed" : "always runs"}`}
+      >
+        <ScheduleTimezoneField
+          id="cron-tz"
+          value={timezone}
+          onChange={setTimezone}
+        />
+
+        {/* The run condition is the agent's to write: it knows the files
+            and APIs, and a typed command that is missing or wrong fails
+            every run. Here a person only sees it, and can turn it off. */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="cron-gated">Only run when</Label>
+              {editing?.gate && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="About run conditions"
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <Info className="size-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-64">
+                    A free check runs first and skips the run when nothing
+                    changed. Check:{" "}
+                    <code className="font-mono">{editing.gate}</code>
+                  </TooltipContent>
+                </Tooltip>
               )}
             </div>
+            {editing?.gate && (
+              <Switch
+                id="cron-gated"
+                checked={keepGate}
+                onCheckedChange={setKeepGate}
+              />
+            )}
           </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="cron-tz">Timezone</Label>
-            <Input
-              id="cron-tz"
-              value={timezone}
-              onChange={(event) => setTimezone(event.target.value)}
-              placeholder="America/Los_Angeles"
-            />
-          </div>
-        </DialogBody>
-
-        <DialogFooter className="gap-2 sm:justify-between">
-          {editing ? (
-            <Button
-              variant="ghost"
-              className="text-destructive hover:text-destructive"
-              disabled={busy}
-              loading={remove.isPending}
-              onClick={() =>
-                remove.mutate(editing.id, {
-                  onSuccess: () => {
-                    toast.success("Schedule deleted");
-                    onOpenChange(false);
-                  },
-                  onError: (error) => toast.error(String(error.message)),
-                })
-              }
-            >
-              Delete
-            </Button>
+          {editing?.gate ? (
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="truncate text-muted-foreground">
+                {editing.gateDescription ?? editing.gate}
+              </span>
+              <AskAgentLink
+                agentId={agentId}
+                label="Change"
+                draft={`For the schedule "${editing.name}", change when it runs.\nNow it only runs when: ${editing.gateDescription ?? editing.gate}\nChange it to only run when: `}
+              />
+            </div>
           ) : (
-            <span />
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="text-muted-foreground">
+                Always. The agent can add a check that skips runs when nothing
+                changed.
+              </span>
+              {editing ? (
+                canSave ? (
+                  <Link
+                    href={agentChatDraftPath(
+                      pathname,
+                      agentId,
+                      setUpConditionDraft(editing.name),
+                    )}
+                    className="focus-visible:ring-ring/50 shrink-0 rounded-sm text-xs font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-2"
+                  >
+                    Set up with agent
+                  </Link>
+                ) : null
+              ) : (
+                // A new schedule is saved first, so the agent edits a real
+                // one (update_task) instead of creating a second. A disabled
+                // button gets no pointer events, so the reason rides the
+                // wrapper's tooltip.
+                <DisabledReason
+                  reason={
+                    canSave
+                      ? null
+                      : "Fill in the name, the task and When first."
+                  }
+                >
+                  <button
+                    type="button"
+                    className="focus-visible:ring-ring/50 shrink-0 rounded-sm text-xs font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-50"
+                    disabled={!canSave || busy}
+                    onClick={() =>
+                      submit((saved) =>
+                        router.push(
+                          agentChatDraftPath(
+                            pathname,
+                            agentId,
+                            setUpConditionDraft(saved.name),
+                          ),
+                        ),
+                      )
+                    }
+                  >
+                    Create & set up with agent
+                  </button>
+                </DisabledReason>
+              )}
+            </div>
           )}
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={busy || !name.trim() || !prompt.trim()}
-              loading={create.isPending || update.isPending}
-              onClick={submit}
-            >
-              {editing ? "Save" : "Create"}
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      </ScheduleAdvanced>
+    </ScheduleDialogFrame>
   );
 };

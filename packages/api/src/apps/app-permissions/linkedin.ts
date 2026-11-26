@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const linkedinPermissions: AppPermissionDefinition = {
   provider: "linkedin",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

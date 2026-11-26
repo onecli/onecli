@@ -16,7 +16,7 @@ export interface AdapterConfig {
    * and remains the bearer against an old control plane that mints nothing. */
   token: string;
   /** The instance's stable name — the key its registration row survives
-   * restarts under. Unset, it derives from the hostname: unique per ECS task
+   * restarts under. Unset, it derives from the hostname: unique per instance
    * and per container with zero configuration (compose and `pnpm dev` both
    * set an explicit name). */
   name: string;
@@ -28,6 +28,8 @@ export interface AdapterConfig {
   configPollMs: number;
   /** Batched work poll cadence. */
   workPollMs: number;
+  /** Bounded shutdown drain: how long in-flight posts get after SIGTERM. */
+  drainMs: number;
   /** Gateway approvals long-poll hold, seconds (the gateway holds ~30s). */
   approvalsPollSeconds: number;
   /** The dashboard's public origin — where "fix it" buttons point. Resolved
@@ -86,6 +88,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv): AdapterConfig => {
     ),
     configPollMs: positiveInt(env.CHANNEL_ADAPTER_CONFIG_POLL_MS, 10_000),
     workPollMs: positiveInt(env.CHANNEL_ADAPTER_WORK_POLL_MS, 2_000),
+    drainMs: positiveInt(env.CHANNEL_ADAPTER_DRAIN_MS, 3_000),
     approvalsPollSeconds: positiveInt(
       env.CHANNEL_ADAPTER_APPROVALS_POLL_SECONDS,
       25,

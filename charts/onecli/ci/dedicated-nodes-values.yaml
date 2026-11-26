@@ -1,0 +1,44 @@
+# Sandboxes on their own node pool with gVisor, hooks-driven migrations,
+# a pinned image tag, an external proxy for remote agents.
+externalUrl: https://onecli.example.com
+trustedOrigins: https://onecli-alt.example.com
+image:
+  tag: 2.10.0
+  pullSecrets: [ghcr-pull]
+secrets:
+  existingSecret: onecli-secrets
+gatewayCa:
+  existingSecret: onecli-gateway-ca
+database:
+  enabled: false
+  external:
+    url: postgresql://onecli:secret@db.example.internal:5432/onecli?sslmode=require
+gateway:
+  allowPrivateDestinations: 10.20.0.0/16,jira.corp
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+runner:
+  maxSandboxes: 25
+sandboxes:
+  home:
+    size: 50Gi
+    storageClass: gp3
+  memoryMb: 4096
+  cpus: 4
+  nodeSelector:
+    onecli.sh/pool: sandboxes
+  tolerations:
+    - key: onecli.sh/sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  runtimeClassName: gvisor
+  imagePullSecrets: [ghcr-pull]
+migrations:
+  useHelmHooks: true
+commonLabels:
+  team: platform
+commonAnnotations:
+  owner: platform@example.com

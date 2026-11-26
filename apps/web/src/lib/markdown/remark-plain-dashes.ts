@@ -2,9 +2,9 @@ import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 
 /**
- * House copy style: no em dashes in agent prose (the Slack adapter enforces
- * the same rule in apps/channel-adapter/src/slack/mrkdwn.ts, and static UI
- * copy is pinned by ui-copy-guard.test.ts). This is the web-transcript
+ * House copy style: no em dashes in agent prose (the Slack mrkdwn conversion
+ * enforces the same rule in packages/channels/src/slack/mrkdwn.ts, and static
+ * UI copy is pinned by ui-copy-guard.test.ts). This is the web-transcript
  * counterpart: a remark plugin that rewrites em/en dashes to " - " in
  * markdown TEXT nodes only.
  *

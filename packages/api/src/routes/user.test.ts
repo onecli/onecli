@@ -20,6 +20,8 @@ const services = vi.hoisted(() => ({
     name: "Admin",
   })),
   sshKeyRows: [] as Array<{ id: string; userId: string }>,
+  auditCreate: vi.fn(async () => ({})),
+  regenerateApiKey: vi.fn(async () => ({ apiKey: "oc_rotated_value" })),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -67,8 +69,18 @@ vi.mock("@onecli/db", () => ({
     },
     // The audit writes are best-effort by contract; give them a real sink so
     // the handlers stay on the happy path.
-    auditLog: { create: async () => ({}) },
+    auditLog: { create: services.auditCreate },
+    // The org key's workspace header resolves only for its own org's "ws-1".
+    workspace: {
+      findFirst: async ({ where }: { where: { id: string } }) =>
+        where.id === "ws-1" ? { id: "ws-1" } : null,
+    },
   },
+}));
+
+vi.mock("../services/api-key-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/api-key-service")>()),
+  regenerateApiKey: services.regenerateApiKey,
 }));
 
 vi.mock("../services/user-service", () => ({
@@ -105,6 +117,50 @@ describe("GET /v1/user auth posture", () => {
       headers: { Authorization: "Bearer oc_org_nope" },
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /v1/user/api-key/regenerate", () => {
+  // The dashboard's API Key page and the CLI share this one door, so the
+  // route itself leaves the audit trail of the rotation.
+  it("rotates the caller's key in the named workspace and audits it, never the key", async () => {
+    services.auditCreate.mockClear();
+    services.regenerateApiKey.mockClear();
+    const res = await app.request("/v1/user/api-key/regenerate", {
+      method: "POST",
+      headers: { ...AUTH, "X-Workspace-Id": "ws-1" },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ apiKey: "oc_rotated_value" });
+    expect(services.regenerateApiKey).toHaveBeenCalledWith("user-1", {
+      workspaceId: "ws-1",
+    });
+    expect(services.auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          workspaceId: "ws-1",
+          userId: "user-1",
+          action: "regenerate",
+          service: "api-key",
+          source: "api",
+        }),
+      }),
+    );
+    expect(JSON.stringify(services.auditCreate.mock.calls)).not.toContain(
+      "oc_rotated_value",
+    );
+  });
+
+  it("rotates nothing and audits nothing without a workspace", async () => {
+    services.auditCreate.mockClear();
+    services.regenerateApiKey.mockClear();
+    const res = await app.request("/v1/user/api-key/regenerate", {
+      method: "POST",
+      headers: AUTH,
+    });
+    expect(res.status).toBe(400);
+    expect(services.regenerateApiKey).not.toHaveBeenCalled();
+    expect(services.auditCreate).not.toHaveBeenCalled();
   });
 });
 

@@ -36,7 +36,7 @@ says so in the thread.
 | `pnpm dev`                         | The whole stack from one command (creates + tops up `.env`)     |
 | `pnpm dev -- --filter=@onecli/web` | Just one service (any turbo filter works)                       |
 | `pnpm run setup`                   | Self-host install wizard (Docker Compose)                       |
-| `pnpm agent:build`                 | Build the agent sandbox image (once, enables hosted agents)     |
+| `pnpm agent:build`                 | Build the agent sandbox image: the OS base, then the app on it  |
 | `pnpm build`                       | Production build                                                |
 | `pnpm check`                       | Lint + types + format + script tests (the pre-push gate and CI) |
 | `pnpm test`                        | Run the test suites                                             |
@@ -74,7 +74,8 @@ docker/
   migrations.Dockerfile       # One-shot migration runner (prisma CLI + migrations)
   gateway.Dockerfile          # Gateway image
   runner.Dockerfile           # Runner image
-  agent.Dockerfile            # Agent sandbox image
+  agent-base.Dockerfile       # Agent sandbox OS base (the big apt layer; rarely changes)
+  agent.Dockerfile            # Agent sandbox image (the app, on the base)
   channel-adapter.Dockerfile  # Slack adapter image
   docker-compose.yml          # The self-host stack
   docker-compose.build.yml    # Build-from-source overlay

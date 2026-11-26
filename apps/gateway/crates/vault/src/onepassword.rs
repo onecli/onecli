@@ -11,6 +11,10 @@
 //! The actual 1Password SDK work (validate token, resolve `op://`, browse
 //! vaults/items/fields for the picker) is delegated to the Node "1Password SDK
 //! service" via [`super::onepassword_api`]; the gateway never runs the `op` CLI.
+//!
+//! A cached session is re-checked against its `vault_connections` row on every
+//! use (see the crate docs), so a disconnect or re-pair made through any
+//! gateway instance retires the token everywhere on the next request.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,14 +22,19 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
+use db::VaultGeneration;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
 use super::onepassword_api::{self, OpError};
-use super::{PairResult, ProviderStatus, VaultCredential, VaultError, VaultProvider};
+use super::{
+    check_session, PairResult, ProviderStatus, SessionCheck, VaultCredential, VaultError,
+    VaultProvider,
+};
 use crypto::CryptoService;
 
+const PROVIDER: &str = "onepassword";
 const RESOLVE_CACHE_TTL: Duration = Duration::from_secs(60);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
@@ -55,6 +64,9 @@ struct CachedRef {
 
 struct OnePasswordSession {
     decrypted_sa_token: String,
+    /// The row generation this session was loaded at: the session is valid
+    /// only while the row still carries it.
+    generation: VaultGeneration,
     /// `op://vault/item/field` → resolved value, with positive/negative TTLs.
     ref_cache: DashMap<String, CachedRef>,
     last_used: Mutex<Instant>,
@@ -118,18 +130,53 @@ impl OnePasswordVaultProvider {
         }
     }
 
-    /// Load an existing session from memory or DB. Returns `None` if the workspace
-    /// has never paired. Decrypts the SA token into memory (held for resolution).
+    /// Load the workspace's session, or `None` if it is not paired.
+    ///
+    /// A cached session is served only after its row confirms it: gone means
+    /// disconnected (drop it, return `None`), a new generation means re-paired
+    /// (drop it and load the new token). A database error fails the call and
+    /// keeps the session — a credential is never served unverified.
+    /// Decrypts the SA token into memory (held for resolution).
     async fn load_session(
         &self,
         workspace_id: &str,
     ) -> Result<Option<Arc<OnePasswordSession>>, VaultError> {
-        if let Some(session) = self.sessions.get(workspace_id) {
-            *session.last_used.lock().expect("session lock poisoned") = Instant::now();
-            return Ok(Some(Arc::clone(&session)));
+        // Clone out of the map so no shard lock is held across the await.
+        let cached = self
+            .sessions
+            .get(workspace_id)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(session) = cached {
+            let check = check_session(&self.pool, workspace_id, PROVIDER, Some(session.generation))
+                .await
+                .map_err(|e| {
+                    warn!(workspace_id, error = %e, "1Password: session check failed");
+                    VaultError::Internal("failed to verify vault connection".into())
+                })?;
+            match check {
+                SessionCheck::Current => {
+                    *session.last_used.lock().expect("session lock poisoned") = Instant::now();
+                    return Ok(Some(session));
+                }
+                SessionCheck::Gone => {
+                    self.evict(workspace_id, &session);
+                    info!(
+                        workspace_id,
+                        "1Password: connection removed; session dropped"
+                    );
+                    return Ok(None);
+                }
+                SessionCheck::Superseded => {
+                    self.evict(workspace_id, &session);
+                    info!(
+                        workspace_id,
+                        "1Password: connection re-paired; reloading session"
+                    );
+                }
+            }
         }
 
-        let row = match db::find_vault_connection(&self.pool, workspace_id, "onepassword").await {
+        let row = match db::find_vault_connection(&self.pool, workspace_id, PROVIDER).await {
             Ok(Some(row)) => row,
             Ok(None) => return Ok(None),
             Err(e) => {
@@ -156,6 +203,7 @@ impl OnePasswordVaultProvider {
 
         let session = Arc::new(OnePasswordSession {
             decrypted_sa_token: sa_token,
+            generation: row.generation,
             ref_cache: DashMap::new(),
             last_used: Mutex::new(Instant::now()),
             last_error: Mutex::new(None),
@@ -165,6 +213,15 @@ impl OnePasswordVaultProvider {
         self.sessions
             .insert(workspace_id.to_string(), Arc::clone(&session));
         Ok(Some(session))
+    }
+
+    /// Drop `session` from the map — only if it is still the one there, so a
+    /// concurrent reload's fresh session is never removed in its place — and
+    /// release its resolved values.
+    fn evict(&self, workspace_id: &str, session: &Arc<OnePasswordSession>) {
+        self.sessions
+            .remove_if(workspace_id, |_, current| Arc::ptr_eq(current, session));
+        session.ref_cache.clear();
     }
 
     // ── Value-source resolution (the secret-injection path) ──────────────
@@ -295,7 +352,7 @@ impl OnePasswordVaultProvider {
 #[async_trait]
 impl VaultProvider for OnePasswordVaultProvider {
     fn provider_name(&self) -> &'static str {
-        "onepassword"
+        PROVIDER
     }
 
     async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult> {
@@ -319,11 +376,14 @@ impl VaultProvider for OnePasswordVaultProvider {
             encrypted_service_account_token: encrypted,
         };
         let cd = serde_json::to_value(&config)?;
-        db::upsert_vault_connection(&self.pool, workspace_id, "onepassword", "paired", Some(&cd))
+        db::upsert_vault_connection(&self.pool, workspace_id, PROVIDER, "paired", Some(&cd))
             .await?;
 
-        // Drop any cached session so the next request reloads the new token.
-        self.sessions.remove(workspace_id);
+        // Drop this instance's copy now; every other instance retires its own
+        // on its next use, when the row's new generation no longer matches.
+        if let Some((_, old)) = self.sessions.remove(workspace_id) {
+            old.ref_cache.clear();
+        }
         Ok(PairResult {
             display_name: Some("1Password".into()),
         })
@@ -464,5 +524,169 @@ mod tests {
             op_err_to_vault(OpError::Transient("x".into())),
             VaultError::Internal(_)
         ));
+    }
+
+    // ── Cross-instance revocation, over a real Postgres ─────────────────
+    //
+    // Two providers over one database stand in for two gateway instances. The
+    // pair/disconnect "through instance A" is the row write it performs, so
+    // these drive the row directly (pairing itself dials the 1Password
+    // service) and assert on what instance B serves.
+
+    use crate::test_support::{seed_workspace, test_crypto, test_pool};
+    use crate::VaultService;
+
+    /// Write the connection row the way `pair` does, for `token`.
+    async fn write_pairing(pool: &PgPool, crypto: &CryptoService, workspace_id: &str, token: &str) {
+        let config = OnePasswordConfig {
+            encrypted_service_account_token: crypto.encrypt(token).await.expect("encrypt"),
+        };
+        let cd = serde_json::to_value(&config).expect("serialize");
+        db::upsert_vault_connection(pool, workspace_id, PROVIDER, "paired", Some(&cd))
+            .await
+            .expect("upsert");
+    }
+
+    async fn token_served(
+        provider: &OnePasswordVaultProvider,
+        workspace_id: &str,
+    ) -> Option<String> {
+        provider
+            .load_session(workspace_id)
+            .await
+            .expect("load session")
+            .map(|s| s.decrypted_sa_token.clone())
+    }
+
+    #[tokio::test]
+    async fn a_re_pair_on_another_instance_replaces_the_cached_token() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vop1").await;
+        let crypto = test_crypto();
+        let b = OnePasswordVaultProvider::new(pool.clone(), Arc::clone(&crypto));
+
+        write_pairing(&pool, &crypto, &ws, "token-one").await;
+        assert_eq!(token_served(&b, &ws).await.as_deref(), Some("token-one"));
+
+        // Re-paired through another instance: B's cached session is stale.
+        write_pairing(&pool, &crypto, &ws, "token-two").await;
+        assert_eq!(token_served(&b, &ws).await.as_deref(), Some("token-two"));
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_on_another_instance_drops_the_cached_session() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vop2").await;
+        let crypto = test_crypto();
+        let a = Arc::new(OnePasswordVaultProvider::new(
+            pool.clone(),
+            Arc::clone(&crypto),
+        ));
+        let b = OnePasswordVaultProvider::new(pool.clone(), Arc::clone(&crypto));
+        let service_a =
+            VaultService::new(vec![Arc::clone(&a) as Arc<dyn VaultProvider>], pool.clone());
+
+        write_pairing(&pool, &crypto, &ws, "token-one").await;
+        assert_eq!(token_served(&b, &ws).await.as_deref(), Some("token-one"));
+
+        service_a
+            .disconnect(&ws, PROVIDER)
+            .await
+            .expect("disconnect");
+
+        assert_eq!(token_served(&b, &ws).await, None);
+        assert!(
+            !b.sessions.contains_key(&ws),
+            "the revoked token must not stay resident on B"
+        );
+        // And the resolve path refuses rather than reaching 1Password.
+        assert!(matches!(
+            b.resolve_ref(&ws, "op://v/i/f").await,
+            Err(VaultError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_current_session_is_reused_not_reloaded() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vop3").await;
+        let crypto = test_crypto();
+        let b = OnePasswordVaultProvider::new(pool.clone(), Arc::clone(&crypto));
+
+        write_pairing(&pool, &crypto, &ws, "token-one").await;
+        let first = b.load_session(&ws).await.expect("load").expect("session");
+        let second = b.load_session(&ws).await.expect("load").expect("session");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged row must keep its session"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_never_reaches_another_workspaces_session() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws_x = seed_workspace(&pool, "vop5x").await;
+        let ws_y = seed_workspace(&pool, "vop5y").await;
+        let crypto = test_crypto();
+        let a = Arc::new(OnePasswordVaultProvider::new(
+            pool.clone(),
+            Arc::clone(&crypto),
+        ));
+        let b = OnePasswordVaultProvider::new(pool.clone(), Arc::clone(&crypto));
+        let service_a =
+            VaultService::new(vec![Arc::clone(&a) as Arc<dyn VaultProvider>], pool.clone());
+
+        write_pairing(&pool, &crypto, &ws_x, "token-x").await;
+        write_pairing(&pool, &crypto, &ws_y, "token-y").await;
+        let y_before = b.load_session(&ws_y).await.expect("load").expect("session");
+        assert_eq!(token_served(&b, &ws_x).await.as_deref(), Some("token-x"));
+
+        // Workspace X disconnects; workspace Y's connection is untouched.
+        service_a
+            .disconnect(&ws_x, PROVIDER)
+            .await
+            .expect("disconnect");
+
+        assert_eq!(token_served(&b, &ws_x).await, None);
+        let y_after = b.load_session(&ws_y).await.expect("load").expect("session");
+        assert_eq!(y_after.decrypted_sa_token, "token-y");
+        assert!(
+            Arc::ptr_eq(&y_before, &y_after),
+            "another workspace's session must not even be reloaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_database_error_fails_closed_and_keeps_the_session() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vop4").await;
+        let crypto = test_crypto();
+        write_pairing(&pool, &crypto, &ws, "token-one").await;
+
+        // B on its own pool, so closing it simulates B losing the database.
+        let url = std::env::var("GATEWAY_TEST_DATABASE_URL").expect("url");
+        let b_pool = db::create_pool(&url).await.expect("pool");
+        let b = OnePasswordVaultProvider::new(b_pool.clone(), Arc::clone(&crypto));
+        assert_eq!(token_served(&b, &ws).await.as_deref(), Some("token-one"));
+
+        b_pool.close().await;
+        assert!(
+            matches!(b.load_session(&ws).await, Err(VaultError::Internal(_))),
+            "an unverifiable session must not be served"
+        );
+        assert!(
+            b.sessions.contains_key(&ws),
+            "a database blip must not tear the session down"
+        );
     }
 }

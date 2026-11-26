@@ -24,6 +24,7 @@ import {
   AlertDialogTrigger,
 } from "@onecli/ui/components/alert-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { DOCS_URL } from "@/lib/components/docs-link";
 import {
   getOrgApiKey,
   regenerateOrgApiKey,
@@ -72,11 +73,7 @@ export const OrgApiKeyCard = () => {
         <CardTitle>Your Organization API Key</CardTitle>
         <CardDescription>
           Your personal organization-level key. It works across every workspace
-          in this organization. Pass the target workspace with an{" "}
-          <code className="bg-muted rounded px-1 py-0.5 text-xs">
-            X-Workspace-Id
-          </code>{" "}
-          header.
+          in this organization.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -157,15 +154,21 @@ export const OrgApiKeyCard = () => {
         <div className="text-muted-foreground flex items-start gap-2 text-xs">
           <Info className="mt-0.5 size-3 shrink-0" />
           <span>
-            Use with{" "}
+            Send it as{" "}
             <code className="bg-muted rounded px-1 py-0.5">
               Authorization: Bearer oc_org_...
             </code>{" "}
-            and{" "}
-            <code className="bg-muted rounded px-1 py-0.5">
-              X-Workspace-Id: &lt;workspace-id&gt;
-            </code>{" "}
-            headers.
+            with an{" "}
+            <code className="bg-muted rounded px-1 py-0.5">X-Workspace-Id</code>{" "}
+            header.{" "}
+            <a
+              href={`${DOCS_URL}/api-reference#organization-keys`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground underline underline-offset-2"
+            >
+              Organization keys in the docs
+            </a>
           </span>
         </div>
       </CardContent>

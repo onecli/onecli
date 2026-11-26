@@ -12,7 +12,8 @@ import { AuthFormError } from "@/lib/auth/_components/auth-form-error";
 import { GoogleButton } from "@/lib/auth/_components/google-button";
 import { redirectErrorMessage } from "@/lib/auth/auth-errors";
 import { usePostAuthRedirect } from "@/lib/auth/use-post-auth-redirect";
-import { AuthPending } from "@/lib/auth/_components/auth-pending";
+import { AuthSyncError } from "@/lib/auth/_components/auth-sync-error";
+import { PendingLanding } from "@/lib/dashboard/shell/pending-landing";
 
 export interface OnpremLoginContentProps {
   /** Whether a "Continue with Google" button should be offered. */
@@ -29,7 +30,7 @@ export const OnpremLoginContent = ({
   googleConfigured,
   emailConfigured,
 }: OnpremLoginContentProps) => {
-  const { isAuthenticated, isLoading, signIn, signInWithPassword } = useAuth();
+  const { isAuthenticated, signIn, signInWithPassword } = useAuth();
   const searchParams = useSearchParams();
 
   const [email, setEmail] = useState("");
@@ -58,15 +59,17 @@ export const OnpremLoginContent = ({
     }
   };
 
-  if (isLoading || isAuthenticated) {
-    // The spinner must never outlive the failure: someone whose sign-in
-    // succeeded but whose account could not be resolved would otherwise wait
-    // on it indefinitely.
-    return (
-      <AuthPending
-        label={isAuthenticated ? "Signing you in..." : null}
-        error={syncError}
-      />
+  // Signed in: the dashboard's skeleton holds the screen while the landing
+  // is looked up, so the form gives way straight to the dashboard filling
+  // in. A failure replaces it: someone whose sign-in succeeded but whose
+  // account could not be resolved must not wait on it indefinitely. While
+  // the session is still being checked the form stands, as the server drew
+  // it: nearly everyone on this page is signed out.
+  if (isAuthenticated) {
+    return syncError ? (
+      <AuthSyncError message={syncError} />
+    ) : (
+      <PendingLanding />
     );
   }
 

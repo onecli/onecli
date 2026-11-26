@@ -1,7 +1,9 @@
 import { db, Prisma } from "@onecli/db";
 
 import { LLM_HOST_FRAGMENTS } from "../lib/llm-hosts";
+import { parseLegacyDatabaseName } from "../lib/connection-display";
 import { getRoleResolver } from "../providers";
+import type { ActivityPageParams } from "../validations/request-logs";
 
 export interface RequestLogEntry {
   id: string;
@@ -113,10 +115,67 @@ const approvedByUserId = (extraData: unknown): string | null => {
   return typeof by === "string" ? by : null;
 };
 
-export const getConnectionLabel = (log: RequestLogEntry): string | null => {
+export const getConnectionLabel = (
+  log: Pick<RequestLogEntry, "extraData">,
+): string | null => {
   const data = log.extraData as Record<string, unknown> | null;
   const label = data?.connection_label;
   return typeof label === "string" ? label : null;
+};
+
+/** How Activity shows a database row instead of its synthetic policy request
+ * (`<connection-id>.postgres.onecli.invalid` + `/sql/read`): the kind of
+ * statement, the connection's name, and the statement itself. Null for HTTP
+ * rows, which keep their host and path. */
+export interface DatabaseRequestView {
+  kind: "READ" | "WRITE" | "SCHEMA";
+  connection: string | null;
+  statement: string | null;
+}
+
+const SQL_KINDS: Record<string, DatabaseRequestView["kind"]> = {
+  "/sql/read": "READ",
+  "/sql/write": "WRITE",
+  "/sql/schema": "SCHEMA",
+};
+
+/** The provider and policy zone the gateway's database front door logs its
+ *  rows under (`apps::POSTGRES_PROVIDER` / `POSTGRES_POLICY_ZONE`). */
+const POSTGRES_PROVIDER = "postgres";
+const POSTGRES_POLICY_ZONE = ".postgres.onecli.invalid";
+
+export const getDatabaseRequestView = (
+  log: Pick<RequestLogEntry, "provider" | "host" | "path" | "extraData">,
+): DatabaseRequestView | null => {
+  const kind = SQL_KINDS[log.path];
+  // Both, so an HTTP request an agent sends to a look-alike host
+  // (`x.postgres.onecli.invalid.example.com/sql/read`, logged with its own
+  // hostname as the provider) never renders as a database statement.
+  if (
+    !kind ||
+    log.provider !== POSTGRES_PROVIDER ||
+    !log.host.endsWith(POSTGRES_POLICY_ZONE)
+  )
+    return null;
+  const label = getConnectionLabel(log);
+  return {
+    kind,
+    // Rows logged before short names carry the generated `<db> on <host>`.
+    connection: parseLegacyDatabaseName(label)?.database ?? label,
+    statement: getStatement(log),
+  };
+};
+
+/** The database statement a request-log row is about, as the gateway's
+ * database front door recorded it: literals already replaced by `$n`
+ * placeholders, so no value the agent sent is ever stored. Null for HTTP
+ * rows. */
+export const getStatement = (
+  log: Pick<RequestLogEntry, "extraData">,
+): string | null => {
+  const data = log.extraData as Record<string, unknown> | null;
+  const statement = data?.statement;
+  return typeof statement === "string" && statement ? statement : null;
 };
 
 /** The display name of the v2 policy rule that decided this request (step 9
@@ -192,14 +251,6 @@ export interface RequestLogPage {
   nextCursor: { createdAt: string; id: string } | null;
 }
 
-export type ActivityFilter = "all" | "hide-llm" | "blocked";
-
-export interface ActivityPageParams {
-  cursor?: { createdAt: string; id: string };
-  limit?: number;
-  filter?: ActivityFilter;
-}
-
 const resolveAgentNames = async (
   workspaceId: string,
   agentIds: string[],
@@ -258,39 +309,27 @@ const toEntry = (
   };
 };
 
-export const getRecentRequestLogs = async (
-  workspaceId: string,
-  limit = 5,
-  viewer?: RequestLogViewer,
-): Promise<RequestLogEntry[]> => {
-  const logs = await db.requestLog.findMany({
-    where: { workspaceId },
-    orderBy: { createdAt: "desc" },
-    take: limit,
-  });
-
-  const agentIds = [...new Set(logs.map((l) => l.agentId))];
-  const [agentMap, userMap, seesOrgRules] = await Promise.all([
-    resolveAgentNames(workspaceId, agentIds),
-    resolveUserNames(collectApproverIds(logs)),
-    viewerSeesOrgRules(viewer),
-  ]);
-
-  const entries = logs.map((l) => toEntry(l, agentMap, userMap));
-  return seesOrgRules ? entries : entries.map(redactOrgMatchedRule);
-};
-
 /**
- * Build the Prisma `where` for an activity query: workspace scope, the selected
- * {@link ActivityFilter}, and the keyset-pagination cursor. Pure and synchronous
- * so it can be unit-tested without a database.
+ * Build the Prisma `where` for an activity query: workspace scope, the
+ * optional agent and time window, the selected filter, and the keyset
+ * pagination cursor. Pure and synchronous so it can be unit-tested without a
+ * database. Params arrive parsed by `activityPageSchema`.
  */
 export const buildActivityWhere = (
   workspaceId: string,
-  params: Pick<ActivityPageParams, "cursor" | "filter"> = {},
+  params: Omit<ActivityPageParams, "limit"> = {},
 ): Prisma.RequestLogWhereInput => {
-  const { cursor, filter = "all" } = params;
+  const { cursor, filter = "all", agentId, from, to } = params;
   const where: Prisma.RequestLogWhereInput = { workspaceId };
+  // Inside the workspace scope above: another workspace's agent id simply
+  // matches nothing.
+  if (agentId) where.agentId = agentId;
+  if (from || to) {
+    where.createdAt = {
+      ...(from && { gte: new Date(from) }),
+      ...(to && { lte: new Date(to) }),
+    };
+  }
 
   if (filter === "blocked") {
     where.status = { gte: 400 };

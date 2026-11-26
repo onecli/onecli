@@ -10,7 +10,10 @@ runs:
     - name: Setup Node.js
       uses: actions/setup-node@v6
       with:
-        node-version: 22
+        # Exact, not "22": a major-only spec takes whatever the runner image
+        # has cached, which can trail a security release by days. Keep it
+        # equal to the FROM node:<x.y.z> pins in the Dockerfiles.
+        node-version: 22.23.4
         cache: pnpm
 
     - name: Install dependencies

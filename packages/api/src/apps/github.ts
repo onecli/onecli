@@ -2,8 +2,10 @@ import type { AppDefinition } from "./types";
 
 export const github: AppDefinition = {
   id: "github",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/github",
   name: "GitHub",
   icon: "/icons/github.svg",
+  apiDocsUrl: "https://docs.github.com/en/rest",
   darkIcon: "/icons/github-light.svg",
   description: "Repositories, issues, pull requests, and GitHub Actions.",
   connectionMethod: {

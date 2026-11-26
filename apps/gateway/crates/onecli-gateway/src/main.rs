@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use ca::CertificateAuthority;
-use context::PolicyEngine;
+use context::{PolicyEngine, RefreshGate};
 use server::{Entrypoint, GatewayServer};
 use vault::bitwarden::{BitwardenConfig, BitwardenVaultProvider};
 use vault::onepassword::OnePasswordVaultProvider;
@@ -51,6 +51,15 @@ struct Cli {
     /// image healthcheck run without curl/wget in the runtime image.
     #[arg(long)]
     healthcheck: bool,
+
+    /// Mint the gateway CA into `<data-dir>/gateway/` (`ca.key` + `ca.pem`,
+    /// the same files a first boot would create) and exit without starting
+    /// the proxy. Refuses to overwrite an existing CA. For deployments that
+    /// keep the CA in a secret store rather than on the gateway's disk (the
+    /// Helm chart, Secrets Manager): mint once, store the two files, hand them
+    /// back through `GATEWAY_CA_KEY` / `GATEWAY_CA_CERT`. Needs no database.
+    #[arg(long)]
+    generate_ca: bool,
 }
 
 /// Cap on the final telemetry flush, inside the overall shutdown budget.
@@ -86,7 +95,13 @@ async fn main() -> Result<()> {
         run_healthcheck(cli.port).await;
     }
 
-    // Initialize logging — JSON for production (CloudWatch), text for dev
+    // CA minting: before the tracing stack and before any config/DB work, so
+    // it needs nothing but a writable --data-dir. Exits.
+    if cli.generate_ca {
+        run_generate_ca(&expand_tilde(&cli.data_dir)).await;
+    }
+
+    // Initialize logging — JSON for production (log aggregators), text for dev
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
@@ -188,7 +203,7 @@ async fn main() -> Result<()> {
     let ca = CertificateAuthority::load_or_generate(&data_dir).await?;
     info!("CA certificate loaded");
 
-    // Support both DATABASE_URL (OSS) and individual DB_* vars (cloud ECS from Secrets Manager)
+    // Support both DATABASE_URL and individual DB_* vars (injected separately by some deployments)
     let database_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
         Err(_) => {
@@ -203,6 +218,13 @@ async fn main() -> Result<()> {
     };
     let pool = db::create_pool(&database_url).await?;
     info!("database pool created");
+    // No agent is ever dialed to the gateway's own database or Redis, whatever
+    // GATEWAY_ALLOW_PRIVATE_DESTINATIONS opens (`proxy::egress`).
+    proxy::egress::install_own_stores(&proxy::egress::own_stores_from(
+        &database_url,
+        configured_redis().as_ref().map(|(h, p)| (h.as_str(), *p)),
+    ))
+    .await;
     let telemetry_pool = pool.clone();
     // The pool itself moves into the PolicyEngine below, and that moves into
     // the server — so the shutdown sequence needs its own handle to close it.
@@ -222,10 +244,16 @@ async fn main() -> Result<()> {
         Arc::clone(&crypto),
     ));
 
+    // OAuth refreshes run on their own small, lazily-opened pool so one slow
+    // provider can never park the shared pool's connections (see RefreshGate).
+    let refresh_gate = Arc::new(RefreshGate::new(&pool));
+    let shutdown_refresh_gate = Arc::clone(&refresh_gate);
+
     let policy_engine = Arc::new(PolicyEngine {
         pool,
         crypto: Arc::clone(&crypto),
         onepassword: Arc::clone(&onepassword),
+        refresh_gate,
     });
 
     let proxy_url = std::env::var("BITWARDEN_PROXY_URL")
@@ -239,7 +267,7 @@ async fn main() -> Result<()> {
     let vault_service = Arc::new(VaultService::new(providers, policy_engine.pool.clone()));
     info!("vault service initialized");
 
-    // Redis (ElastiCache with TLS + AUTH) when REDIS_HOST is set, else in-memory.
+    // Redis (managed Redis with TLS + AUTH) when REDIS_HOST is set, else in-memory.
     let cache = wiring::create_cache_store().await?;
     info!("cache store created");
 
@@ -258,6 +286,10 @@ async fn main() -> Result<()> {
     info!("gateway ready");
 
     // Serve until a shutdown signal stops the listener.
+    // SQL parsing for the database front door runs on its own threads, in
+    // bounded memory; starting them can only fail on thread exhaustion.
+    let parse_pool =
+        dbproxy::parse_pool::ParsePool::new().context("starting the SQL parse threads")?;
     let server = GatewayServer::new(
         ca,
         cli.port,
@@ -265,6 +297,7 @@ async fn main() -> Result<()> {
         vault_service,
         cache,
         approval_store,
+        parse_pool,
     );
     let entrypoints: Vec<Box<dyn Entrypoint>> = vec![Box::new(server)];
     let result = server::entrypoint::run_all(entrypoints).await;
@@ -282,7 +315,10 @@ async fn main() -> Result<()> {
     telemetry::core::shutdown(budget.allow(TELEMETRY_FLUSH_TIMEOUT)).await;
     // Bounded: a detached approval-cleanup task can briefly hold a connection,
     // and no amount of tidiness is worth missing the SIGKILL deadline.
-    let _ = tokio::time::timeout(budget.allow(POOL_CLOSE_TIMEOUT), shutdown_pool.close()).await;
+    let _ = tokio::time::timeout(budget.allow(POOL_CLOSE_TIMEOUT), async {
+        tokio::join!(shutdown_pool.close(), shutdown_refresh_gate.close());
+    })
+    .await;
 
     info!(drained, "drain complete");
     result
@@ -299,10 +335,26 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Assemble a postgres URL from the individual DB_* parts (cloud ECS injects
-/// them from Secrets Manager). Username and password are percent-encoded —
-/// RDS-managed passwords contain special characters that would corrupt the
-/// URL. Env values come in as parameters so tests never mutate process env.
+/// The Redis endpoint this process is configured to use (`REDIS_HOST`, and
+/// `REDIS_PORT` defaulting to 6379), or `None` when it runs without Redis.
+/// Same blank-means-unset rule as the store selection in `wiring`.
+fn configured_redis() -> Option<(String, u16)> {
+    if !cache::redis_host_configured() {
+        return None;
+    }
+    let host = std::env::var("REDIS_HOST").ok()?;
+    let port = std::env::var("REDIS_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or(6379);
+    Some((host.trim().to_string(), port))
+}
+
+/// Assemble a postgres URL from the individual DB_* parts (some deployments
+/// inject them separately). Username and password are percent-encoded —
+/// managed-database passwords can contain special characters that would
+/// corrupt the URL. Env values come in as parameters so tests never mutate
+/// process env.
 fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name: &str) -> String {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
     let user = utf8_percent_encode(user, NON_ALPHANUMERIC);
@@ -310,10 +362,28 @@ fn database_url_from_parts(host: &str, port: &str, user: &str, pass: &str, name:
     format!("postgresql://{user}:{pass}@{host}:{port}/{name}")
 }
 
+/// `onecli-gateway --generate-ca`: mint the CA into the data dir's on-disk
+/// layout and exit. Prints the two paths on success (never the key) so a
+/// wrapper can pick the files up; exits 1 with the reason on stderr otherwise.
+/// The explicit exits matter: the release profile is panic=abort.
+async fn run_generate_ca(data_dir: &Path) -> ! {
+    match CertificateAuthority::generate_into(data_dir).await {
+        Ok((key_path, cert_path)) => {
+            println!("{}", key_path.display());
+            println!("{}", cert_path.display());
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("generate-ca: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Self-probe for container healthchecks (`onecli-gateway --healthcheck`):
 /// GET /healthz on 127.0.0.1:{port}, exit 0 on a 2xx, exit 1 otherwise. The
 /// explicit exits matter — the release profile is panic=abort, so any
-/// unwind-free failure path must still produce a clean 0/1 for Docker/ECS.
+/// unwind-free failure path must still produce a clean 0/1 for any orchestrator.
 async fn run_healthcheck(port: u16) -> ! {
     let healthy = healthcheck_ok(port).await;
     std::process::exit(if healthy { 0 } else { 1 });
@@ -323,7 +393,7 @@ async fn healthcheck_ok(port: u16) -> bool {
     // .no_proxy(): with a proxy env var set, reqwest would send the request
     // absolute-form through the proxy — and the gateway dispatches
     // absolute-form requests down its own proxy path, never to /healthz.
-    // Failures go to stderr, which `docker inspect` and the ECS console keep
+    // Failures go to stderr, which `docker inspect` (and any orchestrator) keeps
     // as the probe's output — an unhealthy verdict should say why.
     let client = match reqwest::Client::builder()
         .no_proxy()
@@ -385,7 +455,7 @@ mod tests {
     fn database_url_from_parts_is_table_driven() {
         // (host, port, user, pass, name) → expected URL. The special-character
         // rows are MUTATION-PROOF: drop the percent-encoding and they fail —
-        // an RDS-managed password with `@:/?#[]%` would corrupt the URL.
+        // a managed-database password with `@:/?#[]%` would corrupt the URL.
         let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
             (
                 "db.internal",

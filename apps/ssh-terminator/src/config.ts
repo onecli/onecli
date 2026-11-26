@@ -3,9 +3,8 @@ import { ConfigError } from "./errors";
 import { resolveMetricNamespace } from "./metric-namespace";
 
 /**
- * Terminator boot configuration (step 5 — the SSH front door). Same law as
- * the manager's and parkd's loaders: a SET but unparsable value throws at
- * boot, never a silent fallback — the terminator is the platform's only
+ * Terminator boot configuration (the SSH front door). A SET but unparsable
+ * value throws at boot, never a silent fallback — the terminator is a
  * public listener, and a mis-fenced knob nobody notices is exactly the
  * failure mode it must never have.
  */
@@ -17,21 +16,20 @@ import { resolveMetricNamespace } from "./metric-namespace";
 export type TerminatorBackendConfig =
   | {
       kind: "kube";
-      /** Manager base URL for the session broker (/v1/ssh-sessions). */
+      /** Base URL of the remote session broker (/v1/ssh-sessions). */
       managerUrl: string;
       /** Terminator↔broker secret — its OWN channel, never the runner secret. */
       brokerToken: string | null;
-      /** Secrets Manager ARN of the broker secret (cloud). */
+      /** Secret ARN of the broker secret (cloud). */
       brokerSecretArn: string | null;
       /**
-       * API-server CA bundle path. The pod runs automountServiceAccountToken:
-       * false (zero standing credential), so the chart mounts the kube-root-ca
-       * ConfigMap as a plain volume — this file is the only TLS trust source.
+       * API-server CA bundle path — the only TLS trust source (the process
+       * holds no standing cluster credential of its own).
        */
       kubeCaFile: string;
       /**
        * `https://host:port` of the API server, from the injected
-       * KUBERNETES_SERVICE_HOST/PORT env (present regardless of automount).
+       * KUBERNETES_SERVICE_HOST/PORT env.
        * Null outside a cluster — the boot fails loud, tests inject fakes.
        */
       kubeServer: string | null;
@@ -43,13 +41,13 @@ export type TerminatorBackendConfig =
     };
 
 export interface TerminatorConfig {
-  /** The ssh2 listener's port (NLB target). */
+  /** The ssh2 listener's port. */
   port: number;
-  /** Plain-HTTP health listener (NLB health checks; never internet-facing). */
+  /** Plain-HTTP health listener (load-balancer health checks; never internet-facing). */
   healthPort: number;
   /** Host private key provided directly (tests, dev). */
   hostKey: string | null;
-  /** Secrets Manager ARN of the host key (cloud; workflow-minted). */
+  /** Secret ARN of the host key (cloud). */
   hostKeySecretArn: string | null;
   /** The CA trust anchor, parsed from an authorized_keys line to raw 32B. */
   caPublicKey: Buffer;
@@ -57,7 +55,7 @@ export interface TerminatorConfig {
   controlPlaneUrl: string;
   /** Terminator↔control-plane secret, provided directly (tests, dev). */
   controlPlaneToken: string | null;
-  /** Secrets Manager ARN of that secret (cloud). */
+  /** Secret ARN of that secret (cloud). */
   controlPlaneSecretArn: string | null;
   /** The selected substrate arm and its knobs. */
   backend: TerminatorBackendConfig;
@@ -71,10 +69,9 @@ export interface TerminatorConfig {
   preauthPerIpPerMinute: number;
   /** Sockets not authenticated within this window are destroyed. */
   preauthTimeoutSeconds: number;
-  /** CloudWatch namespace — per-env in cloud (dev and prod share one AWS
-   * account). Required in cloud mode (host key via ARN): the metrics IAM
-   * grant is namespace-conditioned, so a base fallback would silently
-   * AccessDeny every publish. Local/test falls back to the base constant. */
+  /** Metric namespace. Required in cloud mode (host key via ARN), where a
+   * deployment scopes metrics per environment; local/test falls back to the
+   * base constant. */
   metricNamespace: string;
 }
 
@@ -147,10 +144,10 @@ export const loadTerminatorConfig = (
 
   // ── Substrate selection ────────────────────────────────────────────────
   // Explicit TERMINATOR_BACKEND wins; otherwise ANY kube signal — the
-  // manager URL, the kubelet-injected service host, or a Secrets Manager
-  // host-key ARN — selects the kube arm. The extra signals are the
-  // anti-misfence guard: a cloud pod that loses its manager URL must still
-  // select kube and hit the fail-loud requirement below, never silently
+  // broker URL, the injected service host, or a host-key secret
+  // ARN — selects the kube arm. The extra signals are the
+  // anti-misfence guard: a deployed terminator that loses its broker URL must
+  // still select kube and hit the fail-loud requirement below, never silently
   // boot a docker arm with no socket (this loader's founding law).
   const explicitBackend = env.TERMINATOR_BACKEND?.trim() || null;
   if (
@@ -187,7 +184,7 @@ export const loadTerminatorConfig = (
           "runner's or the control plane's.",
       );
     }
-    // Injected by kubelet into every pod regardless of automount; absent
+    // Injected into every in-cluster process; absent
     // when running outside a cluster (tests, dev) — the boot layer decides.
     const kubeHost = env.KUBERNETES_SERVICE_HOST?.trim();
     const kubePort = env.KUBERNETES_SERVICE_PORT?.trim();

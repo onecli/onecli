@@ -7,7 +7,9 @@ import {
 
 export const googleChat: AppDefinition = {
   id: "google-chat",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-chat",
   name: "Google Chat",
+  apiDocsUrl: "https://developers.google.com/workspace/chat/api/reference/rest",
   icon: "/icons/google-chat.svg",
   description: "Send messages and manage spaces in Google Chat.",
   connectionMethod: {
@@ -78,5 +80,6 @@ export const googleChat: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleAnalyticsPermissions: AppPermissionDefinition = {
   provider: "google-analytics",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

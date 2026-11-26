@@ -8,6 +8,8 @@
 export interface V1Client {
   get(path: string): Promise<Response>;
   post(path: string, body?: unknown): Promise<Response>;
+  /** POST raw bytes (an attachment upload), typed by `contentType`. */
+  upload(path: string, bytes: Buffer, contentType: string): Promise<Response>;
   put(path: string, body?: unknown): Promise<Response>;
   del(path: string): Promise<Response>;
   json<T>(response: Response): Promise<T>;
@@ -33,6 +35,13 @@ export const v1Client = (
   return {
     get: (path) => call(path, "GET"),
     post: (path, body) => call(path, "POST", body ?? {}),
+    upload: (path, bytes, contentType) =>
+      fetch(`${origin}${path}`, {
+        method: "POST",
+        headers: { ...headers, "content-type": contentType },
+        body: new Uint8Array(bytes),
+        signal: AbortSignal.timeout(30_000),
+      }),
     put: (path, body) => call(path, "PUT", body ?? {}),
     del: (path) => call(path, "DELETE"),
     json: async <T>(response: Response): Promise<T> => {

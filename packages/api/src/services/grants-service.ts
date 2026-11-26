@@ -2,21 +2,24 @@ import { randomUUID } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "./errors";
 import { getPolicyValidator, getRuleActionGate } from "../providers";
-import { assertToolIdsValid } from "../apps/app-permissions/validate";
+import {
+  assertToolIdsValid,
+  assertUnlistedChoicesValid,
+} from "../apps/app-permissions/validate";
 import {
   isSessionPolicy,
   type SessionPolicyInput,
 } from "../validations/policy";
-import { entriesOutside } from "../lib/resource-axis";
+import { canonicalPolicy, entriesOutside } from "../lib/resource-axis";
 import { loadInjectionRules } from "./policy-simulate/load-rules";
 import { resolvePrincipalSet } from "./policy-simulate/principal-set";
 import { orgResourceBoundary } from "./policy-reflect/org-resource-boundary";
+import { grantedSecretSelection } from "./policy-reflect/injection";
 import {
-  ensureDefault,
   gatedActions,
   lockScope,
+  publishDraftInTx,
   RULE_INCLUDE,
-  snapshotDraftRules,
   type PolicyRuleRow,
   type PolicyScopeBase,
 } from "./policy-service";
@@ -25,15 +28,24 @@ import {
   compileConnectionStack,
   compileSecretGrant,
   conditionsCreateInput,
+  defaultConnectionGrant,
   GRANT_SOURCE,
   stackConditions,
   stackEquals,
   stackToGrant,
+  withStoredUnlisted,
   type CompiledRule,
 } from "./grants-compile";
-import type { ConnectionGrantInput } from "../validations/grants";
+import type {
+  ConnectionGrantInput,
+  ConnectionGrantRequest,
+  UnlistedChoice,
+} from "../validations/grants";
 import { requestSandboxRespawn } from "./sandbox-service";
+import { bumpHomeForAgent } from "./home-sync-service";
+import { logger } from "../lib/logger";
 import { resolveAgentLlmCredential } from "./llm-credential-service";
+import { isLlmProviderId } from "../llm/registry";
 import { signalWork } from "./due-work";
 
 /**
@@ -41,21 +53,22 @@ import { signalWork } from "./due-work";
  *
  * A grant is INTENT stored as a canonical, `source:"grant"` policy-rule stack —
  * the engine, org floor, and reflections keep operating on ordinary rules. Per
- * (agent, connection): the uncustomized attach is ONE whole-app allow rule
- * (empty tools — future catalog tools included); a customized attach is a fixed
- * first-match stack allow(A) → allow+approval(K) → block(D = catalog − A∪K) →
- * terminal block (empty tools — new catalog tools arrive as Never). A secret
- * grant is a single allow rule. Every rule carries exactly one agent identity;
- * empty identities never inject (the inject_select law), so the identity IS the
- * attachment.
+ * (agent, connection): full access is ONE whole-app allow rule (empty tools,
+ * so future catalog tools are included); a customized attach, which is also
+ * what a new attach writes (`defaultConnectionGrant`), is a fixed first-match
+ * stack allow(A) → allow+approval(K) → block(D = catalog − A∪K) → the
+ * catch-alls over the whole app (requests the catalog does not describe, see
+ * `compileConnectionStack`). A secret grant is a single allow rule. Every
+ * rule carries exactly one agent identity; empty identities never inject (the
+ * inject_select law), so the identity IS the attachment.
  *
  * Writes follow the blocklist-service precedent: one transaction under the
  * per-scope advisory lock — delete the old stack, append the new one at the
  * tail priority band (custom rules keep first-match precedence until step 6),
- * then publish atomically (`ensureDefault` + `snapshotDraftRules`), so a grant
- * is enforced the moment the request returns. The compiler is idempotent (an
- * identical desired state writes nothing) and repairs any hand-edit drift on
- * the next write by construction (delete-then-recompile).
+ * then publish atomically (`publishDraftInTx`), so a grant is enforced the
+ * moment the request returns. The compiler is idempotent (an identical
+ * desired state writes nothing) and repairs any hand-edit drift on the next
+ * write by construction (delete-then-recompile).
  *
  * Fencing deliberately DIFFERS from `assertTargetsValid` (which forbids a
  * workspace rule naming org resources): the attach list spans the workspace's own
@@ -78,6 +91,10 @@ export interface AgentGrantConnection {
   access: "full" | "custom";
   allow: string[];
   ask: string[];
+  /** Requests the catalog does not describe: GET/HEAD ("All other reads")
+   * and the rest ("All other writes"). "allow" on a full grant. */
+  otherReads: UnlistedChoice;
+  otherWrites: UnlistedChoice;
   /** The grant's session policy ("Resources" — repositories/folders the
    * injected credential may reach), read off the stack's allow rows; null =
    * unrestricted. */
@@ -107,6 +124,10 @@ export interface ConnectionGrants {
     access: "full" | "custom";
     allow: string[];
     ask: string[];
+    otherReads: UnlistedChoice;
+    otherWrites: UnlistedChoice;
+    /** The grant's session policy, as on `AgentGrantConnection`. */
+    resources: SessionPolicyInput | null;
   }[];
 }
 
@@ -158,18 +179,24 @@ const requireAgent = async (scope: GrantScope, agentId: string) => {
  * regeneration already uses (`agent-service`) — mark it and let the ordinary
  * start path compose the new payload.
  *
- * CONNECTION grants deliberately do not do this. Nothing about them reaches
- * the container: the gateway splices those credentials at the wire, so the
- * spawn payload is byte-identical before and after, and respawning would
- * destroy a working session to change nothing.
+ * Only an LLM key does this. The placeholder is derived from the granted LLM
+ * key alone; a GENERIC secret is spliced at the wire like a connection, so the
+ * payload is byte-identical before and after, and respawning would destroy a
+ * working session to change nothing. That holds in both directions, attach and
+ * detach, and matters because a custom secret is often switched on for many
+ * agents in a row (its "choose agents" window).
  *
  * A `byo` agent has no sandbox at all, so this is a hosted-only concern.
  */
 const applySecretGrantToSandbox = async (
   scope: GrantScope,
   agent: { id: string; kind: string },
+  /** The secret's type; null when it is already gone (a detach after the
+   * secret was deleted), which keeps the conservative respawn. */
+  secretType: string | null,
 ): Promise<void> => {
   if (agent.kind !== "hosted") return;
+  if (secretType !== null && !isLlmProviderId(secretType)) return;
   await dropStaleModelOverride(scope, agent.id);
   await requestSandboxRespawn(agent.id, scope.workspaceId);
   signalWork();
@@ -285,32 +312,6 @@ const assertWithinOrgBoundary = async (
   }
 };
 
-/** Server-side mirror of the picker's empty≡all law, plus byte-stable storage.
- *
- * Not a contradiction of `sessionPolicySchema`, which now REJECTS an empty list
- * (validations/policy.ts): the wire can no longer carry one, so this arm exists
- * for direct service callers (the converter, tests) and turns their empty
- * selection into "unrestricted" BEFORE it could ever be stored as the deny-all
- * sentinel the gateway would enforce.
- *
- * an all-empty selection clears to null (a non-null empty list is ambiguous at
- * the gateway), and list values sort — `conditionsEqual`/`stackEquals` sort
- * keys but never array elements, so an unsorted same-set re-pick would defeat
- * write idempotence. */
-const normalizeResources = (
-  resources: SessionPolicyInput | null,
-): SessionPolicyInput | null => {
-  if (resources === null) return null;
-  if ("repositories" in resources) {
-    return resources.repositories.length === 0
-      ? null
-      : { repositories: [...resources.repositories].sort() };
-  }
-  return resources.folders.length === 0
-    ? null
-    : { folders: [...resources.folders].sort() };
-};
-
 const requireSecret = async (scope: GrantScope, secretId: string) => {
   const secret = await db.secret.findFirst({
     where: { id: secretId, ...poolWhere(scope) },
@@ -319,6 +320,17 @@ const requireSecret = async (scope: GrantScope, secretId: string) => {
   if (!secret) throw new ServiceError("NOT_FOUND", "Secret not found.");
   return secret;
 };
+
+/**
+ * The agent's instructions list its attached connections (and each
+ * host-bound app's host): re-render them when the attach set changes.
+ * Best-effort, after the grant is already published; a missed bump
+ * self-heals at the agent's next boot.
+ */
+const refreshAgentHome = (agentId: string): Promise<void> =>
+  bumpHomeForAgent(agentId).catch((err: unknown) => {
+    logger.warn({ err, agentId }, "grant change: agent home refresh failed");
+  });
 
 // ── Stack reads ──────────────────────────────────────────────────────────────
 
@@ -355,20 +367,84 @@ const readGrantRows = (
 
 // ── The atomic write core ────────────────────────────────────────────────────
 
+type GrantCreate = {
+  rule: CompiledRule;
+  target: Prisma.PolicyRuleTargetCreateWithoutRuleInput;
+  agentId: string;
+};
+
+const grantName = (agentName: string, resourceLabel: string) =>
+  `Grant: ${agentName} · ${resourceLabel}`;
+
+const connectionTarget = (
+  connectionId: string,
+  rule: CompiledRule,
+): Prisma.PolicyRuleTargetCreateWithoutRuleInput => ({
+  kind: "connection",
+  appConnection: { connect: { id: connectionId } },
+  appTools: rule.tools,
+  // The "All other reads"/"All other writes" split's method narrowing
+  // (`GET,HEAD` / `!GET,HEAD`); absent on every other row (NULL = any
+  // method, the gateway's reading of every older row).
+  ...(rule.method ? { method: rule.method } : {}),
+});
+
+const secretTarget = (
+  secretId: string,
+): Prisma.PolicyRuleTargetCreateWithoutRuleInput => ({
+  kind: "secret",
+  secret: { connect: { id: secretId } },
+});
+
+/** Append `creates` at the tail priority band (custom rules keep first-match
+ * precedence until step 6). Callers hold the scope lock. */
+const appendGrantRules = async (
+  tx: Tx,
+  scopeBase: PolicyScopeBase,
+  userId: string | null,
+  creates: GrantCreate[],
+): Promise<string[]> => {
+  const tail = await tx.policyRuleV2.aggregate({
+    where: { ...scopeBase, status: "draft", isDefault: false },
+    _max: { priority: true },
+  });
+  let priority = (tail._max.priority ?? 0) + 1;
+  const ruleIds: string[] = [];
+  for (const { rule, target, agentId } of creates) {
+    const created = await tx.policyRuleV2.create({
+      data: {
+        ...scopeBase,
+        status: "draft",
+        generation: 0,
+        priority: priority++,
+        isDefault: false,
+        enabled: true,
+        source: GRANT_SOURCE,
+        logicalId: randomUUID(),
+        name: rule.name,
+        action: rule.action,
+        requireApproval: rule.requireApproval,
+        conditions: conditionsCreateInput(rule.conditions),
+        createdByUserId: userId,
+        identities: { create: [{ agent: { connect: { id: agentId } } }] },
+        targets: { create: [target] },
+      },
+      select: { id: true },
+    });
+    ruleIds.push(created.id);
+  }
+  return ruleIds;
+};
+
 /**
- * Replace the draft rows matched by `deleteWhere` with `creates` at the tail
- * priority band, then publish the whole draft — one transaction under the
- * per-scope advisory lock. `creates` build their own identity/target rows.
+ * Replace the draft rows matched by `deleteWhere` with `creates`, then publish
+ * the whole draft, in one transaction under the per-scope advisory lock.
  */
 const replaceAndPublish = async (
   scope: GrantScope,
   userId: string | null,
   deleteWhere: Prisma.PolicyRuleV2WhereInput,
-  creates: {
-    rule: CompiledRule;
-    target: Prisma.PolicyRuleTargetCreateWithoutRuleInput;
-    agentId: string;
-  }[],
+  creates: GrantCreate[],
 ): Promise<{ ruleIds: string[]; generation: number }> => {
   const scopeBase = base(scope);
   return db.$transaction(async (tx) => {
@@ -381,47 +457,8 @@ const replaceAndPublish = async (
         ...deleteWhere,
       },
     });
-    const tail = await tx.policyRuleV2.aggregate({
-      where: { ...scopeBase, status: "draft", isDefault: false },
-      _max: { priority: true },
-    });
-    let priority = (tail._max.priority ?? 0) + 1;
-    const ruleIds: string[] = [];
-    for (const { rule, target, agentId } of creates) {
-      const created = await tx.policyRuleV2.create({
-        data: {
-          ...scopeBase,
-          status: "draft",
-          generation: 0,
-          priority: priority++,
-          isDefault: false,
-          enabled: true,
-          source: GRANT_SOURCE,
-          logicalId: randomUUID(),
-          name: rule.name,
-          action: rule.action,
-          requireApproval: rule.requireApproval,
-          conditions: conditionsCreateInput(rule.conditions),
-          createdByUserId: userId,
-          identities: { create: [{ agent: { connect: { id: agentId } } }] },
-          targets: { create: [target] },
-        },
-        select: { id: true },
-      });
-      ruleIds.push(created.id);
-    }
-    await ensureDefault(tx, scopeBase);
-    const draftRules = await tx.policyRuleV2.findMany({
-      where: { ...scopeBase, status: "draft" },
-      include: RULE_INCLUDE,
-      orderBy: [{ priority: "asc" }, { id: "asc" }],
-    });
-    const { generation } = await snapshotDraftRules(
-      tx,
-      scopeBase,
-      draftRules,
-      userId,
-    );
+    const ruleIds = await appendGrantRules(tx, scopeBase, userId, creates);
+    const { generation } = await publishDraftInTx(tx, scopeBase, userId);
     return { ruleIds, generation };
   });
 };
@@ -476,7 +513,7 @@ export const getAgentGrants = async (
         provider: c.provider,
         label: c.label,
         scope: c.scope === "organization" ? "organization" : "workspace",
-        ...stackToGrant(stack),
+        ...stackToGrant(stack, c.provider),
         resources: grantResources(stack),
       };
     }),
@@ -493,7 +530,7 @@ export const getConnectionGrants = async (
   scope: GrantScope,
   connectionId: string,
 ): Promise<ConnectionGrants> => {
-  await requireConnection(scope, connectionId);
+  const connection = await requireConnection(scope, connectionId);
   const rows = await readGrantRows(db, scope, { connectionId });
   const byAgent = new Map<string, PolicyRuleRow[]>();
   for (const row of rows) {
@@ -507,7 +544,8 @@ export const getConnectionGrants = async (
     connectionId,
     agents: [...byAgent.entries()].map(([agentId, stack]) => ({
       agentId,
-      ...stackToGrant(stack),
+      ...stackToGrant(stack, connection.provider),
+      resources: grantResources(stack),
     })),
   };
 };
@@ -516,28 +554,43 @@ export const setConnectionGrant = async (
   scope: GrantScope,
   agentId: string,
   connectionId: string,
-  input: ConnectionGrantInput,
+  request: ConnectionGrantRequest,
   userId: string | null,
 ): Promise<GrantMutationResult> => {
   const [agent, connection] = await Promise.all([
     requireAgent(scope, agentId),
     requireConnection(scope, connectionId),
   ]);
+  // `default` is the attach toggles' request, resolved here per provider to
+  // the shape every new attach gets (`defaultConnectionGrant`). It names its
+  // catch-alls explicitly, so it never inherits a stored choice; `resources`
+  // keeps its tri-state.
+  const input: ConnectionGrantInput =
+    request.access === "default"
+      ? {
+          ...defaultConnectionGrant(connection.provider),
+          resources: request.resources,
+        }
+      : request;
   if (input.access === "custom") {
     assertToolIdsValid(connection.provider, [...input.allow, ...input.ask]);
-    if (input.ask.length > 0) {
-      // Same law as the rule CRUD: approval-modified rules are plan-gated at
-      // write time (publish re-asserts over the whole draft — an ungated write
-      // here would brick the scope's next publish, not dodge the entitlement).
-      await getRuleActionGate().assertAllowed(
-        base(scope),
-        gatedActions({ requireApproval: true }),
-      );
-    }
   }
 
-  const nameBase = `Grant: ${agent.name} · ${connection.label ?? connection.provider}`;
+  const nameBase = grantName(
+    agent.name,
+    connection.label ?? connection.provider,
+  );
   const existing = await readGrantRows(db, scope, { agentId, connectionId });
+  // Absent catch-all choices keep what the stack already says (the same
+  // preserve law as `resources` below); checked AFTER the merge, so a stored
+  // value is held to the same rules as a sent one.
+  const grant = withStoredUnlisted(input, existing, connection.provider);
+  if (grant.access === "custom") {
+    assertUnlistedChoicesValid(connection.provider, [
+      grant.otherReads,
+      grant.otherWrites,
+    ]);
+  }
   // The resources tri-state (validations/grants.ts): ABSENT preserves whatever
   // the existing stack carries — the step-5 conversion's carried policies and
   // every tools-only dialog save — while NULL clears and an OBJECT sets. The
@@ -548,7 +601,11 @@ export const setConnectionGrant = async (
   if (input.resources === undefined) {
     conditions = stackConditions(existing);
   } else {
-    const resources = normalizeResources(input.resources);
+    // The picker's empty≡all law plus byte-stable storage. Not a
+    // contradiction of `sessionPolicySchema`, which REJECTS an empty list: the
+    // wire can't carry one, so this protects direct service callers (the
+    // converter, tests) from storing the gateway's deny-all sentinel.
+    const resources = canonicalPolicy(input.resources);
     if (resources !== null) {
       // An explicit SET runs the edition's validator: EE deep-checks the shape
       // against the provider and team-gates the entitlement; OSS rejects every
@@ -567,9 +624,20 @@ export const setConnectionGrant = async (
   const desired = compileConnectionStack(
     nameBase,
     connection.provider,
-    input,
+    grant,
     conditions,
   );
+  if (desired.some((rule) => rule.requireApproval)) {
+    // Same law as the rule CRUD: approval-modified rules are plan-gated at
+    // write time, and the write is what goes live (the in-tx publish gates
+    // nothing of its own).
+    // Keyed on the COMPILED stack, not `input.ask`: a customized stack's
+    // terminal needs approval even when no tool does.
+    await getRuleActionGate().assertAllowed(
+      base(scope),
+      gatedActions({ requireApproval: true }),
+    );
+  }
   if (stackEquals(existing, desired)) {
     return {
       grants: await getAgentGrants(scope, agentId),
@@ -589,13 +657,10 @@ export const setConnectionGrant = async (
     desired.map((rule) => ({
       rule,
       agentId,
-      target: {
-        kind: "connection",
-        appConnection: { connect: { id: connectionId } },
-        appTools: rule.tools,
-      },
+      target: connectionTarget(connectionId, rule),
     })),
   );
+  await refreshAgentHome(agentId);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,
@@ -635,6 +700,7 @@ export const removeConnectionGrant = async (
     },
     [],
   );
+  await refreshAgentHome(agent.id);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,
@@ -654,7 +720,7 @@ export const setSecretGrant = async (
     requireSecret(scope, secretId),
   ]);
   const desired: CompiledRule[] = compileSecretGrant(
-    `Grant: ${agent.name} · ${secret.name}`,
+    grantName(agent.name, secret.name),
   );
   const existing = await readGrantRows(db, scope, { agentId, secretId });
   if (stackEquals(existing, desired)) {
@@ -675,10 +741,10 @@ export const setSecretGrant = async (
     desired.map((rule) => ({
       rule,
       agentId,
-      target: { kind: "secret", secret: { connect: { id: secretId } } },
+      target: secretTarget(secretId),
     })),
   );
-  await applySecretGrantToSandbox(scope, agent);
+  await applySecretGrantToSandbox(scope, agent, secret.type);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,
@@ -715,14 +781,147 @@ export const removeSecretGrant = async (
     },
     [],
   );
-  // Revocation moves the payload too — losing the only OAuth secret flips the
-  // placeholder back to `ANTHROPIC_API_KEY`, and a container still advertising
-  // the old one would keep sending a header the gateway no longer fills.
-  await applySecretGrantToSandbox(scope, agent);
+  // Revoking an LLM key moves the payload too: losing the only OAuth secret
+  // flips the placeholder back to `ANTHROPIC_API_KEY`, and a container still
+  // advertising the old one would keep sending a header the gateway no longer
+  // fills. No fence on this read: the detach itself needs none either.
+  const secret = await db.secret.findUnique({
+    where: { id: secretId },
+    select: { type: true },
+  });
+  await applySecretGrantToSandbox(scope, agent, secret?.type ?? null);
   return {
     grants: await getAgentGrants(scope, agentId),
     changed: true,
     ruleIds: [],
     generation,
+  };
+};
+
+/**
+ * Give ONE agent the product-default attach on ONE connection
+ * (`defaultConnectionGrant`, exactly what the attach toggles write), unless it
+ * already holds a stack for it. The connect-from-an-agent writer
+ * (`agent-connect-grant-service`): a connection added from an agent's context
+ * is on for that agent from the start.
+ *
+ * ADD-ONLY, unlike `setConnectionGrant`: an existing stack (a customized one
+ * included) is left exactly as it is, so re-adding an account the agent
+ * already narrowed never flattens it back to the default. The existence check
+ * and the append run under the scope lock, so a concurrent grant write can't
+ * slip a stack in between them. Nothing written means nothing published.
+ *
+ * Fenced like every grant write: the agent must be the workspace's own and
+ * the connection in the workspace+org pool (404 otherwise).
+ */
+export const attachDefaultConnectionGrant = async (
+  scope: GrantScope,
+  agentId: string,
+  connectionId: string,
+  userId: string | null,
+): Promise<{ changed: boolean }> => {
+  const [agent, connection] = await Promise.all([
+    requireAgent(scope, agentId),
+    requireConnection(scope, connectionId),
+  ]);
+  const desired = compileConnectionStack(
+    grantName(agent.name, connection.label ?? connection.provider),
+    connection.provider,
+    defaultConnectionGrant(connection.provider),
+  );
+  // The default attach's catch-alls need approval: the same write-time gate
+  // as `setConnectionGrant`, checked before the lock (it reads the plan).
+  if (desired.some((rule) => rule.requireApproval)) {
+    await getRuleActionGate().assertAllowed(
+      base(scope),
+      gatedActions({ requireApproval: true }),
+    );
+  }
+
+  const scopeBase = base(scope);
+  const changed = await db.$transaction(async (tx) => {
+    await lockScope(tx, scopeBase);
+    const existing = await readGrantRows(tx, scope, { agentId, connectionId });
+    if (existing.length > 0) return false;
+    await appendGrantRules(
+      tx,
+      scopeBase,
+      userId,
+      desired.map((rule) => ({
+        rule,
+        agentId,
+        target: connectionTarget(connectionId, rule),
+      })),
+    );
+    await publishDraftInTx(tx, scopeBase, userId);
+    return true;
+  });
+  if (changed) await refreshAgentHome(agentId);
+  return { changed };
+};
+
+/** One agent's standing on one secret: the per-agent rows of the secret's
+ * "choose agents" window. */
+export interface SecretAgentAccessEntry {
+  agentId: string;
+  name: string;
+  /** A workspace grant (the switch's own state): detachable. */
+  granted: boolean;
+  /** Injected by an ORG rule with no workspace grant: on, and locked. */
+  orgGranted: boolean;
+}
+
+export interface SecretAgentAccess {
+  secretId: string;
+  agents: SecretAgentAccessEntry[];
+}
+
+/**
+ * Every agent of the workspace against one secret, the reverse view the
+ * custom connection's "choose agents" window toggles over (the secret twin of
+ * the connection's agent-access dialog). `orgGranted` follows the injection
+ * law the agent page's Custom tab reads (`grantedSecretSelection` over the
+ * PUBLISHED org rules), so a switch here never disagrees with that tab.
+ *
+ * Constant query count however many agents: one agent list, one grant-row
+ * read, one org rule load and one principal-set resolution (agent-independent
+ * by design), then a pure in-memory walk per agent.
+ */
+export const getSecretAgentAccess = async (
+  scope: GrantScope,
+  secretId: string,
+): Promise<SecretAgentAccess> => {
+  const secret = await requireSecret(scope, secretId);
+  const [agents, grantRows, orgRows, principals] = await Promise.all([
+    db.agent.findMany({
+      where: { workspaceId: scope.workspaceId },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    readGrantRows(db, scope, { secretId }),
+    loadInjectionRules(
+      { scope: "organization", organizationId: scope.organizationId },
+      "published",
+    ),
+    resolvePrincipalSet(scope.workspaceId, scope.organizationId),
+  ]);
+  const grantedAgentIds = new Set(
+    grantRows.flatMap((row) => row.identities.map((i) => i.agentId)),
+  );
+  const level = secret.scope === "organization" ? "organization" : "workspace";
+  return {
+    secretId,
+    agents: agents.map((agent) => {
+      const granted = grantedAgentIds.has(agent.id);
+      const viaOrg = grantedSecretSelection(orgRows, agent.id, principals);
+      return {
+        agentId: agent.id,
+        name: agent.name,
+        granted,
+        orgGranted:
+          !granted &&
+          (viaOrg.ids.includes(secretId) || viaOrg.levels.has(level)),
+      };
+    }),
   };
 };

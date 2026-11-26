@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "@/lib/api/types";
-import { foldTranscript, highestSeq, mergeEvents } from "./transcript";
+import {
+  MAX_NOTE_CHARS,
+  foldTranscript,
+  highestSeq,
+  mergeEvents,
+  movesTurnStatus,
+  raisesApproval,
+} from "./transcript";
 
 /**
  * The reader's logic, tested where it can be: `apps/web` has no component
@@ -16,6 +23,22 @@ const event = (
 ): TurnEvent => ({ seq: (seq += 1), turnId, type, payload });
 
 describe("foldTranscript", () => {
+  it("folds SEND NOW's answer under the follow-up's own id, never under the turn", () => {
+    const [turn, followUp] = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("f1", "message.sent_now", { moved: true, toolName: "bash" }),
+    ]);
+    expect(turn?.sentNow).toBeUndefined();
+    expect(followUp?.sentNow).toEqual({ moved: true, toolName: "bash" });
+
+    // Only a literal `true` is a move, and a missing or non-string name is
+    // simply absent: the payload is sandbox-reported.
+    const [odd] = foldTranscript([
+      event("f2", "message.sent_now", { moved: "yes", toolName: 7 }),
+    ]);
+    expect(odd?.sentNow).toEqual({ moved: false });
+  });
+
   it("REPLACES delta text with the durable answer instead of appending", () => {
     // A live tail receives both the deltas and the final `text`. Appending
     // renders every answer twice — the single most likely way to get this
@@ -54,7 +77,7 @@ describe("foldTranscript", () => {
     expect(turns[0]?.ended).toBe(false);
   });
 
-  it("builds the work log live, then collapses to the answer alone", () => {
+  it("keeps the opening sentence live, then collapses to the answer alone", () => {
     // The reader's half of "the answer is the last message" (supervisor,
     // 2026-08-31). Mid-turn narration is PROGRESS: it streams as deltas so
     // the person sees work happening, and the durable `text` — which
@@ -72,16 +95,12 @@ describe("foldTranscript", () => {
       event("t1", "text.delta", { text: "CI passed; nothing to do." }),
     ];
 
-    // Mid-turn: the closed segment sits in the work log IN STREAM ORDER
-    // (narration, then the tool that closed it), and the open segment is
-    // the live tail.
+    // Mid-turn: the segment the first tool closed is the lead, and the
+    // open segment is the live tail.
     const live = foldTranscript(streaming);
-    expect(live[0]?.work).toEqual([
-      { kind: "narration", text: "Let me check the logs." },
-      {
-        kind: "tool",
-        tool: { callId: "c1", name: "bash", output: "ok" },
-      },
+    expect(live[0]?.lead).toBe("Let me check the logs.");
+    expect(live[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "ok" },
     ]);
     expect(live[0]?.liveText).toBe("CI passed; nothing to do.");
     expect(live[0]?.text).toBe("");
@@ -101,39 +120,116 @@ describe("foldTranscript", () => {
     expect(settled[0]?.ended).toBe(true);
   });
 
-  it("never pushes a blank segment on back-to-back tool calls", () => {
-    // The supervisor's own guard, mirrored: consecutive tools with nothing
-    // said between them must not litter the log with empty rows.
+  it("keeps only the opening sentence, never the narration between tools", () => {
     const turns = foldTranscript([
+      event("t1", "text.delta", { text: "I'll fetch the docs." }),
       event("t1", "tool.started", { callId: "c1", name: "bash" }),
-      event("t1", "text.delta", { text: "   " }),
-      event("t1", "tool.started", { callId: "c2", name: "read" }),
+      event("t1", "text.delta", { text: "Good, got the first one." }),
+      event("t1", "tool.started", { callId: "c2", name: "bash" }),
     ]);
-    expect(turns[0]?.work.map((item) => item.kind)).toEqual(["tool", "tool"]);
+    expect(turns[0]?.lead).toBe("I'll fetch the docs.");
+    expect(turns[0]?.liveText).toBe("");
+    expect(turns[0]?.tools.map((tool) => tool.callId)).toEqual(["c1", "c2"]);
   });
 
-  it("keeps the work log's tool entry in sync with its finish", () => {
-    // The log holds the SAME object as `tools`, so a finish folding onto
-    // its start updates both views — a stale "running" row in one of them
-    // would contradict the other on screen.
+  it("has no lead when the agent opens with a tool call", () => {
+    // A blank segment is not an opening sentence, and narration after the
+    // first tool never becomes one.
+    const turns = foldTranscript([
+      event("t1", "text.delta", { text: "   " }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text.delta", { text: "Now the config." }),
+      event("t1", "tool.started", { callId: "c2", name: "read" }),
+    ]);
+    expect(turns[0]?.lead).toBe("");
+    expect(turns[0]?.tools).toHaveLength(2);
+  });
+
+  it("folds a finish onto its start", () => {
     const turns = foldTranscript([
       event("t1", "tool.started", { callId: "c1", name: "bash" }),
       event("t1", "tool.finished", {
         callId: "c1",
         name: "bash",
         output: "hi",
+        isError: true,
       }),
     ]);
-    const logged = turns[0]?.work[0];
-    expect(logged?.kind === "tool" && logged.tool.output).toBe("hi");
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "hi", isError: true },
+    ]);
+  });
+
+  it("folds a command's exit status, and only an integer one", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "bash",
+        output: "",
+        exitCode: 2,
+      }),
+      // Payloads are untrusted JSON: a non-integer status is not one.
+      event("t1", "tool.finished", {
+        callId: "c2",
+        name: "bash",
+        output: "",
+        exitCode: "2",
+      }),
+      event("t1", "tool.finished", {
+        callId: "c3",
+        name: "bash",
+        output: "",
+        exitCode: 1.5,
+      }),
+    ]);
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c1", name: "bash", output: "", exitCode: 2 },
+      { callId: "c2", name: "bash", output: "" },
+      { callId: "c3", name: "bash", output: "" },
+    ]);
   });
 
   it("logs an orphaned finish so late-started work is never invisible", () => {
     const turns = foldTranscript([
       event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
     ]);
-    expect(turns[0]?.work).toHaveLength(1);
-    expect(turns[0]?.work[0]?.kind).toBe("tool");
+    expect(turns[0]?.tools).toEqual([
+      { callId: "c9", name: "curl", output: "x" },
+    ]);
+  });
+
+  it("carries a tool call's input onto the started call", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "warehouse_query" }),
+      event("t1", "tool.finished", {
+        callId: "c1",
+        name: "warehouse_query",
+        input: '{"sql":"select 1"}',
+        output: "1",
+      }),
+    ]);
+    const expected = {
+      callId: "c1",
+      name: "warehouse_query",
+      input: '{"sql":"select 1"}',
+      output: "1",
+    };
+    expect(turns[0]?.tools).toEqual([expected]);
+  });
+
+  it("leaves input absent for older events, and for a non-string input", () => {
+    const turns = foldTranscript([
+      event("t1", "tool.finished", { callId: "c1", name: "bash", output: "a" }),
+      event("t1", "tool.finished", {
+        callId: "c2",
+        name: "bash",
+        input: { sql: "not a string" },
+        output: "b",
+      }),
+    ]);
+    for (const tool of turns[0]?.tools ?? []) {
+      expect("input" in tool).toBe(false);
+    }
   });
 
   it("tracks the live activity, and drops it when the turn ends", () => {
@@ -145,7 +241,7 @@ describe("foldTranscript", () => {
         text: "Architecting the narrative arc\nthen I will consider…",
       }),
     ]);
-    // First line only — the intent, not the digression.
+    // The closed line — the intent, not the half-written digression.
     expect(working[0]?.activity).toBe("Architecting the narrative arc");
 
     // A started tool OUTRANKS the reasoning: the plan is now happening.
@@ -171,10 +267,85 @@ describe("foldTranscript", () => {
     // Null (nothing worth showing) must not blank the row — the previous
     // caption is still the truest thing we know.
     const turns = foldTranscript([
-      event("t1", "thinking.delta", { text: "Checking the CI logs" }),
+      event("t1", "thinking.delta", { text: "Checking the CI logs." }),
       event("t1", "thinking.delta", { text: "   \n  " }),
     ]);
-    expect(turns[0]?.activity).toBe("Checking the CI logs");
+    expect(turns[0]?.activity).toBe("Checking the CI logs.");
+  });
+
+  it("never captions a fragment of a reasoning delta (the field bug)", () => {
+    // Network batches cut the reasoning stream at arbitrary characters. Read
+    // per delta, the caption showed "d memory first, then review…" and
+    // "ngs must be picked up before any wo". Folded, only whole thoughts.
+    const reasoning =
+      "**Laying out the plan for the recurring check**\n\n" +
+      "I need to read memory first, then review my open PRs for new CI failures. " +
+      "If the lock is held I should stop, plus open findings must be picked up first. " +
+      "**Choosing the top finding**\n\nThen I can pick it and validate it.";
+    const captions = new Set<string>();
+    const events: TurnEvent[] = [];
+    for (let i = 0, k = 0; i < reasoning.length; k++) {
+      const n = [62, 48, 97, 35, 110][k % 5]!;
+      events.push(
+        event("t1", "thinking.delta", { text: reasoning.slice(i, i + n) }),
+      );
+      i += n;
+      const activity = foldTranscript(events)[0]?.activity;
+      if (activity) captions.add(activity);
+    }
+    expect(captions).toEqual(
+      new Set([
+        "Laying out the plan for the recurring check",
+        "Choosing the top finding",
+      ]),
+    );
+  });
+
+  it("records the work in order: thoughts, tool calls and the notes between them", () => {
+    const [turn] = foldTranscript([
+      event("t1", "thinking.delta", { text: "**Reading the logs**\nFirst " }),
+      event("t1", "text.delta", { text: "I'll check the logs." }),
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "tool.finished", { callId: "c1", name: "bash", output: "" }),
+      event("t1", "thinking.delta", {
+        text: "The build is fine, so the config",
+      }),
+      event("t1", "text.delta", { text: "Now the config." }),
+      event("t1", "tool.started", { callId: "c2", name: "read" }),
+      event("t1", "text.delta", { text: "All good." }),
+      event("t1", "text", { text: "All good." }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turn?.lead).toBe("I'll check the logs.");
+    expect(turn?.steps).toEqual([
+      { kind: "thought", text: "Reading the logs" },
+      { kind: "tool", index: 0 },
+      // A tool call closes the thought: its unfinished line still counts.
+      { kind: "thought", text: "The build is fine, so the config" },
+      { kind: "note", text: "Now the config." },
+      { kind: "tool", index: 1 },
+    ]);
+    // The lead is not a note: it already renders above the work.
+    expect(turn?.steps.filter((s) => s.kind === "note")).toHaveLength(1);
+  });
+
+  it("puts an orphaned finish on the timeline too", () => {
+    const [turn] = foldTranscript([
+      event("t1", "tool.finished", { callId: "c9", name: "curl", output: "x" }),
+    ]);
+    expect(turn?.steps).toEqual([{ kind: "tool", index: 0 }]);
+  });
+
+  it("bounds a runaway note", () => {
+    const [turn] = foldTranscript([
+      event("t1", "tool.started", { callId: "c1", name: "bash" }),
+      event("t1", "text.delta", { text: "word ".repeat(1_000) }),
+      event("t1", "tool.started", { callId: "c2", name: "bash" }),
+    ]);
+    const note = turn?.steps.find((s) => s.kind === "note");
+    expect(note?.kind === "note" && note.text.length).toBeLessThanOrEqual(
+      MAX_NOTE_CHARS + 1,
+    );
   });
 
   it("clears the activity on a failed turn too", () => {
@@ -232,6 +403,127 @@ describe("foldTranscript", () => {
     expect(turns.map((t) => t.turnId)).toEqual(["t1", "t2"]);
     expect(turns.map((t) => t.text)).toEqual(["first", "second"]);
   });
+
+  it("collects the approvals a supersede notice names, ignoring malformed stamps", () => {
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "Replaced by your message",
+        supersededApprovalIds: ["ap-1", "ap-2"],
+      }),
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        supersededApprovalIds: "ap-3",
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        supersededApprovalIds: ["ap-4", 7],
+      }),
+    ]);
+    expect(turns[0]?.supersededApprovalIds).toEqual(["ap-1", "ap-2"]);
+    // A supersede notice never ends the turn: the agent goes on to revise.
+    expect(turns[0]?.ended).toBe(false);
+  });
+
+  it("keeps a peer message beside its notice, and only when it is structured", () => {
+    // The sender's record of an agent-to-agent message is a notice ("To
+    // Ray: …") stamped with the structured `peerMessage`. The pair view
+    // renders the structured field as this agent's own bubble; a plain
+    // notice (a degraded preference, an approval outcome) and a malformed
+    // stamp contribute nothing to it. The notice line itself is kept in
+    // every case: the regular chat still shows it.
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: what is 2+2?",
+        peerMessage: { to: "ray-id", text: "what is 2+2?" },
+      }),
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", { level: "info", text: "junk", peerMessage: "x" }),
+      event("t1", "notice", { level: "info", text: "junk", peerMessage: null }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        peerMessage: { to: "ray-id" },
+      }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turns[0]?.peerMessages).toEqual(["what is 2+2?"]);
+    expect(turns[0]?.peerMessagesOpeningTask.size).toBe(0);
+    expect(turns[0]?.peerTaskClosed).toBeUndefined();
+    expect(turns[0]?.notices).toHaveLength(5);
+    expect(turns[0]?.ended).toBe(true);
+  });
+
+  it("reads the peer-task marks: which own message opened a task, and the task's close", () => {
+    const turns = foldTranscript([
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: can you ship by Friday?",
+        peerMessage: {
+          to: "ray-id",
+          text: "can you ship by Friday?",
+          opensTask: true,
+        },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "To Ray: and the API?",
+        peerMessage: { to: "ray-id", text: "and the API?" },
+      }),
+      event("t1", "turn.done"),
+      event("t2", "notice", {
+        level: "info",
+        text: "Reported back to the person.",
+        peerTask: { outcome: "reported" },
+      }),
+      // A malformed close stamp contributes nothing.
+      event("t2", "notice", {
+        level: "info",
+        text: "junk",
+        peerTask: { outcome: "done" },
+      }),
+      event("t2", "turn.done"),
+    ]);
+    expect(turns[0]?.peerMessages).toEqual([
+      "can you ship by Friday?",
+      "and the API?",
+    ]);
+    expect([...(turns[0]?.peerMessagesOpeningTask ?? [])]).toEqual([0]);
+    expect(turns[1]?.peerTaskClosed).toBe("reported");
+  });
+  it("reads the desktop-takeover stamp by notice index, and ignores a malformed one", () => {
+    // The agent's ask (pending) and its settling line (done) are two
+    // notices on the same turn; the chat finds each stamp by the notice it
+    // rides. A stamp with an unknown outcome, or none, contributes nothing.
+    const turns = foldTranscript([
+      event("t1", "notice", { level: "warn", text: "Model fell back." }),
+      event("t1", "notice", {
+        level: "warn",
+        text: "Needs you on the desktop: sign in",
+        desktopRequest: { id: "req-1", outcome: "pending" },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "junk",
+        desktopRequest: { id: "req-1", outcome: "maybe" },
+      }),
+      event("t1", "notice", {
+        level: "info",
+        text: "Alex took over the desktop and is done.",
+        desktopRequest: { id: "req-1", outcome: "done" },
+      }),
+      event("t1", "turn.done"),
+    ]);
+    expect(turns[0]?.notices).toHaveLength(4);
+    expect([...(turns[0]?.desktopRequests ?? [])]).toEqual([
+      [1, { id: "req-1", outcome: "pending" }],
+      [3, { id: "req-1", outcome: "done" }],
+    ]);
+  });
 });
 
 describe("mergeEvents", () => {
@@ -277,5 +569,82 @@ describe("highestSeq", () => {
         { seq: 9, turnId: "t", type: "turn.done", payload: {} },
       ]),
     ).toBe(9);
+  });
+});
+
+describe("movesTurnStatus", () => {
+  const event = (type: TurnEvent["type"]): TurnEvent => ({
+    seq: 1,
+    turnId: "t",
+    type,
+    payload: {},
+  });
+
+  it("is true for the events that change a turn row's status", () => {
+    // A turn opening or closing, and a mid-run follow-up the run picked
+    // up (its row flips joined live, so the bubble under it
+    // must stop saying "folding it in" without waiting for the poll).
+    for (const type of [
+      "turn.started",
+      "turn.done",
+      "error",
+      "message.joined",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(true);
+    }
+  });
+
+  it("is false for streamed content", () => {
+    for (const type of [
+      "text.delta",
+      "text",
+      "tool.started",
+      "tool.finished",
+      "notice",
+      // SEND NOW's answer: the row is still waiting; its join follows.
+      "message.sent_now",
+    ] as const) {
+      expect(movesTurnStatus(event(type)), type).toBe(false);
+    }
+  });
+});
+
+describe("raisesApproval", () => {
+  const finished = (name: unknown): TurnEvent => ({
+    seq: 1,
+    turnId: "t",
+    type: "tool.finished",
+    payload: { name },
+  });
+
+  it("is true when a tool that can hold an approval card finishes", () => {
+    for (const name of [
+      "propose_custom_connection",
+      "mcp__onecli__propose_custom_connection",
+      "mcp__onecli__send_message",
+      "mcp__onecli__read_conversation",
+      "mcp__onecli__send_as_me",
+      "mcp__onecli__edit_my_message",
+      "mcp__onecli__delete_my_message",
+      "message_agent",
+      "mcp__onecli__preview_expose",
+      "mcp__onecli__update_webhook",
+    ]) {
+      expect(raisesApproval(finished(name)), name).toBe(true);
+    }
+  });
+
+  it("is false for other tools, unfinished calls and malformed names", () => {
+    expect(raisesApproval(finished("bash"))).toBe(false);
+    expect(raisesApproval(finished("my_send_message_helper"))).toBe(false);
+    expect(raisesApproval(finished(42))).toBe(false);
+    expect(
+      raisesApproval({
+        seq: 1,
+        turnId: "t",
+        type: "tool.started",
+        payload: { name: "mcp__onecli__propose_custom_connection" },
+      }),
+    ).toBe(false);
   });
 });

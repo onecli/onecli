@@ -7,9 +7,19 @@ import { loadConfig, type SupervisorConfig } from "./config";
 import { createFakeHarness } from "./harness/fake";
 import { createJcodeHarness } from "./harness/jcode";
 import { log } from "./log";
+import {
+  gatewayFromProxyUrl,
+  publishOpenProxyUrl,
+  startOpenProxy,
+} from "./open-proxy";
 import { createStdioTransport } from "./transport/stdio";
 import { createWsTransport } from "./transport/ws";
-import { runSignalCleanup, runSupervisor } from "./supervisor";
+import {
+  registerSignalCleanup,
+  runSignalCleanup,
+  runSupervisor,
+} from "./supervisor";
+import { alignChromePolicyProxy, bootDesktop } from "./desktop";
 
 /**
  * Entrypoint of the in-sandbox supervisor. The ONLY place an adapter id maps
@@ -23,14 +33,15 @@ import { runSignalCleanup, runSupervisor } from "./supervisor";
  */
 const selectTransport = (config: SupervisorConfig): SupervisorTransport => {
   if (!config.runnerWsUrl) return createStdioTransport();
-  if (!config.bootstrapToken) {
+  if (!config.bootstrapToken || !config.sandboxId) {
     throw new Error(
-      "RUNNER_WS_URL is set but SANDBOX_WS_TOKEN is missing — the runner channel cannot be authenticated.",
+      "RUNNER_WS_URL is set but SANDBOX_WS_TOKEN or SANDBOX_ID is missing — the runner channel cannot be authenticated.",
     );
   }
   return createWsTransport({
     url: config.runnerWsUrl,
     token: config.bootstrapToken,
+    sandboxId: config.sandboxId,
   });
 };
 
@@ -62,6 +73,12 @@ const selectHarness = (config: SupervisorConfig): Harness => {
 
 const main = async (): Promise<void> => {
   const config = loadConfig();
+  // The runner channel's bootstrap token is single-use and lives in `config`
+  // from here on. Every process this one starts (the harness, the agent's
+  // shells, background processes, a schedule's check) inherits this
+  // environment, and none of them may hold the platform's channel
+  // credential, spent or not.
+  delete process.env.SANDBOX_WS_TOKEN;
   const harness = selectHarness(config);
 
   log("info", "supervisor starting", {
@@ -83,8 +100,72 @@ const main = async (): Promise<void> => {
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
 
-  await runSupervisor(config, harness, selectTransport(config));
+  // The open proxy (open-proxy.ts): the loopback door onto the gateway's
+  // open lane, for browsers and anything else that must keep its own TLS.
+  // Started BEFORE the harness so `OPEN_PROXY` is in the environment every
+  // child inherits (the harness daemon, its shells, background processes):
+  // the agent reads the variable, never a number. Best-effort, like the CA
+  // import in the entrypoint: a sandbox without a gateway URL (local dev)
+  // or with no free port simply has no open proxy, and the supervisor comes
+  // up regardless. The agent learns the absence the same way it learns
+  // everything else here, from the environment.
+  const gateway = gatewayFromProxyUrl(process.env.HTTPS_PROXY);
+  if (gateway) {
+    try {
+      const openProxy = await startOpenProxy(gateway);
+      process.env.OPEN_PROXY = openProxy.url;
+      publishOpenProxyUrl(openProxy.url);
+      alignChromePolicyProxy(openProxy.url);
+      log("info", "open proxy listening", { url: openProxy.url });
+    } catch (error) {
+      log("warn", "open proxy did not start", { error: String(error) });
+    }
+  } else {
+    log("info", "open proxy not started: no gateway proxy URL in HTTPS_PROXY");
+  }
+
+  // The desktop (desktop.ts): a screen with a window manager, for a browser
+  // that runs the way it does on a person's computer. Only where the image
+  // has one (probed, never assumed). Best-effort: a sandbox whose desktop
+  // fails to come up runs without one, as an image without the pieces does.
+  // Taken down on both exits: the signal path and the clean one (after the
+  // loop).
+  //
+  // NOT awaited here: it takes seconds, and the runner channel, the ready
+  // signal and the first turn do not need it. The supervisor gets the start
+  // as `pending`; the harness launches at once and its sessions receive the
+  // display through their session environment when the start settles, so
+  // only what must INHERIT `DISPLAY` from this process waits on it (a
+  // scheduled gate's shell, preview relaunches).
+  //
+  // The hosted platform layers its agent desktop on top (licensed code,
+  // loaded only when the hosted runner says so and it can carry the screen).
+  const hosted =
+    config.hostedDesktop && config.previews
+      ? (await import("./ee/desktop")).createHostedDesktop(config.homeDir)
+      : undefined;
+  if (hosted) log("info", "hosted desktop on");
+  const desktop = bootDesktop(hosted?.layer, registerSignalCleanup);
+  const pending = desktop.started.then((desktopStarted) => ({
+    addon: hosted?.addon(desktopStarted),
+  }));
+
+  try {
+    await runSupervisor(config, harness, selectTransport(config), {
+      pending,
+    });
+  } finally {
+    desktop.close();
+  }
   log("info", "supervisor exited cleanly");
+  // END THE PROCESS, explicitly. This process is the sandbox's whole
+  // lifetime (the container runs as long as it does), and a finished run has
+  // already torn down everything it owns (runSupervisor's `finally`). Left to
+  // the event loop, ONE handle nothing here owns keeps it alive: a runner
+  // socket whose close never completed has kept a sandbox, and everything it
+  // holds, running indefinitely after its run ended. The signal path above
+  // already exits this way; the crash path below does too.
+  process.exit(0);
 };
 
 main().catch((error: unknown) => {

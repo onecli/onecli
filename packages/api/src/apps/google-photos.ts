@@ -7,7 +7,9 @@ import {
 
 export const googlePhotos: AppDefinition = {
   id: "google-photos",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-photos",
   name: "Google Photos",
+  apiDocsUrl: "https://developers.google.com/photos/library/reference/rest",
   icon: "/icons/google-photos.svg",
   description: "Manage photos, videos, and albums.",
   connectionMethod: {
@@ -43,5 +45,6 @@ export const googlePhotos: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -40,10 +40,10 @@ import { log } from "../log";
 
 /** Under jcode's 30s like the tool channel: the runner answers in both
  * outcomes, so a silence this long means the answer is not coming. */
-export const MEMORY_WRITE_TIMEOUT_MS = 25_000;
-export const HARVEST_INTERVAL_MS = 1_500;
+const MEMORY_WRITE_TIMEOUT_MS = 25_000;
+const HARVEST_INTERVAL_MS = 1_500;
 /** Paced re-attempt after a retryable refusal (rate pacing, transport). */
-export const HARVEST_RETRY_MS = 5_000;
+const HARVEST_RETRY_MS = 5_000;
 /** Scan bounds — the observer laws: a hostile home must not make a
  * pass unbounded, and a huge file is refused by stat before it is read. */
 export const MAX_HARVEST_SCAN_ENTRIES = 256;

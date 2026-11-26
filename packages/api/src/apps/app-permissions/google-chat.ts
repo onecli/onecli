@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleChatPermissions: AppPermissionDefinition = {
   provider: "google-chat",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

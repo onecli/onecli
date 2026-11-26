@@ -144,19 +144,103 @@ const clamp = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 
 /** Everything the agent listens for. One list — both transports subscribe
- * identically; only the delivery path differs. */
-const BOT_EVENTS = [
+ * identically; only the delivery path differs. An app created before an
+ * entry here was added learns of it through `withAgentBotEvents` (the
+ * maintenance sync), never by being re-created. */
+export const BOT_EVENTS = [
   "message.im",
   "app_mention",
   "message.channels",
   "message.groups",
   "member_joined_channel",
   // The invite's mirror: the bot's own removal drives the reach/thread-link
-  // cleanup (the leave door). Same scope gating as member_joined_channel;
-  // PRE-EXISTING apps must have their manifest updated (or be re-created)
-  // to gain it — until then their leave cleanup falls back to dismiss.
+  // cleanup (the leave door). Same scope gating as member_joined_channel.
   "member_left_channel",
+  // The forms Slack actually delivers to the REMOVED bot itself (public /
+  // private channel). A bot kicked from a private channel was seen in prod
+  // to get no member_left_channel at all; these feed the same leave door.
+  // Scope-gated on channels:read / groups:read, both already held.
+  "channel_left",
+  "group_left",
+  // The APP's own removal (the removed door): the workspace uninstalled it,
+  // or revoked its bot token. No scopes needed for either.
+  "app_uninstalled",
+  "tokens_revoked",
+  // The native Stop (the stop door). Slack shows its stop button beside the
+  // agent session's "Working…" loader ONLY while the app subscribes to this;
+  // without it the loader is a dead indicator. Needs `chat:write`, which
+  // every app already holds, so no reinstall.
+  "agent_session_stopped",
+  // A person reacting to the agent's own message (👍 on a question it
+  // asked). Needs reactions:read, which apps created before it lack: the
+  // maintenance sync adds it only where the scope is declared (see
+  // `EVENT_SCOPES`).
+  "reaction_added",
 ] as const;
+
+/**
+ * Events whose scope an app created before the event joined `BOT_EVENTS`
+ * may not hold. An event subscribed without its scope is never delivered
+ * (docs.slack.dev/apis/events-api, "Adding event subscriptions you aren't
+ * yet scoped for", checked 2026-11-09), and developer reports say the
+ * manifest editor refuses the pair outright. Adding the scope means a
+ * reinstall (an admin's consent), which the sync must never force on an
+ * org. So the sync adds these only to a manifest that already declares the
+ * scope; the rollout note has an admin add the scope and the event together.
+ */
+const EVENT_SCOPES: Partial<Record<(typeof BOT_EVENTS)[number], string>> = {
+  reaction_added: "reactions:read",
+};
+
+/** A JSON object read out of an exported manifest, or an empty one when the
+ * field is missing or the wrong shape (the export is Slack's, not ours). */
+const objectAt = (value: unknown): Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value))
+    : {};
+
+/** The strings of an exported list, junk entries dropped (never written
+ * back), or an empty list when the field is missing or not a list. */
+const stringsAt = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+
+/**
+ * The same manifest, subscribed to every event in `BOT_EVENTS` it can hold:
+ * what an app created before an event was added needs to receive it. Edits
+ * an EXPORTED manifest (the rename's law: rebuilding could rewrite scopes
+ * or URLs on an app that predates the current template), and only ever
+ * ADDS: an event someone subscribed by hand stays subscribed, and an event
+ * whose scope the app lacks (`EVENT_SCOPES`) waits for an admin to add
+ * both. Null when nothing is missing, so the caller can skip the write.
+ */
+export const withAgentBotEvents = (
+  manifest: Record<string, unknown>,
+): Record<string, unknown> | null => {
+  const settings = objectAt(manifest.settings);
+  const subscriptions = objectAt(settings.event_subscriptions);
+  const current = stringsAt(subscriptions.bot_events);
+  const scopes = stringsAt(
+    objectAt(objectAt(manifest.oauth_config).scopes).bot,
+  );
+  const missing = BOT_EVENTS.filter((event) => {
+    if (current.includes(event)) return false;
+    const scope = EVENT_SCOPES[event];
+    return scope === undefined || scopes.includes(scope);
+  });
+  if (missing.length === 0) return null;
+  return {
+    ...manifest,
+    settings: {
+      ...settings,
+      event_subscriptions: {
+        ...subscriptions,
+        bot_events: [...current, ...missing],
+      },
+    },
+  };
+};
 
 /**
  * Verified against the scopes reference 2026-08-07 — exact strings matter:
@@ -182,10 +266,18 @@ export const BOT_SCOPES = [
   // The receipt reaction (the "seen" mark on an accepted message).
   // Pre-existing installs must REINSTALL to gain it — permissions changed.
   "reactions:write",
+  // Seeing reactions people add to the agent's messages (reaction_added).
+  // Pre-existing installs gain it only by an admin adding it and
+  // reinstalling; until then their reactions are simply not delivered.
+  "reactions:read",
   // Downloading user-attached files (`url_private` needs a Bearer with this
   // scope; without it Slack serves a login page, not a 401). Same reinstall
   // rule as reactions:write for pre-existing installs.
   "files:read",
+  // Sending the agent's files back into the thread (send_file →
+  // files.getUploadURLExternal / completeUploadExternal). Same reinstall
+  // rule; a pre-existing install degrades to a link line, never a lost file.
+  "files:write",
   "users:read",
   "users:read.email",
 ] as const;
@@ -201,6 +293,68 @@ export const BOT_SCOPES = [
 export const botScopesFor = (appMode: ChannelAppMode): string[] =>
   appMode === "agent" ? [...BOT_SCOPES, "assistant:write"] : [...BOT_SCOPES];
 
+/**
+ * The READ-ONLY user scopes a person grants when they connect their own
+ * Slack to an agent ("Connect your Slack"): list and read the channels,
+ * private channels, DMs and group DMs THEY are in. Deliberately no write,
+ * no search (`search:read` cannot be scoped to chosen conversations), no
+ * files. The platform's read tool is the only consumer; the token never
+ * leaves the server.
+ */
+export const USER_READ_SCOPES = [
+  "channels:read",
+  "channels:history",
+  "groups:read",
+  "groups:history",
+  "im:read",
+  "im:history",
+  "mpim:read",
+  "mpim:history",
+  "users:read",
+] as const;
+
+/**
+ * The one WRITE user scope ("send as me"): post as the person, only into a
+ * conversation they explicitly set to allow/ask. Requested alongside the
+ * read scopes; a token granted before it existed simply can't send.
+ */
+export const USER_WRITE_SCOPES = ["chat:write"] as const;
+
+/** Every user scope "Connect your Slack" requests. */
+export const USER_SCOPES = [...USER_READ_SCOPES, ...USER_WRITE_SCOPES] as const;
+
+/**
+ * Add every user scope "Connect your Slack" requests (and, when missing,
+ * the OAuth redirect) to an EXPORTED manifest - export-then-edit, like the
+ * rename, so an app that predates the current template keeps everything
+ * else it has. Idempotent: returns null when nothing would change (no
+ * manifest update needed).
+ */
+export const withUserReadScopes = (
+  manifest: Record<string, unknown>,
+  redirectUrl: string,
+): Record<string, unknown> | null => {
+  const oauth = objectAt(manifest.oauth_config);
+  const scopes = objectAt(oauth.scopes);
+  const user = Array.isArray(scopes.user)
+    ? scopes.user.filter((s): s is string => typeof s === "string")
+    : [];
+  const redirects = Array.isArray(oauth.redirect_urls)
+    ? oauth.redirect_urls.filter((u): u is string => typeof u === "string")
+    : [];
+  const missingScopes = USER_SCOPES.filter((s) => !user.includes(s));
+  const missingRedirect = !redirects.includes(redirectUrl);
+  if (missingScopes.length === 0 && !missingRedirect) return null;
+  return {
+    ...manifest,
+    oauth_config: {
+      ...oauth,
+      redirect_urls: missingRedirect ? [...redirects, redirectUrl] : redirects,
+      scopes: { ...scopes, user: [...user, ...missingScopes] },
+    },
+  };
+};
+
 /** Slack caps `agent_description` at 300 chars — its own budget, distinct
  * from the 140-char About description. */
 const AGENT_DESCRIPTION_MAX = 300;
@@ -208,8 +362,9 @@ const AGENT_DESCRIPTION_MAX = 300;
 export interface AgentManifestInput {
   agentName: string;
   transport: ChannelTransport;
-  /** The deployment's public API origin — required on the events arm, where
-   * Slack must be able to call back; null on the socket arm. */
+  /** The deployment's public HTTPS API origin, or null without one. Events
+   * requires it (Slack calls back there); any app with it gets the OAuth
+   * redirect, so a socket app can install by consent too. */
   publicApiUrl: string | null;
   /** The attaching member — surfaces in the app's About description so
    * teammates know whose agent this is. Optional: rebuild paths (tombstone,
@@ -266,7 +421,12 @@ export const buildAgentManifest = ({
     },
     oauth_config: {
       scopes: { bot: botScopesFor("agent") },
-      ...(events && { redirect_urls: [inbound("oauth/callback")] }),
+      // The OAuth redirect is a BROWSER hop, not an inbound delivery: Slack
+      // sends the installing admin's browser back to us. So a socket app
+      // gets it too whenever this deployment has a public HTTPS origin
+      // (Slack refuses non-HTTPS redirect URLs), which is what lets the
+      // socket arm install with one Allow click instead of a token paste.
+      ...(publicApiUrl && { redirect_urls: [inbound("oauth/callback")] }),
     },
     settings: {
       org_deploy_enabled: false,

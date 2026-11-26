@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { directThreadId } from "@onecli/channels/slack";
 
 import { groupThreadId, interpretSlackEvent } from "./interpret";
 
@@ -146,6 +147,8 @@ describe("direct messages", () => {
       // A DM typed at the top level answers top-level — no thread is opened
       // for it (the card, not the loader, carries the progress there).
       replyThreadTs: null,
+      // Top level: no thread of its own to open a conversation for.
+      threadExternalId: null,
       // The triggering message's own ts — the receipt reaction's address.
       messageTs: "1111.0001",
     });
@@ -169,11 +172,14 @@ describe("direct messages", () => {
     });
   });
 
-  it("keeps a threaded DM on the SAME conversation as the DM itself", () => {
-    // §3.18: a user's DM is ONE thread — the same row their web chat reads.
-    // Threads inside it change WHERE the answer goes, never which
-    // conversation it belongs to. MUTATION-PROOF: address a DM thread as its
-    // own `<channel>:<ts>` conversation and this fails.
+  it("keeps a threaded DM on the person's direct row, and names the thread as a conversation of its own", () => {
+    // §3.18: a user's DM is ONE thread — the same row their web chat reads
+    // (`externalThreadId` stays the IM). A thread typed INSIDE it is a
+    // conversation of its own (`threadExternalId`: the IM + the root ts),
+    // opened off that row and run beside it, so a thread answers while the
+    // top level is busy. MUTATION-PROOF: address the thread AS the DM
+    // (`externalThreadId: <channel>:<ts>`) and the first assertion fails;
+    // drop `threadExternalId` and the second does.
     const threaded = interpretSlackEvent(
       dm({ thread_ts: "1111.0001", ts: "1111.0009" }),
       CTX,
@@ -183,6 +189,9 @@ describe("direct messages", () => {
       externalThreadId: (
         interpretSlackEvent(dm(), CTX) as { externalThreadId: string }
       ).externalThreadId,
+    });
+    expect(threaded).toMatchObject({
+      threadExternalId: directThreadId("D0001", "1111.0001"),
     });
   });
 
@@ -217,6 +226,7 @@ describe("group surfaces", () => {
       replyChannel: "C9999",
       replyThreadTs: "4444.0001",
       messageTs: "4444.0001",
+      typedText: `<@${BOT}> deploy please`,
       isMention: true,
     });
   });
@@ -240,10 +250,17 @@ describe("group surfaces", () => {
     });
   });
 
-  it("ignores a plain channel message with no thread — channel chatter", () => {
-    expect(interpretSlackEvent(channelMessage(), CTX)).toEqual({
-      door: "ignore",
-      reason: "channel-chatter",
+  it("hands a plain top-level channel message over as OVERHEARD, threaded under itself", () => {
+    // Whether it is heard at all is the dispatcher's call (only a channel
+    // promoted to listen = "all" admits it); classification just marks it
+    // and points any answer at a thread rooted on the message itself.
+    expect(interpretSlackEvent(channelMessage(), CTX)).toMatchObject({
+      door: "group",
+      overheard: true,
+      isMention: false,
+      externalThreadId: "C9999:2222.0001",
+      replyThreadTs: "2222.0001",
+      messageTs: "2222.0001",
     });
   });
 
@@ -263,6 +280,7 @@ describe("group surfaces", () => {
       replyThreadTs: "2222.0000",
       // The follow-up's OWN ts, not the thread root's.
       messageTs: "2222.0001",
+      typedText: "in a channel",
       isMention: false,
     });
   });
@@ -452,6 +470,93 @@ describe("invites (member_joined_channel)", () => {
   });
 });
 
+describe("the bot's own removal (channel_left / group_left)", () => {
+  it.each(["channel_left", "group_left"])(
+    "%s is a leave for that channel",
+    (type) => {
+      expect(interpretSlackEvent({ type, channel: "C7777" }, CTX)).toEqual({
+        door: "leave",
+        channel: "C7777",
+      });
+    },
+  );
+
+  it("works even while our own identity is unknown (addressed to us by construction)", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "group_left", channel: "G7777" },
+        { botUserId: null },
+      ),
+    ).toEqual({ door: "leave", channel: "G7777" });
+  });
+
+  it("drops one with no channel instead of leaving an empty space", () => {
+    expect(interpretSlackEvent({ type: "channel_left" }, CTX)).toEqual({
+      door: "ignore",
+      reason: "unparseable",
+    });
+  });
+});
+
+describe("Slack's own system users (USLACK / USLACKBOT)", () => {
+  it.each(["USLACK", "USLACKBOT"])(
+    "a DM from %s is a system notice, never a direct speaker",
+    (user) => {
+      expect(
+        interpretSlackEvent(
+          dm({
+            user,
+            channel: "D_FICTIONAL_NOTICE",
+            text: "You have been removed from #fictional-observatory by <@U_FICTIONAL_ADMIN>",
+          }),
+          CTX,
+        ),
+      ).toEqual({ door: "system_notice" });
+    },
+  );
+
+  it.each(["USLACK", "USLACKBOT"])(
+    "a channel message from %s is dropped, never a group speaker",
+    (user) => {
+      expect(interpretSlackEvent(channelMessage({ user }), CTX)).toEqual({
+        door: "ignore",
+        reason: "slack-system-user",
+      });
+    },
+  );
+
+  it("an app_mention claiming a system author is dropped", () => {
+    expect(
+      interpretSlackEvent(
+        {
+          type: "app_mention",
+          channel: "C9999",
+          user: "USLACK",
+          text: `<@${BOT}> hi`,
+          ts: "3333.0001",
+        },
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "slack-system-user" });
+  });
+
+  it("a non-plain subtype from a system user still drops on the subtype first", () => {
+    expect(
+      interpretSlackEvent(
+        dm({ user: "USLACK", subtype: "message_changed" }),
+        CTX,
+      ),
+    ).toEqual({ door: "ignore", reason: "subtype:message_changed" });
+  });
+
+  it("an ordinary person whose id merely starts with USLACK is unaffected", () => {
+    expect(interpretSlackEvent(dm({ user: "USLACKER1" }), CTX)).toMatchObject({
+      door: "direct",
+      externalUserId: "USLACKER1",
+    });
+  });
+});
+
 describe("junk resilience", () => {
   it.each([
     ["a number", 42],
@@ -466,9 +571,9 @@ describe("junk resilience", () => {
   });
 
   it("classifies an unknown event type as an ignore naming the type", () => {
-    expect(interpretSlackEvent({ type: "reaction_added" }, CTX)).toEqual({
+    expect(interpretSlackEvent({ type: "pin_added" }, CTX)).toEqual({
       door: "ignore",
-      reason: "event:reaction_added",
+      reason: "event:pin_added",
     });
   });
 
@@ -614,5 +719,101 @@ describe("threaded DM edge cases", () => {
         CTX,
       ),
     ).toEqual({ door: "ignore", reason: "self" });
+  });
+});
+
+describe("the app's own removal (app_uninstalled / tokens_revoked)", () => {
+  // docs.slack.dev/reference/events/app_uninstalled: sent on COMPLETE
+  // uninstall; tokens_revoked may arrive before or after it.
+  it("app_uninstalled is the removed door, whoever we are", () => {
+    expect(interpretSlackEvent({ type: "app_uninstalled" }, CTX)).toEqual({
+      door: "removed",
+      reason: "app_uninstalled",
+    });
+    // Our own identity being unknown changes nothing: the event names the
+    // app by envelope, not by user.
+    expect(
+      interpretSlackEvent({ type: "app_uninstalled" }, { botUserId: null }),
+    ).toEqual({ door: "removed", reason: "app_uninstalled" });
+  });
+
+  it("tokens_revoked with a BOT entry is the removed door — the bot token is what the presence runs on", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { bot: [BOT] } },
+        CTX,
+      ),
+    ).toEqual({ door: "removed", reason: "tokens_revoked" });
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { oauth: ["U1"], bot: [BOT] } },
+        CTX,
+      ),
+    ).toEqual({ door: "removed", reason: "tokens_revoked" });
+  });
+
+  it("tokens_revoked naming only USER tokens drops those people's read tokens, never the presence", () => {
+    expect(
+      interpretSlackEvent(
+        { type: "tokens_revoked", tokens: { oauth: ["U1"] } },
+        CTX,
+      ),
+    ).toEqual({ door: "user-tokens-revoked", externalUserIds: ["U1"] });
+    expect(
+      interpretSlackEvent({ type: "tokens_revoked", tokens: { bot: [] } }, CTX),
+    ).toEqual({ door: "ignore", reason: "tokens_revoked:empty" });
+    expect(interpretSlackEvent({ type: "tokens_revoked" }, CTX)).toEqual({
+      door: "ignore",
+      reason: "tokens_revoked:empty",
+    });
+  });
+});
+
+describe("the native Stop (agent_session_stopped)", () => {
+  const stopped = (overrides: Record<string, unknown> = {}) => ({
+    type: "agent_session_stopped",
+    channel: "C9999",
+    thread_ts: "2222.0001",
+    user: "U1111",
+    event_ts: "2222.0009",
+    streaming_message_ts: [],
+    ...overrides,
+  });
+
+  it("routes a click to the stop door, naming the session and the clicker", () => {
+    expect(interpretSlackEvent(stopped(), CTX)).toEqual({
+      door: "stop",
+      externalUserId: "U1111",
+      channel: "C9999",
+      threadTs: "2222.0001",
+    });
+  });
+
+  it("routes a DM session's click the same way (the DM is the channel)", () => {
+    expect(
+      interpretSlackEvent(stopped({ channel: "D0001" }), CTX),
+    ).toMatchObject({ door: "stop", channel: "D0001" });
+  });
+
+  it("ignores half a stop: no thread, no clicker, or no channel names no session", () => {
+    for (const field of ["thread_ts", "user", "channel"]) {
+      const event: Record<string, unknown> = stopped();
+      delete event[field];
+      expect(interpretSlackEvent(event, CTX), field).toEqual({
+        door: "ignore",
+        reason: "stop:malformed",
+      });
+    }
+    expect(interpretSlackEvent(stopped({ user: "" }), CTX)).toEqual({
+      door: "ignore",
+      reason: "stop:malformed",
+    });
+  });
+
+  it("ignores a stop naming the bot itself: only a person clicks Stop", () => {
+    expect(interpretSlackEvent(stopped({ user: BOT }), CTX)).toEqual({
+      door: "ignore",
+      reason: "stop:self",
+    });
   });
 });

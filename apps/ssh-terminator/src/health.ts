@@ -1,9 +1,10 @@
 import { createServer, type Server as HttpServer } from "node:http";
 
 /**
- * The health listener the NLB target group probes (HTTP :8091). Deliberately
+ * The health listener a load balancer probes (HTTP :8091). Deliberately
  * dumb — a bare 200/503 with zero operational detail: this port is reachable
- * from the VPC and reveals nothing about sessions, versions or config.
+ * from the private network and reveals nothing about sessions, versions or
+ * config.
  */
 
 export interface HealthServer {

@@ -57,6 +57,9 @@ const QUERY_METHODS = ["POST", "GET"];
 
 export const awsPermissions: AppPermissionDefinition = {
   provider: "aws",
+  // The credential injects across the whole `*.amazonaws.com` zone, so a
+  // customization must stay a hard boundary (see `unlisted`).
+  unlisted: "block",
   groups: [
     {
       category: "read",

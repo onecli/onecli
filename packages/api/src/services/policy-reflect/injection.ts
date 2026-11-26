@@ -33,6 +33,25 @@ export const injectionIdentityMatches = (
   });
 
 /**
+ * The targets of every rule that INJECTS for this agent: published, enabled,
+ * non-default allow rules whose identity explicitly names it
+ * (`inject_select.rs::collect`). The one place the row predicate lives for
+ * the id-level selections below.
+ */
+const injectingTargets = function* (
+  rules: SimRuleRow[],
+  agentId: string,
+  principals: PrincipalSet,
+): Generator<SimRuleRow["targets"][number]> {
+  for (const row of rules) {
+    if (row.isDefault || row.action !== "allow") continue;
+    if (!injectionIdentityMatches(row.identities, agentId, principals))
+      continue;
+    yield* row.targets;
+  }
+};
+
+/**
  * Which SECRETS a selective agent's published rules grant it: specific ids, plus
  * any whole-level grants (a `secretScope` target widens to that level's pool).
  * The id-level counterpart of `buildInjectionProbe`, for callers that need the
@@ -49,18 +68,54 @@ export const grantedSecretSelection = (
 ): { ids: string[]; levels: Set<"workspace" | "organization"> } => {
   const ids = new Set<string>();
   const levels = new Set<"workspace" | "organization">();
-  for (const row of rules) {
-    if (row.isDefault || row.action !== "allow") continue;
-    if (!injectionIdentityMatches(row.identities, agentId, principals))
-      continue;
-    for (const t of row.targets) {
-      if (t.kind !== "secret") continue;
-      if (t.secretId) ids.add(t.secretId);
-      else if (t.secretScope === "workspace") levels.add("workspace");
-      else if (t.secretScope === "organization") levels.add("organization");
-    }
+  for (const t of injectingTargets(rules, agentId, principals)) {
+    if (t.kind !== "secret") continue;
+    if (t.secretId) ids.add(t.secretId);
+    else if (t.secretScope === "workspace") levels.add("workspace");
+    else if (t.secretScope === "organization") levels.add("organization");
   }
   return { ids: [...ids], levels };
+};
+
+/** The key a provider-level grant selects connections by: every connection of
+ * `provider` at that level (org- or workspace-scoped) injects. */
+export const providerLevelKey = (
+  provider: string,
+  level: "workspace" | "organization",
+): string => `${provider}\n${level}`;
+
+/**
+ * Which CONNECTIONS a selective agent's published rules grant it: specific
+ * ids (`connection` targets), plus provider-level grants (`app` targets with
+ * a `connectionScope`, keyed by `providerLevelKey`) that widen to every
+ * connection of that provider at that level. The connection twin of
+ * `grantedSecretSelection`, so the grants summary and the agent's
+ * connected-apps list read one law.
+ *
+ * Pure: the caller supplies the already-fenced rules and resolves the ids
+ * and levels through its own org/workspace-fenced pool, so a foreign id can
+ * only come back if it was already in the caller's scope.
+ */
+export const grantedConnectionSelection = (
+  rules: SimRuleRow[],
+  agentId: string,
+  principals: PrincipalSet,
+): { ids: Set<string>; providerLevels: Set<string> } => {
+  const ids = new Set<string>();
+  const providerLevels = new Set<string>();
+  for (const t of injectingTargets(rules, agentId, principals)) {
+    if (t.kind === "connection") {
+      if (t.appConnectionId) ids.add(t.appConnectionId);
+    } else if (
+      t.kind === "app" &&
+      t.appProvider &&
+      (t.appConnectionScope === "workspace" ||
+        t.appConnectionScope === "organization")
+    ) {
+      providerLevels.add(providerLevelKey(t.appProvider, t.appConnectionScope));
+    }
+  }
+  return { ids, providerLevels };
 };
 
 /**

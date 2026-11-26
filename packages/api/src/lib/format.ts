@@ -32,3 +32,15 @@ export const hasJsonData = (data: unknown): data is Record<string, unknown> =>
   data != null &&
   typeof data === "object" &&
   Object.keys(data as Record<string, unknown>).length > 0;
+
+/**
+ * A user- or provider-chosen name about to be spliced into platform voice
+ * (a speaker prefix, a card line, a title). The definition lives in
+ * @onecli/agent-protocol so the supervisor clamps exactly what the control
+ * plane composes; re-exported here to keep every existing import path. From
+ * the leaf `./text` subpath: this module is client-reachable, and the
+ * package barrel is not browser-safe. Two older cleaners deliberately differ
+ * and stay local: channel ingestion's speaker prefix and the cron run header
+ * keep interior whitespace runs (no collapse).
+ */
+export { cleanLabel } from "@onecli/agent-protocol/text";

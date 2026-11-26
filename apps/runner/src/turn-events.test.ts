@@ -67,6 +67,12 @@ const collect = () => {
 const flatEvents = (posts: RunnerEvent[]): AgentEvent[] =>
   posts.flatMap((post) => (post.kind === "turn.events" ? post.events : []));
 
+/** Each turn post as `[turnId, events]`, in the order it was sent. */
+const turnPosts = (posts: RunnerEvent[]): [string, AgentEvent[]][] =>
+  posts.flatMap((post) =>
+    post.kind === "turn.events" ? [[post.turnId, post.events]] : [],
+  );
+
 describe("coalesce", () => {
   it("merges adjacent text deltas into one", () => {
     expect(coalesce([text("Hel"), text("lo "), text("world")])).toEqual([
@@ -163,6 +169,42 @@ describe("the collector", () => {
     const { posts, collector } = collect();
     collector.add("sb-1", "cv-1", "t1", { type: "error", message: "boom" });
     expect(flatEvents(posts)).toEqual([{ type: "error", message: "boom" }]);
+  });
+
+  it("a terminal flushes the conversation's OTHER turns first", () => {
+    // A mid-run follow-up's reply streams and is stored under the
+    // follow-up's own id, buffered apart from the turn it rode. The turn's
+    // terminal must not overtake it: the reply has to commit before the
+    // marker that says the turn ended, or a reader sees the end before the
+    // reply. MUTATION-PROOF: drop the sibling flush and the reply posts
+    // after `turn.done` (on its own timer).
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", text("working"));
+    collector.add("sb-1", "cv-1", "f1", text("Sure, I'll do that too."));
+    collector.add("sb-1", "cv-1", "f1", {
+      type: "text",
+      text: "Sure, I'll do that too.",
+    });
+    collector.add("sb-1", "cv-1", "t1", { type: "turn.done" });
+
+    expect(turnPosts(posts)).toEqual([
+      [
+        "f1",
+        [
+          text("Sure, I'll do that too."),
+          { type: "text", text: "Sure, I'll do that too." },
+        ],
+      ],
+      ["t1", [text("working"), { type: "turn.done" }]],
+    ]);
+  });
+
+  it("a terminal never flushes ANOTHER conversation's buffer", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-2", "t2", text("elsewhere"));
+    collector.add("sb-1", "cv-1", "t1", { type: "turn.done" });
+
+    expect(turnPosts(posts).map(([turnId]) => turnId)).toEqual(["t1"]);
   });
 
   it("cancels the pending timer once a turn has been flushed", () => {
@@ -319,6 +361,60 @@ describe("size is bounded, not just count", () => {
     if (event?.type !== "error") throw new Error("expected an error event");
     expect(event.message.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
     expect(event.code?.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
+  });
+
+  it("bounds and cleans a tool call's input like its output", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", {
+      type: "tool.finished",
+      callId: "c1",
+      name: "warehouse_query",
+      input: `sel${String.fromCharCode(0)}ect ${"x".repeat(100_000)}`,
+      output: "ok",
+    });
+    collector.flush("t1");
+
+    const [event] = flatEvents(posts);
+    if (event?.type !== "tool.finished")
+      throw new Error("expected a tool event");
+    expect(event.input?.startsWith("select ")).toBe(true);
+    expect(event.input?.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
+    expect(event.input).toContain("truncated");
+  });
+
+  it("does not invent an input on a tool event that had none", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "t1", {
+      type: "tool.finished",
+      callId: "c1",
+      name: "cat",
+      output: "ok",
+    });
+    collector.flush("t1");
+
+    const [event] = flatEvents(posts);
+    expect(event && "input" in event).toBe(false);
+  });
+
+  it("bounds SEND NOW's tool name, and invents none", () => {
+    const { posts, collector } = collect();
+    collector.add("sb-1", "cv-1", "f1", {
+      type: "message.sent_now",
+      moved: true,
+      toolName: `ba${String.fromCharCode(0)}sh${"x".repeat(100_000)}`,
+    });
+    collector.add("sb-1", "cv-1", "f2", {
+      type: "message.sent_now",
+      moved: false,
+    });
+    collector.flushAll();
+
+    const [named, bare] = flatEvents(posts);
+    if (named?.type !== "message.sent_now" || bare?.type !== "message.sent_now")
+      throw new Error("expected two send-now events");
+    expect(named.toolName?.startsWith("bash")).toBe(true);
+    expect(named.toolName?.length).toBeLessThan(MAX_EVENT_TEXT_CHARS + 100);
+    expect(bare).toEqual({ type: "message.sent_now", moved: false });
   });
 
   it("STRIPS a NUL byte, which PostgreSQL will not store", () => {

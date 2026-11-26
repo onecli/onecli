@@ -5,8 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { grants, secrets } from "@/lib/api";
-import type { Secret } from "@/lib/api";
-import type { SecretActions } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/types";
+import type { SavedSecret, Secret } from "@/lib/api";
 import { ModelsSection } from "./models-section";
 
 // The section composes data-graph-heavy children; the unit here is the
@@ -58,13 +57,11 @@ vi.mock(
     SecretDialog: ({
       open,
       onSaved,
-      secretActions,
       secret,
       allowedTypes,
     }: {
       open: boolean;
-      onSaved?: () => void;
-      secretActions?: Partial<SecretActions>;
+      onSaved?: (created: SavedSecret | undefined) => void;
       secret?: { id: string };
       allowedTypes?: string[];
     }) =>
@@ -77,9 +74,9 @@ vi.mock(
           <button
             data-testid="save-secret"
             onClick={() => {
-              void secretActions
-                ?.createSecret?.({ name: "n", type: "anthropic" } as never)
-                .then(() => onSaved?.())
+              void secrets
+                .create({ name: "n", type: "anthropic" } as never)
+                .then(({ id }) => onSaved?.({ id, name: "n" }))
                 .catch(() => {
                   /* the real dialog toasts and does NOT call onSaved */
                 });
@@ -87,8 +84,11 @@ vi.mock(
           >
             save
           </button>
-          {/* An onSaved with no create behind it — the edit-save shape. */}
-          <button data-testid="save-no-create" onClick={() => onSaved?.()}>
+          {/* An edit save: onSaved with no created secret. */}
+          <button
+            data-testid="save-no-create"
+            onClick={() => onSaved?.(undefined)}
+          >
             save edit
           </button>
         </>
@@ -108,14 +108,16 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const llmKey = { id: "sec-a", name: "Anthropic", type: "anthropic" } as Secret;
 const genericSecret = { id: "sec-g", name: "Token", type: "generic" } as Secret;
 
-const renderSection = () => {
+const renderSection = (hosted = true) => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  return render(<ModelsSection agentId="agent-1" />, { wrapper });
+  return render(<ModelsSection agentId="agent-1" hosted={hosted} />, {
+    wrapper,
+  });
 };
 
 describe("ModelsSection", () => {
@@ -134,20 +136,11 @@ describe("ModelsSection", () => {
       expect(grants.attachSecret).toHaveBeenCalledWith("agent-1", "sec-9"),
     );
 
-    // The ref is consumed on save: an onSaved with no create behind it must
-    // not replay the previous id.
+    // An edit save carries no created secret: nothing to attach, and never
+    // the previous id.
     await userEvent.click(screen.getByTestId("save-no-create"));
     await new Promise((r) => setTimeout(r, 0));
     expect(grants.attachSecret).toHaveBeenCalledTimes(1);
-  });
-
-  it("never attaches when the create failed", async () => {
-    vi.mocked(secrets.create).mockRejectedValue(new Error("nope"));
-    renderSection();
-
-    await userEvent.click(screen.getByTestId("save-secret"));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(grants.attachSecret).not.toHaveBeenCalled();
   });
 
   it("hides the header door while the empty state carries the CTA", () => {
@@ -197,5 +190,23 @@ describe("ModelsSection", () => {
       "href",
       "/w/ws-1/connections/llms",
     );
+  });
+
+  // The platform picks only a hosted agent's model: the models read answers
+  // 422 for a BYO agent, which the card would show as a load error.
+  it("shows the model picker for a hosted agent", () => {
+    renderSection(true);
+    expect(screen.getByTestId("model-card")).toBeInTheDocument();
+    expect(screen.getByText(/The model above runs on/)).toBeInTheDocument();
+  });
+
+  it("leaves the picker out for a BYO agent, keys still listed", () => {
+    renderSection(false);
+    expect(screen.queryByTestId("model-card")).not.toBeInTheDocument();
+    expect(screen.queryByText(/The model above/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "LLM keys" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("tab-add")).toBeInTheDocument();
   });
 });

@@ -7,7 +7,10 @@ import {
 
 export const googleSlides: AppDefinition = {
   id: "google-slides",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/google-slides",
   name: "Google Slides",
+  apiDocsUrl:
+    "https://developers.google.com/workspace/slides/api/reference/rest",
   icon: "/icons/google-slides.svg",
   description: "Read, create, and edit presentations.",
   connectionMethod: {
@@ -51,5 +54,6 @@ export const googleSlides: AppDefinition = {
   },
   configurable: {
     fields: googleConfigFields,
+    group: "google",
   },
 };

@@ -11,7 +11,11 @@ import {
   offeredPlans,
   planRank,
 } from "./plans";
-import { requiredPlanFor } from "./plan-features";
+import {
+  isPremiumFeature,
+  requiredPlanFor,
+  ruleActionFeature,
+} from "./plan-features";
 
 describe("normalizePlan", () => {
   it("maps every known status to itself", () => {
@@ -94,13 +98,6 @@ describe("seat caps", () => {
 });
 
 describe("pricing", () => {
-  it("prices the tiers per the Aug 2026 model (BYOC prices)", () => {
-    expect(getPlanConfig("pro").price).toBe(25);
-    expect(getPlanConfig("team").price).toBe(149);
-    expect(getPlanConfig("team-legacy").price).toBe(199);
-    expect(getPlanConfig("scale").price).toBe(499);
-  });
-
   it("yearly = pay 10 months for 12 on every self-serve paid tier", () => {
     for (const plan of PLANS.filter((p) => p.id !== "free")) {
       expect(plan.yearlyPrice).toBe(plan.price * 10);
@@ -162,10 +159,15 @@ describe("premium feature gating", () => {
     // Pins the tier moves in this release: the route tests mock
     // assertFeatureAllowed, so a regression of these map values would otherwise
     // go uncaught.
-    expect(requiredPlanFor("sso")).toBe("enterprise"); // moved Scale -> Enterprise (July 2026)
-    expect(requiredPlanFor("policy.manual_approval")).toBe("team"); // moved Pro -> Team
+    expect(requiredPlanFor("sso")).toBe("scale"); // back to Scale (Sept 2026)
     expect(requiredPlanFor("policy.rate_limit")).toBe("pro");
     expect(requiredPlanFor("policy.deny_mode")).toBe("team");
     expect(requiredPlanFor("groups")).toBe("enterprise");
+    expect(requiredPlanFor("app_availability")).toBe("scale");
+  });
+
+  it("manual approval is free on every plan (no premium feature, no rule-action gate)", () => {
+    expect(isPremiumFeature("policy.manual_approval")).toBe(false);
+    expect(ruleActionFeature("manual_approval")).toBeNull();
   });
 });

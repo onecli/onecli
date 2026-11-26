@@ -16,9 +16,9 @@ import { policyScope, lockScope, type PolicyScopeBase } from "./policy-service";
  * app-scoped concept.
  *
  * Writes are LOCKSTEP: each change lands in the scope's draft AND in the live
- * published generation, so a block takes effect immediately without publishing
- * whatever else the user has staged in the draft. Both rows share a `logicalId`,
- * which is how a draft row and its published twin find each other.
+ * published generation in place, so a block takes effect immediately without
+ * minting a generation. Both rows share a `logicalId`, which is how a draft row
+ * and its published twin find each other.
  */
 
 export interface BlocklistHostState {

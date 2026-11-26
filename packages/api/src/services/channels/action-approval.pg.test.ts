@@ -320,7 +320,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         decision: "approve",
         clickerExternalUserId: "U-OWNER",
       });
-      expect(outcome).toEqual({ kind: "decided", status: "executed" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "executed" });
 
       // The handler received the FROZEN row's payload, exactly once.
       expect(executed).toEqual([
@@ -369,7 +369,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         deciderUserId: OWNER,
         reason: "not before the QA pass finishes",
       });
-      expect(outcome).toEqual({ kind: "decided", status: "rejected" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "rejected" });
       expect(ran).toBe(0);
 
       const notice = await db.turnEvent.findFirst({
@@ -402,7 +402,7 @@ describe.skipIf(!PROOF_URL)("the full cycle", () => {
         decision: "approve",
         deciderUserId: OWNER,
       });
-      expect(outcome).toEqual({ kind: "decided", status: "failed" });
+      expect(outcome).toMatchObject({ kind: "decided", status: "failed" });
       const row = await db.actionApproval.findUniqueOrThrow({
         where: { id: request.id },
       });
@@ -668,3 +668,383 @@ describe.skipIf(!PROOF_URL)("fences", () => {
     ).rejects.toThrow(/No handler registered/);
   });
 });
+
+describe.skipIf(!PROOF_URL)(
+  "the approval-outcome note (what the MODEL reads next turn)",
+  () => {
+    // An owner approves a held send_message, the message goes out, and the
+    // agent keeps answering "still waiting for approval": the outcome notice
+    // reached the transcript but never the model's context. This note is
+    // that missing half.
+
+    /** Mark a turn as one the model actually ran: what `applyTurnEvents`
+     * writes on `turn.started` (the event row and `startedAt`). */
+    const markRan = async (conversationId: string, turnId: string) => {
+      const { lastSeq } = await db.conversation.update({
+        where: { id: conversationId },
+        data: { lastSeq: { increment: 1 } },
+        select: { lastSeq: true },
+      });
+      await db.turnEvent.create({
+        data: {
+          conversationId,
+          turnId,
+          seq: lastSeq,
+          type: "turn.started",
+          payload: { type: "turn.started" },
+        },
+      });
+      await db.turn.update({
+        where: { id: turnId },
+        data: { startedAt: new Date() },
+      });
+    };
+
+    /** A queued turn: the one whose dispatch builds the note. */
+    const nextTurn = (conversationId: string) =>
+      db.turn.create({
+        data: { conversationId, message: "any news?", source: "slack" },
+        select: { id: true, createdAt: true },
+      });
+
+    const ask = (
+      stage: { agentId: string; conversationId: string; turnId: string },
+      action: string,
+      summary: string,
+    ) =>
+      approvals.requestActionApproval({
+        agentId: stage.agentId,
+        conversationId: stage.conversationId,
+        originTurnId: stage.turnId,
+        action,
+        payload: {},
+        summary,
+      });
+
+    it("an approval decided after the asking run reaches the NEXT run as done", async () => {
+      const stage = await seedStage("note-done");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.done", async () => {});
+      try {
+        const request = await ask(
+          stage,
+          "test.note.done",
+          'send @Dana: "hello"',
+        );
+        const turn = await nextTurn(stage.conversationId);
+
+        // Before anyone decides: the honest answer is "still waiting".
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toContain(
+          'Still waiting for the owner\'s decision: send @Dana: "hello".',
+        );
+
+        // Decided while the next turn sits in the queue: still news for it.
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain('Approved and done: send @Dana: "hello".');
+        expect(note).not.toContain("Still waiting");
+      } finally {
+        approvals.unregisterActionHandler("test.note.done");
+      }
+    });
+
+    it("a rejection carries its reason; the news is shown for ONE run only", async () => {
+      const stage = await seedStage("note-reject");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.reject", async () => {});
+      try {
+        const request = await ask(
+          stage,
+          "test.note.reject",
+          "send #ops: deploy now",
+        );
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "reject",
+          deciderUserId: OWNER,
+          reason: "not during the freeze",
+        });
+
+        const turn = await nextTurn(stage.conversationId);
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain("Rejected: send #ops: deploy now.");
+        expect(note).toContain("not during the freeze");
+
+        // That turn ran (it read the news) and finished; the one after
+        // starts clean.
+        await markRan(stage.conversationId, turn.id);
+        await db.turn.update({
+          where: { id: turn.id },
+          data: { status: "done", finishedAt: new Date() },
+        });
+        const after = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            after.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.reject");
+      }
+    });
+
+    it("a turn the model never ran (a platform report) does not swallow the news", async () => {
+      const stage = await seedStage("note-report");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.report", async () => {});
+      try {
+        const request = await ask(stage, "test.note.report", "send @Dana: hi");
+        await approvals.decideActionApproval({
+          approvalId: request.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        // A born-done report lands after the decision: the platform wrote
+        // it, no harness ran, so it carries no `turn.started`.
+        await db.turn.create({
+          data: {
+            conversationId: stage.conversationId,
+            message: "Daily digest",
+            source: "cron",
+            status: "done",
+            startedAt: new Date(),
+            finishedAt: new Date(),
+          },
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toContain("Approved and done: send @Dana: hi.");
+      } finally {
+        approvals.unregisterActionHandler("test.note.report");
+      }
+    });
+
+    it("an ask past its deadline is never 'still waiting'", async () => {
+      const stage = await seedStage("note-expired");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.expired", async () => {});
+      try {
+        const request = await ask(stage, "test.note.expired", "send @Dana: hi");
+        // Past its deadline, not yet parked by the sweep.
+        await db.actionApproval.update({
+          where: { id: request.id },
+          data: { expiresAt: new Date(Date.now() - 1000) },
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.expired");
+      }
+    });
+
+    it("past the cap, the NEWEST waiting asks are the ones listed", async () => {
+      const stage = await seedStage("note-cap");
+      await markRan(stage.conversationId, stage.turnId);
+      approvals.registerActionHandler("test.note.cap", async () => {});
+      try {
+        for (let i = 1; i <= 12; i += 1) {
+          await ask(stage, "test.note.cap", `ask number ${i}`);
+        }
+        const turn = await nextTurn(stage.conversationId);
+        const note = await approvals.buildApprovalOutcomeNote(
+          stage.conversationId,
+          turn.createdAt,
+        );
+        expect(note).toContain("ask number 12.");
+        expect(note).toContain("ask number 3.");
+        expect(note).not.toContain("ask number 2.");
+        expect(note).not.toContain("ask number 1.");
+      } finally {
+        approvals.unregisterActionHandler("test.note.cap");
+      }
+    });
+
+    it("never leaks another conversation's approvals", async () => {
+      const stage = await seedStage("note-fence");
+      await markRan(stage.conversationId, stage.turnId);
+      const other = await seedConversationWithTurn(
+        stage.agentId,
+        "note-fence-other",
+      );
+      approvals.registerActionHandler("test.note.fence", async () => {});
+      try {
+        await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          conversationId: other.conversationId,
+          originTurnId: other.turnId,
+          action: "test.note.fence",
+          payload: {},
+          summary: "send @Dana: secret plan",
+        });
+        const turn = await nextTurn(stage.conversationId);
+        expect(
+          await approvals.buildApprovalOutcomeNote(
+            stage.conversationId,
+            turn.createdAt,
+          ),
+        ).toBeNull();
+      } finally {
+        approvals.unregisterActionHandler("test.note.fence");
+      }
+    });
+  },
+);
+
+describe.skipIf(!PROOF_URL)(
+  "superseding stale asks and personal DM cards",
+  () => {
+    it("a newer ask with the same key quietly expires the older pending one; a different key is kept", async () => {
+      const stage = await seedStage("supersede-new");
+      approvals.registerActionHandler(
+        "test.supersede",
+        async () => "Sent to Sam.",
+        {
+          supersedeKey: (p) =>
+            p &&
+            typeof p === "object" &&
+            !Array.isArray(p) &&
+            typeof p.to === "string"
+              ? p.to
+              : null,
+        },
+      );
+      try {
+        const ask = (to: string) =>
+          approvals.requestActionApproval({
+            agentId: stage.agentId,
+            conversationId: stage.conversationId,
+            originTurnId: stage.turnId,
+            action: "test.supersede",
+            payload: { to },
+            summary: `message ${to}`,
+          });
+        const old = await ask("tomer");
+        const other = await ask("dana");
+        const fresh = await ask("tomer");
+        const status = async (id: string) =>
+          await db.actionApproval.findUniqueOrThrow({
+            where: { id },
+            select: { status: true, reason: true },
+          });
+        expect(await status(old.id)).toEqual({
+          status: "expired",
+          reason: "Replaced by a newer request.",
+        });
+        expect((await status(other.id)).status).toBe("pending");
+        expect((await status(fresh.id)).status).toBe("pending");
+        // Quiet: no outcome notice for the superseded one.
+        expect(
+          await db.turnEvent.count({
+            where: { turnId: stage.turnId, type: "notice" },
+          }),
+        ).toBe(0);
+      } finally {
+        approvals.unregisterActionHandler("test.supersede");
+      }
+    });
+
+    it("deciding an ask supersedes OLDER pending asks of the same key; the decide returns the handler's note", async () => {
+      const stage = await seedStage("supersede-decide");
+      approvals.registerActionHandler(
+        "test.supersede2",
+        async () => "Sent to Sam.",
+        {
+          supersedeKey: () => "same",
+        },
+      );
+      try {
+        const old = await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.supersede2",
+          payload: {},
+          summary: "one",
+        });
+        // Simulate an older ask that escaped the create-time pass (e.g. created
+        // concurrently): put it back to pending, then decide the newer one.
+        const fresh = await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.supersede2",
+          payload: {},
+          summary: "two",
+        });
+        await db.actionApproval.update({
+          where: { id: old.id },
+          data: { status: "pending", reason: null },
+        });
+        const out = await approvals.decideActionApproval({
+          approvalId: fresh.id,
+          decision: "approve",
+          deciderUserId: OWNER,
+        });
+        expect(out).toMatchObject({
+          kind: "decided",
+          status: "executed",
+          note: "Sent to Sam.",
+        });
+        const row = await db.actionApproval.findUniqueOrThrow({
+          where: { id: old.id },
+          select: { status: true },
+        });
+        expect(row.status).toBe("expired");
+      } finally {
+        approvals.unregisterActionHandler("test.supersede2");
+      }
+    });
+
+    it("a personal card goes to the decider's Slack DM, found from the link when the payload has no Slack id; a dmLink card is a URL button", async () => {
+      const stage = await seedStage("personal-dm");
+      approvals.registerActionHandler("test.personal", async () => {}, {
+        decidedBy: () => ({ userId: OWNER, externalUserId: "" }),
+        dmLink: (_p, ctx) => ({
+          url: `https://app.example/w/${ctx.workspaceId}/agents/${ctx.agentId}/contacts?connect=slack`,
+          label: "Connect your Slack",
+          note: "Connecting happens in OneCLI.",
+        }),
+      });
+      try {
+        await approvals.requestActionApproval({
+          agentId: stage.agentId,
+          action: "test.personal",
+          payload: {},
+          summary: "connect your Slack",
+        });
+        const posts = slackCallsFor("chat.postMessage");
+        expect(posts).toHaveLength(1);
+        expect(
+          slackCallsFor("conversations.open").at(-1)?.form.get("users"),
+        ).toBe("U-OWNER");
+        const blocks = posts[0]!.form.get("blocks") ?? "";
+        expect(blocks).toContain("?connect=slack");
+        expect(blocks).toContain("Connect your Slack");
+        expect(blocks).not.toContain("action_approve");
+      } finally {
+        approvals.unregisterActionHandler("test.personal");
+      }
+    });
+  },
+);

@@ -5,8 +5,23 @@
 # Stage 1a: Install cargo-chef
 # ──────────────────────────────────────────────
 FROM rust:1.97-alpine3.24 AS chef
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static \
+# clang-dev: pg_query (the database front door's SQL parser) compiles
+# PostgreSQL's parser from C and generates its bindings with bindgen, which
+# loads libclang from its build script. Build-stage only.
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static clang-dev \
   && cargo install cargo-chef --version 0.1.78 --locked
+# Rust links musl executables statically by default, and a static
+# executable cannot load a shared library: bindgen's build script would fail
+# to open libclang ("Dynamic loading not supported"). Build scripts cannot be
+# given flags of their own on stable Cargo, so the whole build links musl
+# dynamically; the runtime image (Alpine, musl itself) provides the C
+# runtime. OpenSSL stays statically linked: naming its directories makes
+# openssl-sys skip pkg-config (which links anything under /usr dynamically)
+# and honour OPENSSL_STATIC.
+ENV RUSTFLAGS="-C target-feature=-crt-static" \
+    OPENSSL_STATIC=1 \
+    OPENSSL_LIB_DIR=/usr/lib \
+    OPENSSL_INCLUDE_DIR=/usr/include
 WORKDIR /build
 
 # ──────────────────────────────────────────────
@@ -35,7 +50,8 @@ FROM alpine:3.24 AS runner
 LABEL org.opencontainers.image.licenses="Apache-2.0 AND LicenseRef-OneCLI-Enterprise"
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates
+# libgcc: the unwinder the dynamically linked gateway loads (see the builder).
+RUN apk add --no-cache ca-certificates libgcc
 
 # Build version read by the gateway at runtime (empty → gateway falls back to
 # its compile-time crate version).

@@ -25,7 +25,7 @@ scenario("approve releases the held in-sandbox request", async (cx) => {
   await seedTenant(cx.prisma, cx.ids);
   await seedHostedAgent(cx.prisma, cx.ids, { runnerId: stack.runner.runnerId });
   await seedAnthropicGrant(cx.prisma, cx.ids, {
-    hostPattern: "127.0.0.1",
+    hostPattern: upstream.host,
     requireApproval: true,
   });
   stack.runner.pump();
@@ -39,7 +39,7 @@ scenario("approve releases the held in-sandbox request", async (cx) => {
     stack.v1,
     conversation.id,
     fakeDirective([
-      http(`https://127.0.0.1:${upstream.port}/held`, {
+      http(upstream.url("/held"), {
         headers: { "x-api-key": "placeholder" },
         timeoutMs: 60_000,
       }),
@@ -79,7 +79,7 @@ scenario(
       runnerId: stack.runner.runnerId,
     });
     await seedAnthropicGrant(cx.prisma, cx.ids, {
-      hostPattern: "127.0.0.1",
+      hostPattern: upstream.host,
       requireApproval: true,
     });
     stack.runner.pump();
@@ -91,7 +91,7 @@ scenario(
       stack.v1,
       conversation.id,
       fakeDirective([
-        http(`https://127.0.0.1:${upstream.port}/held`, {
+        http(upstream.url("/held"), {
           headers: { "x-api-key": "placeholder" },
           timeoutMs: 60_000,
         }),

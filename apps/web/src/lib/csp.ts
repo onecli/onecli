@@ -1,13 +1,13 @@
 /**
  * Content-Security-Policy for the cloud dashboard (OC-01).
  *
- * The CSP moved from a static CloudFront ResponseHeadersPolicy row into the
- * app so `script-src` can drop `'unsafe-inline'` / `'unsafe-eval'` in favor
+ * The CSP lives in the app (not a static edge header) so `script-src` can
+ * drop `'unsafe-inline'` / `'unsafe-eval'` in favor
  * of a per-request nonce: Next.js reads the request's CSP header during SSR
  * and stamps the nonce onto every framework, chunk, and inline script it
  * emits — something a static edge header can never do. `proxy.ts` generates
  * the nonce, threads it to the layout via `x-nonce`, and mirrors the header
- * onto the response; the CloudFront policy no longer carries a CSP row.
+ * onto the response.
  *
  * Env access is a literal dot read at call time (the public-origins rules):
  * Next.js can only inline `NEXT_PUBLIC_*` literals, and tests stub env per
@@ -23,7 +23,7 @@ export const createCspNonce = (): string => {
 
 /**
  * The full policy, one nonce per request. Every directive except
- * `script-src` is byte-equivalent to the retired CloudFront row; the
+ * `script-src` is byte-equivalent to the previous static policy; the
  * api/auth hosts are resolved instead of hardcoded so dev and prod both get
  * their own domains.
  */
@@ -32,6 +32,14 @@ export const buildCsp = (nonce: string): string => {
   // stacks in the browser); production drops it entirely — neither React nor
   // Next.js uses eval in a production build.
   const isDev = process.env.NODE_ENV === "development";
+
+  // Human verification on the signup form (Cloudflare Turnstile): its script
+  // and its challenge iframe both come from this origin. Only when a sitekey
+  // is configured, so a deployment without the widget keeps the narrower
+  // policy. Literal read: Next.js inlines NEXT_PUBLIC_* into the build.
+  const turnstileOrigin = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim()
+    ? ["https://challenges.cloudflare.com"]
+    : [];
 
   // CSP3 browsers enforce the nonce + 'strict-dynamic' and ignore the host
   // allowlist; the hosts stay as the fallback for older CSP2 browsers, so no
@@ -45,6 +53,7 @@ export const buildCsp = (nonce: string): string => {
     "https://js.stripe.com",
     "https://t.1cli.sh",
     "https://cdn.usefathom.com",
+    ...turnstileOrigin,
   ];
 
   // Bare Cognito hosted-UI domain (e.g. auth.onecli.sh) — the same value
@@ -53,11 +62,23 @@ export const buildCsp = (nonce: string): string => {
     process.env.COGNITO_DOMAIN?.trim() ||
     process.env.NEXT_PUBLIC_COGNITO_DOMAIN?.trim();
 
+  // The sandbox preview zone: the agent's screen streams over a WebSocket
+  // straight to `wss://<share>.<zone>`, so the zone's hosts must be
+  // connectable. `wss:` only (a page there is still a navigation, never a
+  // fetch from here), and only the zone the deployment configures.
+  // Absent = dark.
+  const previewDomain = process.env.PREVIEW_DOMAIN?.trim().toLowerCase();
+  const previewZone =
+    previewDomain && /^[a-z0-9.-]+$/.test(previewDomain)
+      ? [`wss://*.${previewDomain}`]
+      : [];
+
   const connectSrc = [
     "'self'",
     // One entry when the gateway rides the api origin (cloud does).
     ...new Set([apiOrigin(), gatewayHttpOrigin()]),
     ...(cognitoDomain ? [`https://${cognitoDomain}`] : []),
+    ...previewZone,
     "https://*.amazoncognito.com",
     "https://*.auth.us-east-1.amazoncognito.com",
     "https://cognito-idp.us-east-1.amazonaws.com",
@@ -71,9 +92,11 @@ export const buildCsp = (nonce: string): string => {
     `script-src ${scriptSrc.join(" ")}`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data: blob: https:",
+    // The API's own origin too: agent avatars are served from it, and on a
+    // local or self-hosted http deployment `https:` alone blocks them.
+    `img-src 'self' data: blob: https: ${apiOrigin()}`,
     `connect-src ${connectSrc.join(" ")}`,
-    "frame-src https://js.stripe.com",
+    `frame-src ${["https://js.stripe.com", ...turnstileOrigin].join(" ")}`,
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

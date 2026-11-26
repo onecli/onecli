@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { AttachParamDialog } from "./_components/attach-param-dialog";
+import { AttachParamDialog } from "../_components/attach-param-dialog";
 import { DirectThreadSection } from "./_components/direct-thread-section";
 
 export const metadata: Metadata = {
@@ -13,9 +13,7 @@ export const metadata: Metadata = {
 export default function AgentChatPage() {
   return (
     <>
-      {/* Suspense: useSearchParams (the onboarding `?hello=1` greeting flag).
-          The section renders its own skeleton while its queries resolve, so
-          the boundary needs no fallback of its own. */}
+      {/* Suspense: the section reads `?draft=` (useSearchParams). */}
       <Suspense>
         <DirectThreadSection />
       </Suspense>

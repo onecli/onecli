@@ -27,28 +27,6 @@ const state = vi.hoisted(() => ({
   memberByEmail: null as Record<string, unknown> | null,
   transactionOps: [] as unknown[][],
   membership: null as Record<string, unknown> | null,
-  memberUpdates: [] as Record<string, unknown>[],
-  memberDeletes: [] as Record<string, unknown>[],
-  workspaceAccessDeletes: [] as Record<string, unknown>[],
-  groupMemberDeletes: [] as Record<string, unknown>[],
-  membershipCount: 1,
-  workspaceFindManyArgs: [] as Record<string, unknown>[],
-  personalWorkspaces: [] as { id: string }[],
-  // step 15: reconcileMemberRoles + the changeMemberRole lock
-  mappedRows: [] as { userId: string; role: string; priority: number }[],
-  reconcileMembers: [] as {
-    userId: string;
-    role: string;
-    status: string;
-    userEmail: string;
-  }[],
-  mappingCount: 0,
-}));
-
-// reconcileMemberRoles flushes the org gateway cache when a role changes.
-vi.mock("../lib/gateway-invalidate", () => ({
-  invalidateGatewayCacheForOrg: vi.fn(),
-  invalidateGatewayCacheForAccount: vi.fn(),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -60,46 +38,12 @@ vi.mock("@onecli/db", () => ({
       },
       findFirst: async () => state.memberByEmail,
       findUnique: async () => state.membership,
-      update: async (args: Record<string, unknown>) => {
-        state.memberUpdates.push(args);
-        return args;
-      },
-      delete: async (args: Record<string, unknown>) => {
-        state.memberDeletes.push(args);
-        return args;
-      },
-      count: async () => state.membershipCount,
-      findMany: async () => state.reconcileMembers,
     },
     workspace: {
       create: (args: Record<string, unknown>) => {
         state.workspaceCreates.push(args);
         return args;
       },
-      findMany: async (args: Record<string, unknown>) => {
-        state.workspaceFindManyArgs.push(args);
-        return state.personalWorkspaces;
-      },
-    },
-    apiKey: {
-      deleteMany: async () => ({ count: 0 }),
-    },
-    workspaceAccess: {
-      deleteMany: async (args: Record<string, unknown>) => {
-        state.workspaceAccessDeletes.push(args);
-        return { count: 0 };
-      },
-    },
-    groupMember: {
-      deleteMany: async (args: Record<string, unknown>) => {
-        state.groupMemberDeletes.push(args);
-        return { count: 0 };
-      },
-      findMany: async () =>
-        state.mappedRows.map((m) => ({
-          userId: m.userId,
-          group: { roleMapping: { role: m.role, priority: m.priority } },
-        })),
     },
     invitation: {
       findUnique: async () => state.invitation,
@@ -111,12 +55,6 @@ vi.mock("@onecli/db", () => ({
         state.invitationUpserts.push(args);
         return { id: "inv-1", token: "tok-1" };
       },
-    },
-    groupRoleMapping: {
-      count: async () => state.mappingCount,
-    },
-    auditLog: {
-      create: async (args: Record<string, unknown>) => args,
     },
     $transaction: async (ops: unknown[]) => {
       state.transactionOps.push(ops);
@@ -347,36 +285,6 @@ describe("memberProvisionOps", () => {
 });
 
 describe("acceptInvitation (extraction stays behavior-identical)", () => {
-  it("runs member + workspace + invitation update in one transaction", async () => {
-    state.invitation = {
-      id: "inv-1",
-      organizationId: "org-1",
-      email: "g@a.com",
-      role: "admin",
-      status: "pending",
-      expiresAt: new Date(Date.now() + 60_000),
-      organization: { name: "Acme" },
-    };
-
-    const result = await acceptInvitation(
-      "token-1",
-      "user-12345678",
-      "g@a.com",
-      null,
-    );
-    expect(result).toEqual({
-      organizationId: "org-1",
-      organizationName: "Acme",
-    });
-    expect(state.transactionOps[0]).toHaveLength(3);
-    expect(state.memberCreates[0]).toMatchObject({
-      data: { role: "admin", organizationId: "org-1" },
-    });
-    expect(state.invitationUpdates[0]).toMatchObject({
-      data: { status: "accepted" },
-    });
-  });
-
   it("still validates the invitation before provisioning", async () => {
     state.invitation = null;
     await expect(

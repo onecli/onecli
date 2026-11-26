@@ -8,7 +8,12 @@
 
 import { capabilitiesFor, parseEdition } from "./edition";
 import { isEntitled } from "./entitlements";
-import { firstConfigured, gatewayHttpOrigin } from "./public-origins";
+import { sandboxTimezoneSchema } from "../validations/timezone";
+import {
+  firstConfigured,
+  apiOrigin,
+  gatewayHttpOrigin,
+} from "./public-origins";
 
 // ── App URLs ────────────────────────────────────────────────────────────
 //
@@ -27,6 +32,17 @@ import { firstConfigured, gatewayHttpOrigin } from "./public-origins";
  */
 export const getGatewayInternalUrl = (): string =>
   firstConfigured(process.env.GATEWAY_INTERNAL_URL) ?? gatewayHttpOrigin();
+
+/**
+ * Server-side address of the api (the dashboard's forward of form submits on
+ * its own `/auth/<page>` paths): the same shape as the gateway's. An explicit
+ * internal override for layouts where the public URL isn't routable from the
+ * dashboard process (compose and the Helm chart point it at the api service),
+ * else the public api origin. An origin only (`scheme://host[:port]`): any
+ * path on it is dropped when the forward joins its own.
+ */
+export const getApiInternalUrl = (): string =>
+  firstConfigured(process.env.API_INTERNAL_URL) ?? apiOrigin();
 
 // ── Edition ─────────────────────────────────────────────────────────────
 
@@ -150,16 +166,44 @@ export const RUNNER_TOKEN = process.env.RUNNER_TOKEN ?? "";
  */
 export const CHANNEL_ADAPTER_TOKEN = process.env.CHANNEL_ADAPTER_TOKEN ?? "";
 
-// ── SSH front door (plans/sandbox-platform.md step 5) ─────────────────────
+/**
+ * The object-storage arm of the attachment blob store (an ENTERPRISE feature:
+ * `ee/attachments/s3-blob-store.ts`). Set to a bucket name and, on an
+ * entitled deployment, NEW attachment bytes go to S3 and downloads become
+ * presigned URLs; unset (or unlicensed) keeps the inline-Postgres arm, which
+ * self-host runs by default. Credentials come from the SDK's default chain,
+ * never from env. Rows already written inline keep
+ * reading from Postgres — the two arms coexist per row (`storageRef`).
+ */
+export const ATTACHMENTS_S3_BUCKET = process.env.ATTACHMENTS_S3_BUCKET ?? "";
+
+// ── SSH front door ─────────────────────────────────────────────────────────
 
 /**
  * The terminator's service secret — the narrow terminator↔control-plane
- * channel (§3.8's pre-authorized fallback). Presenting exactly this value
+ * channel. Presenting exactly this value
  * authorizes `/v1/ssh-terminator/*` and NOTHING else; empty means the
  * surface refuses everything (the RUNNER_TOKEN dark posture). Never the
- * runner↔manager secret, never a DB token family — one credential per plane.
+ * runner's secret, never a DB token family — one credential per plane.
  */
 export const SSH_TERMINATOR_SECRET = process.env.SSH_TERMINATOR_SECRET ?? "";
+
+/**
+ * Sandbox ports (plans/sandbox-ports.md). Both empty = the whole preview
+ * surface is dark (routes 404, nothing is ever dialable).
+ * - PREVIEW_DOMAIN: the deployment's preview zone (e.g. "preview.example.com");
+ *   hostnames are `<slug>.<PREVIEW_DOMAIN>`.
+ * - PREVIEW_RELAY_SECRET: the relay↔api service secret. Authorizes
+ *   `/v1/preview-relay/*` and signs login-handoff tickets; nothing else
+ *   (one credential per plane, the terminator shape).
+ * The api holds no runner credential: the runner pulls its port allowlist
+ * over its own `rnr_` channel, and only the relay holds the runner's port
+ * API token.
+ */
+export const PREVIEW_DOMAIN = (process.env.PREVIEW_DOMAIN ?? "")
+  .trim()
+  .toLowerCase();
+export const PREVIEW_RELAY_SECRET = process.env.PREVIEW_RELAY_SECRET ?? "";
 
 /**
  * KMS asymmetric CA key (cloud): when set, `ensureEditionDefaults()` injects
@@ -171,7 +215,7 @@ export const SSH_CA_KMS_KEY_ARN = process.env.SSH_CA_KMS_KEY_ARN ?? "";
 /** Onprem CA: an ed25519 PKCS#8 PEM private key. Unset = surface dark. */
 export const SSH_CA_PRIVATE_KEY = process.env.SSH_CA_PRIVATE_KEY ?? "";
 
-/** Public SSH endpoint host (e.g. `ssh-dev.onecli.sh`). Unset = surface dark. */
+/** Public SSH endpoint host (e.g. `ssh.example.com`). Unset = surface dark. */
 export const SSH_HOST = process.env.SSH_HOST ?? "";
 
 const positiveInt = (raw: string | undefined, fallback: number): number => {
@@ -180,9 +224,9 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 };
 
 /**
- * Public SSH endpoint PORT. Default 22 — cloud fronts the terminator with an
- * NLB on :22, so the advertised port and the generated connect command stay
- * exactly as before. Self-host publishes an unprivileged high port instead
+ * Public SSH endpoint PORT. Default 22, so the advertised port and the
+ * generated connect command stay plain. Self-host publishes an unprivileged
+ * high port instead
  * (a default-on listener cannot bind :22), which the client honors via
  * `ssh -p`.
  */
@@ -263,8 +307,8 @@ export const EGRESS_REGION = firstConfigured(process.env.EGRESS_REGION) ?? null;
  * (VS Code Remote opens the server bootstrap plus a probe connection, and
  * without ControlMaster each window adds one), one or two hand terminals, and
  * a transient `scp`/`sftp` already reaches five. The earlier ceiling of 3
- * refused a single developer mid-workflow on the dev live gate. Each session
- * costs one ServiceAccount/Role/RoleBinding plus one exec stream, so the real
+ * refused a single developer mid-workflow in live testing. Each session
+ * costs a scoped credential plus one exec stream, so the real
  * protections are the terminator's global and per-IP caps — this one only
  * stops one agent from being used as an unbounded fan-out.
  */
@@ -308,6 +352,18 @@ export const SANDBOX_IDLE_STOP_SECONDS = positiveInt(
 );
 
 /**
+ * How long BACKGROUND work alone (a busy process, an agent-armed watch) may
+ * hold a sandbox past the idle window, measured from the last engagement by
+ * a person or a turn (`sandboxes.last_engaged_at`). A message or a turn
+ * restarts the clock, so a person is never cut off; a forgotten job cannot
+ * hold a box for days. Clamps agent-armed watch expiries too.
+ */
+export const SANDBOX_BACKGROUND_CAP_SECONDS = positiveInt(
+  process.env.SANDBOX_BACKGROUND_CAP_SECONDS,
+  12 * 3600,
+);
+
+/**
  * Wall-clock backstop on a single turn, from when it was posted. Liveness is
  * the stall clock below (a wedged turn dies in minutes, not hours); this
  * bound only exists so a live-but-runaway agent cannot burn tokens forever,
@@ -347,6 +403,24 @@ export const TURN_STALL_SECONDS = positiveInt(
 );
 
 /**
+ * How long a turn may sit `dispatched` before it is handed out again.
+ *
+ * Much shorter than the sandbox claim window, because `dispatched` is a
+ * narrow state: the runner writes the turn to a live socket and the harness
+ * emits `turn.started` at once, which moves it to `running`. Still sitting
+ * here a minute later means it went into a socket that died on the way (a
+ * real race while a sandbox is reconnecting) and the turn is simply lost
+ * until someone re-dispatches it. Sharing the 5-minute sandbox window made
+ * that a five-minute silence for the user; a `running` turn is unaffected,
+ * so a slow model is never interrupted by this. Tunable so an end-to-end
+ * proof can run several windows inside a short wait.
+ */
+export const STALE_DISPATCH_SECONDS = positiveInt(
+  process.env.STALE_DISPATCH_SECONDS,
+  90,
+);
+
+/**
  * Operator override for the per-runner held-awake ceiling (§3.9 / step 13):
  * how many sandboxes live background work may hold out of idle-stop at once.
  * Unset/invalid = null = the derived default, `max(1, maxSandboxes − 1)` per
@@ -355,14 +429,35 @@ export const TURN_STALL_SECONDS = positiveInt(
  * ceiling exists because unbounded keep-awake is a legitimate-usage path to
  * wedging the host (plans/v2-todo.md, release blocker).
  */
-const optionalPositiveInt = (raw: string | undefined): number | null => {
+export const parseHeldAwakeOverride = (
+  raw: string | undefined,
+): number | null => {
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
-export const MAX_HELD_AWAKE_SANDBOXES = optionalPositiveInt(
+export const MAX_HELD_AWAKE_SANDBOXES = parseHeldAwakeOverride(
   process.env.MAX_HELD_AWAKE_SANDBOXES,
 );
+
+/**
+ * The IANA zone a hosted agent's sandbox runs in when its workspace has not
+ * chosen one (the sandbox `TZ`). Unset = this server's own zone, which is
+ * what a self-host expects; a hosted deployment pins it so every sandbox
+ * agrees with the egress identity it browses from. Both pass the same
+ * sandbox-tier check as the workspace setting (a zone the container can
+ * resolve as a file), and `UTC` is the floor when neither does.
+ */
+export const SANDBOX_DEFAULT_TIMEZONE: string = (() => {
+  for (const candidate of [
+    process.env.SANDBOX_DEFAULT_TIMEZONE,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  ]) {
+    const parsed = sandboxTimezoneSchema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+  }
+  return "UTC";
+})();
 
 // ── Logging & Runtime ───────────────────────────────────────────────────
 

@@ -108,6 +108,8 @@ const decodeTarget = (
           connectionId: id,
           provider,
           tools: target.appTools,
+          // The catch-all split's method narrowing; absent on every other row.
+          ...(target.method ? { method: target.method } : {}),
         };
       }
       return {

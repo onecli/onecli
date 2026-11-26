@@ -26,13 +26,12 @@ export default async function TeamPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-6">
-      <div className="flex items-center justify-between gap-4">
-        <PageHeader
-          title="Members"
-          description="Manage members and roles for your organization."
-        />
-        {isAdmin && <InviteButton />}
-      </div>
+      <PageHeader
+        title="Members"
+        character="drop-cheer"
+        description="Manage members and roles for your organization."
+        action={isAdmin && <InviteButton />}
+      />
 
       {isAdmin && members.length >= 2 && !isPlanAtLeast(plan, "team") && (
         <TeamUpgradeBanner />

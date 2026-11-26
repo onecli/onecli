@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use approval::{
     unix_now, ApprovalDecision, ApprovalStore, DecisionOutcome, DecisionReceiver, DecisionWait,
-    PendingApproval,
+    DecisionWaitError, NewApprovalReceiver, NewApprovalWait, PendingApproval,
 };
 
 /// TTL for Redis keys — approval timeout + buffer.
@@ -30,18 +30,21 @@ struct RedisDecisionWait {
 
 #[async_trait]
 impl DecisionWait for RedisDecisionWait {
-    async fn wait(self: Box<Self>, timeout: Duration) -> Option<DecisionOutcome> {
+    async fn wait(
+        self: Box<Self>,
+        timeout: Duration,
+    ) -> Result<Option<DecisionOutcome>, DecisionWaitError> {
         wait_redis(self.client, self.key, timeout).await
     }
 }
 
 /// BLPOP wait on a dedicated connection.
-/// Returns `None` on timeout or connection failure.
+/// Only a successful BLPOP timeout is expiry. Transport and payload errors fail closed.
 async fn wait_redis(
     client: redis::Client,
     key: String,
     timeout: Duration,
-) -> Option<DecisionOutcome> {
+) -> Result<Option<DecisionOutcome>, DecisionWaitError> {
     // Create a dedicated connection with response_timeout matching the
     // BLPOP wait. The default MultiplexedConnection times out after 500ms,
     // but BLPOP blocks for up to `timeout` seconds. We add 10s buffer so
@@ -58,7 +61,7 @@ async fn wait_redis(
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, key = %key, "failed to connect for BLPOP");
-            return None;
+            return Err(DecisionWaitError::Connection);
         }
     };
 
@@ -70,45 +73,93 @@ async fn wait_redis(
         .query_async(&mut conn)
         .await;
 
+    decode_wait_result(result, &key)
+}
+
+fn decode_wait_result(
+    result: redis::RedisResult<Option<(String, String)>>,
+    key: &str,
+) -> Result<Option<DecisionOutcome>, DecisionWaitError> {
     match result {
         Ok(Some((_key, value))) => {
-            // New payload is a JSON DecisionOutcome; fall back to the legacy
-            // bare "approve"/"deny" string for rolling-deploy compatibility.
-            if let Ok(outcome) = serde_json::from_str::<DecisionOutcome>(&value) {
-                info!(key = %key, "BLPOP received decision");
-                Some(outcome)
-            } else {
-                match value.as_str() {
-                    "approve" => {
-                        info!(key = %key, decision = "approve", "BLPOP received legacy decision");
-                        Some(DecisionOutcome {
-                            decision: ApprovalDecision::Approve,
-                            approved_by: None,
-                        })
-                    }
-                    "deny" => {
-                        info!(key = %key, decision = "deny", "BLPOP received legacy decision");
-                        Some(DecisionOutcome {
-                            decision: ApprovalDecision::Deny,
-                            approved_by: None,
-                        })
-                    }
-                    _ => {
-                        warn!(value = %value, "unexpected approval decision value");
-                        None
-                    }
+            // Keep both JSON and pre-attribution bare decisions readable during
+            // rolling deploys. Missing attribution never implies expiry.
+            let outcome = serde_json::from_str::<DecisionOutcome>(&value).or_else(|_| {
+                let decision = match value.as_str() {
+                    "approve" => ApprovalDecision::Approve,
+                    "deny" => ApprovalDecision::Deny,
+                    _ => return Err(DecisionWaitError::InvalidDecision),
+                };
+                Ok(DecisionOutcome {
+                    decision,
+                    approved_by: None,
+                    reason: None,
+                })
+            });
+            match outcome {
+                Ok(outcome) => {
+                    info!(key, "BLPOP received decision");
+                    Ok(Some(outcome))
+                }
+                Err(error) => {
+                    // Never log the untrusted payload (it may contain secrets).
+                    warn!(key, %error, "invalid approval decision");
+                    Err(error)
                 }
             }
         }
         Ok(None) => {
-            info!(key = %key, "BLPOP timed out — no decision received");
-            None
+            info!(key, "BLPOP timed out without a decision");
+            Ok(None)
         }
         Err(e) => {
-            warn!(error = %e, key = %key, "BLPOP failed");
-            None
+            warn!(error = %e, key, "BLPOP failed");
+            Err(DecisionWaitError::Receive)
         }
     }
+}
+
+// ── New-approval subscription ─────────────────────────────────────────────
+
+/// A pub/sub subscription on its own connection (SUBSCRIBE blocks the
+/// connection). `None` when it could not be opened: the wait then answers
+/// `false` at once, as before. Once `subscribe` has returned, the server
+/// delivers every later PUBLISH to this connection, and the stream buffers
+/// it until `wait` reads it, so a store between the subscribe and the wait
+/// is not lost.
+struct RedisNewApprovalWait {
+    stream: Option<redis::aio::PubSubStream>,
+    channel: String,
+}
+
+#[async_trait]
+impl NewApprovalWait for RedisNewApprovalWait {
+    async fn wait(self: Box<Self>, timeout: Duration) -> bool {
+        let Some(mut stream) = self.stream else {
+            return false;
+        };
+        let notified = matches!(
+            tokio::time::timeout(timeout, stream.next()).await,
+            Ok(Some(_))
+        );
+        debug!(channel = %self.channel, notified, "approval long-poll completed");
+        notified
+    }
+}
+
+/// Open a dedicated pub/sub connection subscribed to `channel`.
+async fn subscribe_channel(channel: String) -> NewApprovalReceiver {
+    let stream = async {
+        let client = redis::Client::open(super::redis_url_from_env().as_str()).ok()?;
+        let mut pubsub = client.get_async_pubsub().await.ok()?;
+        pubsub.subscribe(&channel).await.ok()?;
+        Some(pubsub.into_on_message())
+    }
+    .await;
+    if stream.is_none() {
+        warn!(channel = %channel, "approval long-poll: redis subscribe failed");
+    }
+    Box::new(RedisNewApprovalWait { stream, channel })
 }
 
 // ── Redis implementation ───────────────────────────────────────────────
@@ -343,67 +394,23 @@ impl ApprovalStore for RedisApprovalStore {
         debug!(approval_id = %id, "approval removed from Redis");
     }
 
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool {
-        // Use a separate connection for SUBSCRIBE (it blocks the connection).
-        let client = match redis::Client::open(super::redis_url_from_env().as_str()) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(ps) => ps,
-            Err(_) => return false,
-        };
-
-        let channel = format!("approval:new:{org_id}:{workspace_id}");
-        if pubsub.subscribe(&channel).await.is_err() {
-            return false;
-        }
-
-        let notified = matches!(
-            tokio::time::timeout(timeout, pubsub.into_on_message().next()).await,
-            Ok(Some(_))
-        );
-        debug!(org_id = %org_id, workspace_id = %workspace_id, notified, "approval long-poll completed");
-        notified
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver {
+        subscribe_channel(format!("approval:new:{org_id}:{workspace_id}")).await
     }
 
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
-        // Use a separate connection for SUBSCRIBE (it blocks the connection).
-        let client = match redis::Client::open(super::redis_url_from_env().as_str()) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(ps) => ps,
-            Err(_) => return false,
-        };
-
-        let channel = format!("approval:new:{org_id}");
-        if pubsub.subscribe(&channel).await.is_err() {
-            return false;
-        }
-
-        let notified = matches!(
-            tokio::time::timeout(timeout, pubsub.into_on_message().next()).await,
-            Ok(Some(_))
-        );
-        debug!(org_id = %org_id, notified, "org approval long-poll completed");
-        notified
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver {
+        subscribe_channel(format!("approval:new:{org_id}")).await
     }
 
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         org_id: &str,
         workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool {
         let mut conn = self.conn.clone();
-        let outcome = DecisionOutcome {
-            decision,
-            approved_by,
-        };
+        let decision = outcome.decision;
         let value = match serde_json::to_string(&outcome) {
             Ok(v) => v,
             Err(e) => {
@@ -444,4 +451,136 @@ pub async fn redis_approval_store() -> anyhow::Result<Arc<dyn ApprovalStore>> {
         .await
         .context("connecting the Redis approval store")?;
     Ok(Arc::new(store))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn decision_payloads_preserve_json_and_legacy_attribution_contracts() {
+        for (payload, decision, approved_by) in [
+            ("approve", ApprovalDecision::Approve, None),
+            ("deny", ApprovalDecision::Deny, None),
+            (r#"{"decision":"deny"}"#, ApprovalDecision::Deny, None),
+            (
+                r#"{"decision":"approve","approved_by":"user-7"}"#,
+                ApprovalDecision::Approve,
+                Some("user-7"),
+            ),
+        ] {
+            assert_eq!(
+                decode_wait_result(Ok(Some(("key".into(), payload.into()))), "key"),
+                Ok(Some(DecisionOutcome {
+                    decision,
+                    approved_by: approved_by.map(str::to_owned),
+                    reason: None,
+                }))
+            );
+        }
+        for payload in [
+            "",
+            "unknown",
+            "{",
+            r#"{"decision":"expired"}"#,
+            r#"{"decision":"deny","approved_by":42}"#,
+        ] {
+            assert_eq!(
+                decode_wait_result(Ok(Some(("key".into(), payload.into()))), "key"),
+                Err(DecisionWaitError::InvalidDecision)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_failure_is_not_expiry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            redis::Client::open(format!("redis://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_redis(client, "key".into(), Duration::from_secs(180)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Err(DecisionWaitError::Connection));
+        server.await.unwrap();
+    }
+
+    // A private RESP peer exercises the real Redis connection and BLPOP path.
+    // It acknowledges connection setup, then returns the supplied BLPOP reply.
+    // No shared Redis instance, destructive command, or production timeout edit.
+    async fn wait_with_reply(
+        reply: &'static [u8],
+    ) -> Result<Option<DecisionOutcome>, DecisionWaitError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            redis::Client::open(format!("redis://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            loop {
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                let count: usize = line.strip_prefix('*').unwrap().trim().parse().unwrap();
+                let mut command = Vec::new();
+                for _ in 0..count {
+                    line.clear();
+                    socket.read_line(&mut line).await.unwrap();
+                    let len: usize = line.strip_prefix('$').unwrap().trim().parse().unwrap();
+                    let mut arg = vec![0; len + 2];
+                    socket.read_exact(&mut arg).await.unwrap();
+                    arg.truncate(len);
+                    command.push(arg);
+                }
+                if command[0].eq_ignore_ascii_case(b"BLPOP") {
+                    assert_eq!(command[1], b"key");
+                    assert_eq!(command[2], b"180");
+                    socket.get_mut().write_all(reply).await.unwrap();
+                    return;
+                }
+                socket.get_mut().write_all(b"+OK\r\n").await.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_redis(client, "key".into(), Duration::from_secs(180)),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn blpop_nil_is_expiry() {
+        assert_eq!(wait_with_reply(b"*-1\r\n").await, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn blpop_malformed_payload_is_not_expiry() {
+        assert_eq!(
+            wait_with_reply(b"*2\r\n$3\r\nkey\r\n$14\r\nnot-a-decision\r\n").await,
+            Err(DecisionWaitError::InvalidDecision)
+        );
+    }
+
+    #[tokio::test]
+    async fn blpop_server_error_is_not_expiry() {
+        assert_eq!(
+            wait_with_reply(b"-ERR test failure\r\n").await,
+            Err(DecisionWaitError::Receive)
+        );
+    }
+
+    #[tokio::test]
+    async fn blpop_disconnect_is_not_expiry() {
+        assert_eq!(wait_with_reply(b"").await, Err(DecisionWaitError::Receive));
+    }
 }

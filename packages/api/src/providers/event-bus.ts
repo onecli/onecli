@@ -3,7 +3,7 @@ import { createEditionSlot } from "./edition-state";
 
 // Edition default: cloud injects a Redis pub/sub bus (by `ensureEditionDefaults()`
 // — the ioredis-backed module must never enter a client bundle, so it is not
-// imported here) so a publish on one api pod reaches an SSE stream held on
+// imported here) so a publish on one api instance reaches an SSE stream held on
 // another; onprem — one api instance — uses the in-process emitter.
 // `initEventBus` remains as a test seam (null resets to the edition default).
 //

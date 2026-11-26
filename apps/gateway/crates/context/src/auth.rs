@@ -164,6 +164,29 @@ pub struct AuthUser {
     pub auth_method: String,
 }
 
+/// Apply the existing control-plane role policy after SQL tenant fencing.
+/// SQL tenant fencing and key-scope checks remain the caller's responsibility.
+pub async fn can_test_connection(
+    pool: &PgPool,
+    user_id: &str,
+    workspace_id: Option<&str>,
+    organization_id: &str,
+) -> anyhow::Result<bool> {
+    match (ROLE_RESOLVER.get(), workspace_id) {
+        (Some(resolver), None) => {
+            resolver
+                .user_is_org_admin(pool, user_id, organization_id)
+                .await
+        }
+        (Some(resolver), Some(workspace_id)) => {
+            resolver
+                .user_can_manage_workspace(pool, user_id, workspace_id)
+                .await
+        }
+        (None, _) => Ok(true),
+    }
+}
+
 impl FromRequestParts<GatewayState> for AuthUser {
     type Rejection = AuthError;
 

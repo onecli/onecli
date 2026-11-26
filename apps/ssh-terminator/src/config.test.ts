@@ -181,7 +181,7 @@ describe("loadTerminatorConfig — substrate selection", () => {
     expect(config.backend.kind).toBe("docker");
   });
 
-  // The anti-misfence guard: a cloud pod that loses its manager URL must
+  // The anti-misfence guard: a deployed terminator that loses its broker URL must
   // still select kube and refuse loud — never silently boot a docker arm
   // with no socket (this loader's founding law).
   it("a kubelet-injected env selects kube and fails loud without the manager URL", () => {

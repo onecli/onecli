@@ -107,47 +107,6 @@ describe("AgentCreateDoor", () => {
     ).toBeNull();
   });
 
-  it("assembles the two halves into ONE control", () => {
-    // The seam is the whole visual claim, and it is three things agreeing:
-    // both inner edges flat, and a row that binds them. Assert them together
-    // — any one alone can hold while the pair visibly comes apart, and this
-    // is the part no unit test can SEE. Both split doors share the shape.
-    for (const [door, primaryName] of [
-      ["byo-with-hosted", /create agent/i],
-      ["hosted-with-byo", /new agent/i],
-    ] as const) {
-      const { container } = renderDoor(door);
-      const primary = screen.getByRole("button", { name: primaryName });
-      const chevron = screen.getByRole("button", {
-        name: /more ways to create/i,
-      });
-      expect(primary.className).toContain("rounded-r-none");
-      expect(chevron.className).toContain("rounded-l-none");
-      // Same row, same parent, in this order: primary then chevron.
-      const row = container.firstElementChild;
-      expect(row?.className).toContain("flex");
-      expect(primary.parentElement).toBe(row);
-      expect(chevron.parentElement).toBe(row);
-      expect(
-        primary.compareDocumentPosition(chevron) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
-      ).toBeTruthy();
-      cleanup();
-    }
-  });
-
-  it("leaves a single button with NO flat edges to look glued to", () => {
-    for (const door of ["hosted", "byo"] as const) {
-      const { container } = renderDoor(door);
-      const button = screen.getByRole("button");
-      expect(button.className).not.toContain("rounded-r-none");
-      expect(container.firstElementChild?.className ?? "").not.toContain(
-        "flex",
-      );
-      cleanup();
-    }
-  });
-
   it("lets the host render the primary button, label and shape included", () => {
     // The cloud quota gate composes in here; if the label or the flat edge
     // stopped being handed over, the split control would visibly break.

@@ -419,6 +419,15 @@ describe("env wrapper and facades", () => {
     expect(configuredAppUrl()).toBe("http://172.17.0.1:10254");
   });
 
+  // An APP_URL that is present but blank must not shadow a real
+  // NEXT_PUBLIC_APP_URL, otherwise a stray `APP_URL=` line silently wins.
+  it("configuredAppUrl skips a blank APP_URL in favor of NEXT_PUBLIC_APP_URL", () => {
+    clearAll();
+    process.env.APP_URL = "";
+    process.env.NEXT_PUBLIC_APP_URL = "https://public.example.com";
+    expect(configuredAppUrl()).toBe("https://public.example.com");
+  });
+
   it("configuredApiUrl is undefined when nothing is configured", () => {
     clearAll();
     expect(configuredApiUrl()).toBeUndefined();
@@ -428,6 +437,12 @@ describe("env wrapper and facades", () => {
     clearAll();
     process.env.API_URL = "https://api.acme.com/";
     expect(configuredApiUrl()).toBe("https://api.acme.com");
+  });
+
+  it("configuredApiUrl falls back to NEXT_PUBLIC_API_URL when API_URL is unset", () => {
+    clearAll();
+    process.env.NEXT_PUBLIC_API_URL = "https://api-public.example.com";
+    expect(configuredApiUrl()).toBe("https://api-public.example.com");
   });
 
   // Frozen legacy semantics: APP_URL alone never answers for the api —

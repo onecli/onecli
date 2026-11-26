@@ -1,0 +1,18 @@
+# Channels on: generated secrets (the Job mints CHANNEL_ADAPTER_TOKEN and
+# RUNNER_SESSION_KEY), the Slack channel adapter, and a bring-your-own
+# shared Slack app.
+externalUrl: https://onecli.example.com
+secrets:
+  generate:
+    enabled: true
+channelAdapter:
+  enabled: true
+  nodeSelector:
+    kubernetes.io/os: linux
+slackSharedApp:
+  existingSecret: onecli-slack-shared
+  appManagerApproved: true
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: onecli

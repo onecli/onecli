@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { proofDatabaseUrl } from "../testing/pg-proof.js";
+import { proofDatabaseUrl, waitForLockWaiters } from "../testing/pg-proof.js";
+import { orgNameFromEmail } from "../lib/email-org-name";
 
 /**
  * `ensureUserOrganization` on REAL PostgreSQL — the first-registration
@@ -32,8 +33,6 @@ let db: Db;
 let svc: OrgService;
 
 const P = "orgboot-";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let userSeq = 0;
 /** A P-keyed user row; everything else this suite creates hangs off one. */
@@ -219,13 +218,15 @@ describe.skipIf(!PROOF_URL)(
       );
 
       const winnerWorkspaceId = await winnerReady;
+      let settledEarly = false;
       const loser = svc.ensureUserOrganization(user.id, user.email);
+      void loser.then(
+        () => (settledEarly = true),
+        () => (settledEarly = true),
+      );
       // The loser must be WAITING on the advisory lock, not running ahead on
       // the pre-commit snapshot (which would re-create the P2002 race).
-      const settledEarly = await Promise.race([
-        loser.then(() => true),
-        sleep(400).then(() => false),
-      ]);
+      await waitForLockWaiters(db, { queryLike: "%pg_advisory_xact_lock%" });
       expect(settledEarly).toBe(false);
 
       release();
@@ -359,12 +360,13 @@ describe.skipIf(!PROOF_URL)(
       const user = await makeUser("collide");
       // A foreign org already holds this user's deterministic slug — the shape
       // an unlocked writer (EE create, a pre-fix install) can leave behind.
-      const localPart = user.email.split("@")[0];
+      // The slug comes from the org name, which comes from the email.
+      const orgName = orgNameFromEmail(user.email) ?? "personal";
       await db.organization.create({
         data: {
           id: `${P}collide-org`,
           name: "squatter",
-          slug: `${localPart}-${user.id.slice(0, 8)}`,
+          slug: `${svc.slugify(orgName)}-${user.id.slice(0, 8)}`,
         },
       });
 

@@ -12,6 +12,12 @@ describe("connectionGrantSchema", () => {
     });
   });
 
+  it("accepts the default attach, stripping anything customized on it", () => {
+    expect(
+      connectionGrantSchema.parse({ access: "default", allow: ["x"] }),
+    ).toEqual({ access: "default" });
+  });
+
   it("accepts a custom tri-state with disjoint sets", () => {
     expect(
       connectionGrantSchema.parse({
@@ -70,6 +76,21 @@ describe("connectionGrantSchema", () => {
     expect("resources" in connectionGrantSchema.parse({ access: "full" })).toBe(
       false,
     );
+  });
+
+  it("accepts a Google Drive driveFolders grant and keeps it exclusive", () => {
+    expect(
+      connectionGrantSchema.parse({
+        access: "full",
+        resources: { driveFolders: ["SD/F1"] },
+      }),
+    ).toMatchObject({ resources: { driveFolders: ["SD/F1"] } });
+    expect(
+      connectionGrantSchema.safeParse({
+        access: "full",
+        resources: { driveFolders: ["SD"], folders: ["/x"] },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects malformed resources — one strict axis per policy", () => {

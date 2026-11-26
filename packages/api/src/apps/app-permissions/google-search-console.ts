@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleSearchConsolePermissions: AppPermissionDefinition = {
   provider: "google-search-console",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

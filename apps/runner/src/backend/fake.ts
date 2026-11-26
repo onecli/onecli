@@ -5,6 +5,7 @@ import type {
   SandboxSnapshot,
   SandboxSpec,
   HomeRef,
+  WakeHoldReason,
 } from "./types";
 
 /**
@@ -21,11 +22,21 @@ export interface FakeSandboxRecord {
   spec: SandboxSpec;
   containerRef: ContainerRef;
   running: boolean;
+  /** The machine a cluster substrate would report (tests set it). */
+  node?: string;
 }
 
 export interface FakeBackend extends SandboxBackend {
   readonly sandboxes: Map<string, FakeSandboxRecord>;
   readonly homes: Map<string, HomeRef>;
+  /** Every wakeHome call, in order: what the runner handed the seam. */
+  readonly wakes: Array<{ ref: HomeRef; workspaceId?: string }>;
+  /** Every parkHome call's ref, in order. */
+  readonly parks: HomeRef[];
+  /** Make the NEXT wake announce these holds (in order) before returning
+   * ready: how a test drives the runner's `waiting_for_capacity` report
+   * without a real substrate. */
+  holdNextWake(reasons: WakeHoldReason[]): void;
   readonly prepared: () => boolean;
   /** The runner id the backend was told to label its objects with. */
   readonly owner: () => string | undefined;
@@ -33,7 +44,7 @@ export interface FakeBackend extends SandboxBackend {
    * The optional error is thrown as-is — how a test plants a TYPED failure
    * (e.g. `ImageUnavailableError`) for the runner's classification. */
   failNext(
-    operation: "create" | "start" | "stop" | "list",
+    operation: "create" | "start" | "stop" | "list" | "listHomes",
     error?: Error,
   ): void;
   /** Make the NEXT call of an operation block until the returned release is
@@ -49,6 +60,9 @@ export interface FakeBackend extends SandboxBackend {
 export const createFakeBackend = (): FakeBackend => {
   const sandboxes = new Map<string, FakeSandboxRecord>();
   const homes = new Map<string, HomeRef>();
+  const wakes: Array<{ ref: HomeRef; workspaceId?: string }> = [];
+  const parks: HomeRef[] = [];
+  let pendingWakeHolds: WakeHoldReason[] = [];
   const failures = new Map<string, Error | undefined>();
   /** Foreign-labeled leftovers planted by tests (the sweep's subjects). */
   let seeded: ManagedObject[] = [];
@@ -74,12 +88,15 @@ export const createFakeBackend = (): FakeBackend => {
 
   const byRef = (ref: ContainerRef) =>
     [...sandboxes.values()].find((record) => record.containerRef === ref);
+  const homeRefFor = (sandboxId: string): HomeRef => `fake-home-${sandboxId}`;
 
   return {
     id: "fake",
     homeDurability: "resident",
     sandboxes,
     homes,
+    wakes,
+    parks,
     prepared: () => prepared,
     owner: () => owner,
     identify(runnerId: string) {
@@ -103,8 +120,10 @@ export const createFakeBackend = (): FakeBackend => {
       prepared = true;
     },
 
+    homeRefFor,
+
     async provisionHome(sandboxId) {
-      const ref = `fake-home-${sandboxId}`;
+      const ref = homeRefFor(sandboxId);
       homes.set(sandboxId, ref);
       return ref;
     },
@@ -118,10 +137,21 @@ export const createFakeBackend = (): FakeBackend => {
       );
     },
 
-    async parkHome() {},
-    async wakeHome() {},
+    async parkHome(ref) {
+      parks.push(ref);
+    },
+    async wakeHome(ref, workspaceId, _resources, onHold) {
+      wakes.push({ ref, ...(workspaceId !== undefined && { workspaceId }) });
+      const holds = pendingWakeHolds;
+      pendingWakeHolds = [];
+      for (const reason of holds) onHold?.(reason);
+    },
+    holdNextWake(reasons) {
+      pendingWakeHolds = [...reasons];
+    },
 
     async listHomes() {
+      throwIfArmed("listHomes");
       return [...homes].map(([sandboxId, ref]) => ({ sandboxId, ref }));
     },
 
@@ -164,6 +194,8 @@ export const createFakeBackend = (): FakeBackend => {
         containerRef: record.containerRef,
         running: record.running,
         payloadHash: record.spec.payloadHash,
+        resumable: record.spec.resumable,
+        ...(record.node && { node: record.node }),
       }));
     },
 

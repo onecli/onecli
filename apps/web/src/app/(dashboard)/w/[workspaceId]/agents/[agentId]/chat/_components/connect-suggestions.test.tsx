@@ -7,8 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import { grants } from "@/lib/api";
 import type { Connection } from "@/lib/api";
+import type { AppPermissionDefinitionSummary } from "@onecli/api/apps/app-permissions/types";
 import { queryKeys } from "@/lib/api/keys";
-import { ConnectorSuggestions } from "./connect-suggestions";
+import {
+  ConnectorSuggestions,
+  ConnectorSuggestionsCard,
+} from "./connect-suggestions";
+import { extractConnectSuggestions } from "@/lib/chat/connect-links";
+import { GreetingConnectCard } from "./greeting-connect-card";
 
 // Mutable so the no-agent fence is testable (the mock factory is hoisted).
 let routeParams: { agentId?: string } = { agentId: "agent-1" };
@@ -39,6 +45,21 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const GMAIL_CONNECT_URL =
   "https://app.onecli.sh/w/a/connections?connect=gmail&source=agent&agent_name=Arik";
 
+/** A catalog with a tool list to split on, like every real one. */
+const GMAIL_CATALOG: AppPermissionDefinitionSummary = {
+  provider: "gmail",
+  groups: [
+    {
+      category: "read",
+      tools: [{ id: "read", name: "Read email", description: "" }],
+    },
+    {
+      category: "write",
+      tools: [{ id: "send", name: "Send email", description: "" }],
+    },
+  ],
+};
+
 const connectedGmail: Connection = {
   id: "conn-1",
   provider: "gmail",
@@ -57,6 +78,10 @@ const renderCard = (
   {
     connections = [] as Connection[],
     grantedConnectionIds = [] as string[],
+    definitions = [] as AppPermissionDefinitionSummary[],
+    // "chat" = the card under an agent answer (no consent line); "full" =
+    // the same card with its consent line (the welcome card's shape).
+    mode = "chat" as "chat" | "full",
   } = {},
 ) => {
   const queryClient = new QueryClient({
@@ -75,7 +100,10 @@ const renderCard = (
     secrets: [],
   });
   // The attach dialog's permission catalog (decides per-row Manage).
-  queryClient.setQueryData(queryKeys.appPermissionDefinitions.list(), []);
+  queryClient.setQueryData(
+    queryKeys.appPermissionDefinitions.list(),
+    definitions,
+  );
   queryClient.setQueryData(
     [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
     { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
@@ -92,8 +120,36 @@ const renderCard = (
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  return render(<ConnectorSuggestions text={text} />, { wrapper });
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+  return {
+    ...render(
+      mode === "chat" ? (
+        <ConnectorSuggestions text={text} />
+      ) : (
+        <ConnectorSuggestionsCard
+          suggestions={extractConnectSuggestions(text)}
+        />
+      ),
+      { wrapper },
+    ),
+    invalidateSpy,
+  };
 };
+
+/** A popup's landing message, as the callback page posts it (same origin). */
+const landing = (data: Record<string, unknown>) =>
+  act(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", { origin: window.location.origin, data }),
+    );
+  });
+
+/** A landing's tell: the grant views refreshed so a new account (already
+ * granted to this agent by the API's connecting-agent grant) shows attached.
+ * A thunk, because query keys carry the URL's workspace scope, resolved at
+ * call time: a module-level constant would capture "default" and make the
+ * negative assertions vacuous. */
+const refreshedGrants = () => ({ queryKey: queryKeys.grants.all() });
 
 describe("ConnectorSuggestions card", () => {
   let openSpy: MockInstance<typeof window.open>;
@@ -121,7 +177,12 @@ describe("ConnectorSuggestions card", () => {
 
   it("renders the suggestion and opens the popup with agent + workspace context", async () => {
     renderCard(GMAIL_CONNECT_URL);
-    expect(screen.getByText("Apps that could help")).toBeInTheDocument();
+    // The agent's sentence above the card introduces it: no consent line,
+    // but the "Browse all apps" door stays.
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Browse all apps" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Gmail")).toBeInTheDocument();
 
     await userEvent.click(
@@ -131,34 +192,152 @@ describe("ConnectorSuggestions card", () => {
     const [url, windowName] = openSpy.mock.calls[0] ?? [];
     expect(url).toContain("/app-connect/gmail?");
     expect(url).toContain("agent_name=Arik");
+    // The connect carries THIS agent: the new account lands on for it alone.
+    expect(url).toContain("agent_id=agent-1");
     expect(url).toContain("workspaceId=ws-1");
     expect(windowName).toBe("connect-gmail-new");
   });
 
-  it("discloses the auto-grant at the point of consent for unconnected rows", () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("discloses at the point of consent: this agent alone, and what needs approval", () => {
+    renderCard(GMAIL_CONNECT_URL, {
+      definitions: [GMAIL_CATALOG],
+      mode: "full",
+    });
     expect(
-      screen.getByText(/Connecting gives this agent full access/),
+      screen.getByText(
+        "Only this agent gets access. Writes, and reads that could expose secrets, need your approval.",
+      ),
     ).toBeInTheDocument();
   });
 
-  it("hides Reconnect for an org-shared connection — re-auth belongs to the org page", () => {
+  it("names only writes for a catalog checked safe for reads", () => {
     renderCard(GMAIL_CONNECT_URL, {
-      connections: [{ ...connectedGmail, scope: "organization" }],
+      definitions: [{ ...GMAIL_CATALOG, unlistedReads: "allow" }],
+      mode: "full",
+    });
+    expect(
+      screen.getByText(
+        "Only this agent gets access. Writes need your approval.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("never promises approval for an app with no tool list (it gets full access)", () => {
+    renderCard(GMAIL_CONNECT_URL, { mode: "full" });
+    expect(
+      screen.getByText("Only this agent gets access. It gets full access."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/need your approval/)).toBeNull();
+  });
+
+  it("an account the workspace holds but this agent does not reads Attach, never Connected", () => {
+    // The reported bug: a new agent with only GitHub on showed "Gmail ·
+    // Connected" (with Reconnect + Manage) because another agent's Gmail
+    // sat in the workspace. MUTATION-PROOF: decide the row from the
+    // workspace pool alone and this reads "Connected" again.
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [connectedGmail],
+      grantedConnectionIds: ["some-other-connection"],
+    });
+    expect(
+      screen.getByText("Connected, not attached to this agent"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Manage Gmail access" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Connect Gmail" })).toBeNull();
+  });
+
+  it("Attach opens the attach dialog for that app", async () => {
+    renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Attach Gmail" }),
+    ).toBeInTheDocument();
+  });
+
+  it("an account this agent holds reads Connected, names it, and offers Manage only", () => {
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [{ ...connectedGmail, label: "jo@acme.com" }],
+      grantedConnectionIds: ["conn-1"],
     });
     expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText(/jo@acme\.com/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Manage Gmail access" }),
+    ).toBeEnabled();
+    // One action per row: a healthy login offers no Reconnect.
     expect(
       screen.queryByRole("button", { name: "Reconnect Gmail" }),
     ).toBeNull();
+  });
+
+  it("several held accounts: one Manage that opens the per-account list", async () => {
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [connectedGmail, { ...connectedGmail, id: "conn-2" }],
+      grantedConnectionIds: ["conn-1", "conn-2"],
+    });
+    expect(screen.getByText(/2 accounts/)).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Manage Gmail for this agent" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Attach Gmail" }),
+    ).toBeInTheDocument();
+  });
+
+  it("an org-rule grant counts as this agent's: Connected, not Attach", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.connections.list("workspace"), [
+      { ...connectedGmail, scope: "organization" },
+    ]);
+    queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+      agentId: "agent-1",
+      mode: "grants",
+      connections: [],
+      secrets: [],
+    });
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      {
+        agentId: "agent-1",
+        mode: "selective",
+        secrets: [],
+        connections: [
+          {
+            id: "conn-1",
+            kind: "connection",
+            provenance: [
+              { kind: "rule", scope: "organization", redacted: true },
+            ],
+            orgBlocked: false,
+          },
+        ],
+      },
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectorSuggestions text={GMAIL_CONNECT_URL} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Manage Gmail access" }),
     ).toBeInTheDocument();
   });
 
-  it("disables Manage until grants resolve — the dialog seeds once on open", () => {
+  it("claims nothing about this agent until its grants resolve: no Connected, no door", () => {
     // Grants key deliberately unseeded and fetch hung: the query stays
-    // pending, so Manage must be disabled (a stale open would seed a bogus
-    // "full access" view).
+    // pending. Saying "Connected" OR "not attached" would be a guess, and a
+    // Manage opened now would seed a bogus "full access" view.
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise(() => {})),
@@ -178,83 +357,242 @@ describe("ConnectorSuggestions card", () => {
         <ConnectorSuggestions text={GMAIL_CONNECT_URL} />
       </QueryClientProvider>,
     );
-    expect(
-      screen.getByRole("button", { name: "Manage Gmail access" }),
-    ).toBeDisabled();
+    expect(screen.getByText("Checking access…")).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Gmail/ })).toBeNull();
   });
 
-  it("flips to Connected with Reconnect + Manage once a connection exists", () => {
-    renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
-    expect(screen.getByText("Connected")).toBeInTheDocument();
+  it("a failed access read says so and offers Try again, never a guess", async () => {
+    // Grants fail to load: the row must not fall back to the workspace pool
+    // (the original bug) nor strand the user without a next step.
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("boom", { status: 500 })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.connections.list("workspace"), [
+      connectedGmail,
+    ]);
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectorSuggestions text={GMAIL_CONNECT_URL} />
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByText("Couldn't check access"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    const calls = fetchMock.mock.calls.length;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Try again for Gmail" }),
+    );
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(calls),
+    );
+  });
+
+  it("never offers Connect over an unloaded connections list", () => {
+    // An unread pool is not an empty one: Connect could duplicate an
+    // account this agent already holds.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ConnectorSuggestions text={GMAIL_CONNECT_URL} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("Checking access…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Gmail" })).toBeNull();
+  });
+
+  it("an org-shared account needing reconnect points to the org admin, not a dead Reconnect", () => {
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [
+        {
+          ...connectedGmail,
+          scope: "organization",
+          reauthRequiredAt: "2026-10-01T00:00:00Z",
+        },
+      ],
+      grantedConnectionIds: ["conn-1"],
+    });
+    expect(screen.getByText(/Needs reconnect/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Ask an org admin to reconnect"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reconnect Gmail" }),
+    ).toBeNull();
+  });
+
+  it("a needs-reconnect link offers Reconnect for that account, not Manage", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/gmail?reconnect=conn-2",
+      {
+        connections: [
+          connectedGmail,
+          {
+            ...connectedGmail,
+            id: "conn-2",
+            label: "jo@acme.com",
+            reauthRequiredAt: "2026-10-01T00:00:00Z",
+          },
+        ],
+        grantedConnectionIds: ["conn-1", "conn-2"],
+      },
+    );
+    expect(screen.getByText(/Needs reconnect/)).toHaveTextContent(
+      "Needs reconnect · jo@acme.com",
+    );
     expect(
       screen.getByRole("button", { name: "Reconnect Gmail" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Manage Gmail access" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Connect Gmail" })).toBeNull();
+      screen.queryByRole("button", { name: "Manage Gmail for this agent" }),
+    ).toBeNull();
   });
 
-  it("auto-grants the agent full access ONLY for a connect this card initiated", async () => {
+  const githubAccount = (
+    id: string,
+    githubOrgAccess?: Record<string, { reason: string }>,
+  ): Connection => ({
+    ...connectedGmail,
+    id,
+    provider: "github",
+    metadata: githubOrgAccess ? { githubOrgAccess } : null,
+  });
+
+  it("an org-access link names the organization and links to its fix steps", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [
+          githubAccount("conn-gh", { acme: { reason: "approval_required" } }),
+        ],
+        grantedConnectionIds: ["conn-gh"],
+      },
+    );
+    expect(screen.getByText(/Waiting for admin approval/)).toHaveTextContent(
+      "acme · Waiting for admin approval",
+    );
+    // Not the generic Connected row: no Reconnect / Manage doors.
+    expect(
+      screen.queryByRole("button", { name: "Reconnect GitHub" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toHaveAttribute(
+      "href",
+      "/w/ws-1/connections/apps/github?org_access=acme",
+    );
+  });
+
+  it("an SSO refusal says sign-in, not approval", () => {
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [
+          githubAccount("conn-gh", { acme: { reason: "sso_required" } }),
+        ],
+      },
+    );
+    expect(screen.getByText(/SSO sign-in needed/)).toBeInTheDocument();
+    expect(screen.queryByText(/approval/)).toBeNull();
+  });
+
+  it("finds the refusal on whichever GitHub account recorded it", () => {
+    // The org refused the second account; the first is unaffected.
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=Acme",
+      {
+        connections: [
+          githubAccount("conn-personal"),
+          githubAccount("conn-work", { acme: { reason: "approval_required" } }),
+        ],
+      },
+    );
+    expect(
+      screen.getByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toBeInTheDocument();
+  });
+
+  it("an org-access card from an older answer reads Connected once the org is cleared", () => {
+    // The gateway dropped acme's record (a reconnect, or the refused request
+    // went through): the old answer's card must not keep offering Fix Access.
+    renderCard(
+      "https://app.onecli.sh/w/a/connections/apps/github?org_access=acme",
+      {
+        connections: [githubAccount("conn-gh")],
+        grantedConnectionIds: ["conn-gh"],
+      },
+    );
+    expect(screen.queryByText(/admin approval/)).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Fix GitHub access for acme" }),
+    ).toBeNull();
+    expect(screen.getByText(/Connected/)).toBeInTheDocument();
+  });
+
+  it("Connect stays the door while the workspace has no account of the app", () => {
     renderCard(GMAIL_CONNECT_URL);
+    expect(
+      screen.getByRole("button", { name: "Connect Gmail" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+  });
+
+  it("refreshes the grant views ONLY for a connect this card initiated, and never writes a grant", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
 
     // A popup someone else opened (same origin) reports a new connection:
-    // the card must not grant.
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    // the card must not react.
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalled();
 
-    // Initiated from this card → the same message now grants full access.
+    // Initiated from this card → the same message refreshes the grant views
+    // (the API already granted the new account to this agent) and counts.
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-9",
-        { access: "full" },
-      ),
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
     );
-    expect(grants.setConnectionGrant).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.counts.all(),
+    });
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
-  it("never grants on a reconnect — no connectionId in the message", async () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("refreshes on a reconnect too: no connectionId, the pool still changed", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: { type: "app-connected", provider: "gmail" },
-        }),
-      );
-    });
-    await act(async () => {});
+    landing({ type: "app-connected", provider: "gmail" });
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
+    );
     expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 
@@ -277,34 +615,31 @@ describe("ConnectorSuggestions card", () => {
     ).toBeNull();
   });
 
-  it("hides the consent line when every suggested app is already connected", () => {
-    renderCard(GMAIL_CONNECT_URL, { connections: [connectedGmail] });
-    expect(
-      screen.queryByText(/Connecting gives this agent full access/),
-    ).toBeNull();
+  it("hides the consent line when no suggested app would be a new connect", () => {
+    // The full card, which would otherwise show it: the line is about the
+    // Connect click, so with nothing to connect there is nothing to consent to.
+    renderCard(GMAIL_CONNECT_URL, {
+      connections: [connectedGmail],
+      grantedConnectionIds: [connectedGmail.id],
+      mode: "full",
+    });
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
   });
 
-  it("releases the claim when the popup is blocked — a later landing must not grant", async () => {
+  it("releases the claim when the popup is blocked: a later landing is not this card's", async () => {
     openSpy.mockReturnValue(null);
-    renderCard(GMAIL_CONNECT_URL);
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
 
     await userEvent.click(
       screen.getByRole("button", { name: "Connect Gmail" }),
     );
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "gmail",
-            connectionId: "conn-9",
-          },
-        }),
-      );
+    landing({
+      type: "app-connected",
+      provider: "gmail",
+      connectionId: "conn-9",
     });
     await act(async () => {});
-    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
+    expect(invalidateSpy).not.toHaveBeenCalledWith(refreshedGrants());
   });
 
   it("routes a configure landing ONLY for a connect this card initiated", async () => {
@@ -339,14 +674,19 @@ describe("ConnectorSuggestions card", () => {
     expect(pushMock).toHaveBeenCalledWith(
       expect.stringContaining("/connections/apps/gmail"),
     );
+    // The setup page gets this agent, so the connect after it is its own.
+    expect(pushMock).toHaveBeenCalledWith(
+      expect.stringContaining("source=agent&agent_id=agent-1"),
+    );
   });
 
   describe("attach-kind rows (access_restricted)", () => {
     const GMAIL_ATTACH_URL = "https://app.onecli.sh/w/a/connections/apps/gmail";
 
     it("claims nothing about attachment until grants resolve — the door waits", () => {
-      // Grants unseeded and fetch hung: the row must not assert the negative
-      // ("not attached") it cannot know yet, and the door stays disabled.
+      // Grants unseeded and fetch hung: the row must not assert either side
+      // ("not attached" / "attached") it cannot know yet, and no door shows
+      // whose label could still flip.
       vi.stubGlobal(
         "fetch",
         vi.fn(() => new Promise(() => {})),
@@ -369,10 +709,10 @@ describe("ConnectorSuggestions card", () => {
       expect(
         screen.queryByText("Connected, not attached to this agent"),
       ).toBeNull();
-      expect(screen.getByText("Connected")).toBeInTheDocument();
+      expect(screen.getByText("Checking access…")).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
-      ).toBeDisabled();
+        screen.queryByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeNull();
     });
 
     it("names the missing grant and offers Attach — no Reconnect, no legacy Manage", () => {
@@ -389,6 +729,18 @@ describe("ConnectorSuggestions card", () => {
       expect(
         screen.queryByRole("button", { name: "Manage Gmail access" }),
       ).toBeNull();
+    });
+
+    it("stays an attach row when the account also needs a reconnect: the grant is what this request lacks", () => {
+      renderCard(GMAIL_ATTACH_URL, {
+        connections: [
+          { ...connectedGmail, reauthRequiredAt: "2026-10-01T00:00:00Z" },
+        ],
+      });
+      expect(
+        screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Needs reconnect/)).toBeNull();
     });
 
     it("flips to the attached count + Manage once this agent holds a grant", () => {
@@ -433,8 +785,10 @@ describe("ConnectorSuggestions card", () => {
       ).toBeInTheDocument();
     });
 
-    it("stakes the claim for the dialog's connect-new — the landing auto-grants", async () => {
-      renderCard(GMAIL_ATTACH_URL, { connections: [connectedGmail] });
+    it("stakes the claim for the dialog's connect-new: the landing refreshes the grants", async () => {
+      const { invalidateSpy } = renderCard(GMAIL_ATTACH_URL, {
+        connections: [connectedGmail],
+      });
       await userEvent.click(
         screen.getByRole("button", { name: "Attach Gmail for this agent" }),
       );
@@ -447,59 +801,40 @@ describe("ConnectorSuggestions card", () => {
       expect(url).toContain("workspaceId=ws-1");
       expect(windowName).toBe("connect-gmail-new");
 
-      act(() => {
-        window.dispatchEvent(
-          new MessageEvent("message", {
-            origin: window.location.origin,
-            data: {
-              type: "app-connected",
-              provider: "gmail",
-              connectionId: "conn-9",
-            },
-          }),
-        );
+      landing({
+        type: "app-connected",
+        provider: "gmail",
+        connectionId: "conn-9",
       });
       await waitFor(() =>
-        expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-          "agent-1",
-          "conn-9",
-          { access: "full" },
-        ),
+        expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
       );
+      expect(grants.setConnectionGrant).not.toHaveBeenCalled();
     });
   });
 
-  it("keeps the picker's listener alive after it closes — an in-flight popup still grants", async () => {
-    renderCard(GMAIL_CONNECT_URL);
+  it("keeps the picker's listener alive after it closes: an in-flight popup still lands", async () => {
+    const { invalidateSpy } = renderCard(GMAIL_CONNECT_URL);
     await userEvent.click(
       screen.getByRole("button", { name: "Browse all apps" }),
     );
     // Initiate from the PICKER (its row), then close it without finishing.
-    await userEvent.click(screen.getByRole("button", { name: /^Slack/ }));
+    await userEvent.click(screen.getByRole("button", { name: /^Linear/ }));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByText("Connect an app")).toBeNull();
 
     // The popup lands after the close: the latched (still-mounted) picker
-    // must catch it and grant.
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          data: {
-            type: "app-connected",
-            provider: "slack",
-            connectionId: "conn-7",
-          },
-        }),
-      );
+    // must catch it and refresh. The card never claimed linear, so the
+    // refresh can only be the picker's.
+    landing({
+      type: "app-connected",
+      provider: "linear",
+      connectionId: "conn-7",
     });
     await waitFor(() =>
-      expect(grants.setConnectionGrant).toHaveBeenCalledWith(
-        "agent-1",
-        "conn-7",
-        { access: "full" },
-      ),
+      expect(invalidateSpy).toHaveBeenCalledWith(refreshedGrants()),
     );
+    expect(grants.setConnectionGrant).not.toHaveBeenCalled();
   });
 });
 
@@ -568,30 +903,6 @@ describe("ConnectorSuggestions attach rows", () => {
     routeParams = { agentId: "agent-1" };
   });
 
-  it("names the missing grant and opens the attach dialog from the Attach button", async () => {
-    renderAttachCard();
-    expect(
-      screen.getByText("Connected, not attached to this agent"),
-    ).toBeInTheDocument();
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
-    );
-    const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent("Attach Gmail");
-    expect(
-      screen.getByRole("switch", { name: "Attach Gmail" }),
-    ).not.toBeChecked();
-  });
-
-  it("reads Manage with the attached count once a grant exists", () => {
-    renderAttachCard({ grantedConnectionIds: ["conn-1"] });
-    expect(screen.getByText("1 attached account")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Manage Gmail for this agent" }),
-    ).toBeInTheDocument();
-  });
-
   it("counts only status-connected accounts — a granted but broken connection is not 'attached'", () => {
     // MUTATION-PROOF: drop the status filter from attachedCount and the card
     // claims "1 attached account" for a connection the dialog's own pool
@@ -628,5 +939,72 @@ describe("ConnectorSuggestions attach rows", () => {
     });
     expect(lockedSwitch).toBeChecked();
     expect(lockedSwitch).toBeDisabled();
+  });
+});
+
+describe("the onboarding Gmail card (bare)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    routeParams = { agentId: "agent-1" };
+  });
+
+  /** The greeting card seeded like the attach harness: a workspace Gmail
+   * account, with or without this agent holding it. */
+  const renderGreeting = (grantedConnectionIds: string[] = []) => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(queryKeys.connections.list("workspace"), [
+      { ...connectedGmail, label: "jo@acme.com" },
+    ]);
+    queryClient.setQueryData(queryKeys.grants.agent("agent-1"), {
+      agentId: "agent-1",
+      mode: "grants",
+      connections: grantedConnectionIds.map((connectionId) => ({
+        connectionId,
+      })),
+      secrets: [],
+    });
+    queryClient.setQueryData(
+      [...queryKeys.agents.all(), "agent-1", "effective-credentials"],
+      { agentId: "agent-1", mode: "selective", secrets: [], connections: [] },
+    );
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <GreetingConnectCard variant="greeting" />
+      </QueryClientProvider>,
+    );
+  };
+
+  it("is the agent-aware row alone: Attach for a workspace account it lacks, no consent line, no footer", () => {
+    // The onboarding welcome's single Gmail row reads the same per-agent
+    // state as every card: a workspace Gmail this agent does not
+    // hold is never "Connected" here either.
+    renderGreeting();
+    expect(
+      screen.getByText("Connected, not attached to this agent"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Attach Gmail for this agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reconnect Gmail" }),
+    ).toBeNull();
+    expect(screen.queryByText(/Only this agent gets access/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Browse all apps" }),
+    ).toBeNull();
+  });
+
+  it("reads Connected with the account and one Manage once this agent holds it", () => {
+    renderGreeting(["conn-1"]);
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText(/jo@acme\.com/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Manage Gmail access" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reconnect Gmail" }),
+    ).toBeNull();
   });
 });

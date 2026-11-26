@@ -26,6 +26,7 @@ const anthropicKey = {
   metadata: null,
   scope: "workspace",
   createdAt: new Date("2026-08-01T00:00:00Z"),
+  updatedAt: new Date("2026-08-01T00:00:00Z"),
 };
 
 const SCOPE = { workspaceId: "ws-1", organizationId: "org-1" };

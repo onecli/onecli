@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 
-// Construct DATABASE_URL from individual env vars (ECS/Secrets Manager)
+// Construct DATABASE_URL from individual env vars (injected separately by some deployments)
 if (!process.env.DATABASE_URL && process.env.DB_HOST) {
   const user = encodeURIComponent(process.env.DB_USERNAME ?? "");
   const pass = encodeURIComponent(process.env.DB_PASSWORD ?? "");

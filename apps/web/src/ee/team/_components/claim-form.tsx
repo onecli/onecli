@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { CheckCircle2 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { useClaimProvision } from "@/hooks/use-provisions";
+import { orgLanding } from "@/lib/dashboard/landing";
 import { ClaimHero } from "./claim-hero";
 
 export interface ClaimFormProps {
@@ -19,13 +20,14 @@ export const ClaimForm = ({ token, orgName }: ClaimFormProps) => {
 
   const handleClaim = () => {
     claimProvision.mutate(token, {
-      onSuccess: (result) => {
+      onSuccess: async (result) => {
         toast.success(`You have joined ${result.organizationName}`);
         // A full navigation, not a router push: the dashboard's server
         // components have already rendered without this membership. Land in
-        // the org that was just joined (visiting it also sets the default-org
-        // cookie) — "/" would route to the user's previous default org.
-        window.location.assign(`/org/${result.organizationId}/workspaces`);
+        // the org that was just joined, on its first agent, looked up now
+        // (the workspace page sets the default-org cookie): "/" would route
+        // to the user's previous default org.
+        window.location.assign(await orgLanding(result.organizationId));
       },
     });
   };

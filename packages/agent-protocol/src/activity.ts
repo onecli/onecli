@@ -68,61 +68,369 @@ const stripForStatus = (raw: string): string =>
 export const ACTIVITY_TEXT_MAX = 80;
 
 /**
- * The tool-name → human phrase map. Deliberately a small allowlist of the
- * tools a reader actually sees, in the present participle ("Reading a
- * file"), so the line reads as an activity rather than an API call.
+ * What a tool works on, when a run of the same kind can be counted in one
+ * phrase ("Ran 3 commands", "Read 2 files"). Tools without one are counted
+ * as plain steps.
+ */
+export type ToolKind = "command" | "read" | "edit" | "fetch" | "search";
+
+interface ToolPhrase {
+  /** Present participle, for a call still running ("Reading a file"). */
+  running: string;
+  /** Past tense, for a finished call ("Read a file"). */
+  done: string;
+  kind?: ToolKind;
+}
+
+/**
+ * The tool-name → human phrase map, in both tenses. Deliberately a small
+ * allowlist of the tools a reader actually sees, so a line reads as an
+ * activity rather than an API call. ONE table for every surface: the live
+ * caption (present tense), the chat's finished steps (past tense) and the
+ * run header's count (kind) all read it, so they can never disagree on what
+ * a tool is called.
  *
  * An UNKNOWN tool falls back to a generic phrase rather than echoing its
  * raw name: tool names come from the sandbox (MCP servers can define their
- * own), so echoing them would put unbounded sandbox-controlled text on two
- * surfaces for no product gain.
+ * own), so echoing them would put unbounded sandbox-controlled text on
+ * every surface for no product gain.
  */
-const TOOL_PHRASES: Record<string, string> = {
-  bash: "Running a command",
-  read: "Reading a file",
-  write: "Writing a file",
-  edit: "Editing a file",
-  multiedit: "Editing a file",
-  agentgrep: "Searching the code",
-  ls: "Listing files",
-  webfetch: "Fetching a page",
-  websearch: "Searching the web",
-  patch: "Applying a patch",
-  apply_patch: "Applying a patch",
-  todo: "Planning the work",
-  swarm: "Coordinating helpers",
-  process_start: "Starting background work",
-  process_status: "Checking background work",
-  process_watch: "Watching background work",
-  process_stop: "Stopping background work",
-  memory_save: "Saving to memory",
-  memory_get: "Reading its memory",
-  memory_list: "Reading its memory",
-  memory_search: "Searching its memory",
-  schedule_task: "Scheduling a task",
-  list_tasks: "Checking its schedule",
-  cancel_task: "Cancelling a task",
-  skill_create: "Writing a skill",
-  skill_update: "Updating a skill",
-  skill_list: "Reading its skills",
-  skill_delete: "Removing a skill",
+const TOOL_PHRASES: Record<string, ToolPhrase> = {
+  bash: {
+    running: "Running a command",
+    done: "Ran a command",
+    kind: "command",
+  },
+  read: { running: "Reading a file", done: "Read a file", kind: "read" },
+  write: { running: "Writing a file", done: "Wrote a file", kind: "edit" },
+  edit: { running: "Editing a file", done: "Edited a file", kind: "edit" },
+  multiedit: { running: "Editing a file", done: "Edited a file", kind: "edit" },
+  agentgrep: {
+    running: "Searching the code",
+    done: "Searched the code",
+    kind: "search",
+  },
+  ls: { running: "Listing files", done: "Listed files" },
+  webfetch: {
+    running: "Fetching a page",
+    done: "Fetched a page",
+    kind: "fetch",
+  },
+  websearch: {
+    running: "Searching the web",
+    done: "Searched the web",
+    kind: "search",
+  },
+  // Provider-native search (jcode v0.90+): runs on the model provider's
+  // side and surfaces under the provider's tool name.
+  web_search: {
+    running: "Searching the web",
+    done: "Searched the web",
+    kind: "search",
+  },
+  patch: { running: "Applying a patch", done: "Applied a patch", kind: "edit" },
+  apply_patch: {
+    running: "Applying a patch",
+    done: "Applied a patch",
+    kind: "edit",
+  },
+  todo: { running: "Planning the work", done: "Planned the work" },
+  swarm: { running: "Coordinating helpers", done: "Coordinated helpers" },
+  process_start: {
+    running: "Starting background work",
+    done: "Started background work",
+  },
+  process_status: {
+    running: "Checking background work",
+    done: "Checked background work",
+  },
+  process_watch: {
+    running: "Watching background work",
+    done: "Watched background work",
+  },
+  process_stop: {
+    running: "Stopping background work",
+    done: "Stopped background work",
+  },
+  memory_save: { running: "Saving to memory", done: "Saved to memory" },
+  memory_get: { running: "Reading its memory", done: "Read its memory" },
+  memory_list: { running: "Reading its memory", done: "Read its memory" },
+  memory_search: {
+    running: "Searching its memory",
+    done: "Searched its memory",
+    kind: "search",
+  },
+  schedule_task: { running: "Scheduling a task", done: "Scheduled a task" },
+  list_tasks: {
+    running: "Checking its schedule",
+    done: "Checked its schedule",
+  },
+  cancel_task: { running: "Cancelling a task", done: "Cancelled a task" },
+  update_task: { running: "Updating a task", done: "Updated a task" },
+  list_webhooks: {
+    running: "Checking its webhooks",
+    done: "Checked its webhooks",
+  },
+  webhook_runs: {
+    running: "Reading a webhook's history",
+    done: "Read a webhook's history",
+  },
+  update_webhook: {
+    running: "Asking to change a webhook",
+    done: "Asked to change a webhook",
+  },
+  skill_create: { running: "Writing a skill", done: "Wrote a skill" },
+  skill_update: { running: "Updating a skill", done: "Updated a skill" },
+  skill_list: { running: "Reading its skills", done: "Read its skills" },
+  skill_delete: { running: "Removing a skill", done: "Removed a skill" },
+  skill_import: { running: "Installing skills", done: "Installed skills" },
+  message_agent: {
+    running: "Messaging another agent",
+    done: "Messaged another agent",
+  },
+  find_recipient: { running: "Looking someone up", done: "Looked someone up" },
+  read_conversation: {
+    running: "Reading a conversation",
+    done: "Read a conversation",
+  },
+  send_message: { running: "Sending a message", done: "Sent a message" },
+  send_as_me: {
+    running: "Sending as you",
+    done: "Sent as you",
+  },
+  edit_my_message: {
+    running: "Editing a message sent as you",
+    done: "Edited a message sent as you",
+  },
+  delete_my_message: {
+    running: "Deleting a message sent as you",
+    done: "Asked to delete a message sent as you",
+  },
+  list_my_replies: {
+    running: "Looking at its own replies",
+    done: "Looked at its own replies",
+  },
+  edit_my_reply: { running: "Editing its reply", done: "Edited its reply" },
+  delete_my_reply: { running: "Deleting its reply", done: "Deleted its reply" },
+  send_file: { running: "Sending a file", done: "Sent a file" },
+  preview_expose: {
+    running: "Asking for a preview link",
+    done: "Asked for a preview link",
+  },
+  request_human_takeover: {
+    running: "Asking a person to take over",
+    done: "Asked a person to take over",
+  },
+  complete_task: { running: "Reporting back", done: "Reported back" },
+  list_apps: { running: "Checking its apps", done: "Checked its apps" },
+  request_app_connection: {
+    running: "Asking to connect an app",
+    done: "Asked to connect an app",
+  },
 };
 
 /** The phrase for a tool nobody mapped — see TOOL_PHRASES on why we do not
  * echo the raw name. */
-const GENERIC_TOOL_PHRASE = "Using a tool";
+const GENERIC_TOOL_PHRASE: ToolPhrase = {
+  running: "Using a tool",
+  done: "Used a tool",
+};
 
 /**
- * The activity line for a running tool call.
- *
  * The platform prefixes its MCP tools (`mcp__onecli__process_status`), so the
  * lookup strips that prefix before matching — the prefix is plumbing, and a
  * reader should see "Checking background work" either way.
  */
-export const activityForTool = (name: string): string => {
-  const bare = name.replace(/^mcp__[^_]+__/, "").toLowerCase();
-  return TOOL_PHRASES[bare] ?? GENERIC_TOOL_PHRASE;
+const phraseFor = (name: string): ToolPhrase =>
+  TOOL_PHRASES[bareToolName(name).toLowerCase()] ?? GENERIC_TOOL_PHRASE;
+
+/** The activity line for a running tool call ("Running a command"). */
+export const activityForTool = (name: string): string =>
+  phraseFor(name).running;
+
+/** Act-as-you tools whose line names the conversation from the call's input
+ * ("Sent as you to #general"). */
+const AS_YOU_TOOLS = new Set([
+  "send_as_me",
+  "edit_my_message",
+  "delete_my_message",
+]);
+
+/** Sending tools whose finished line follows the result's outcome: a call
+ * that came back held / needs_access / needs_choice sent nothing, so its
+ * line must never say "Sent". */
+const SEND_TOOLS = new Set([...AS_YOU_TOOLS, "send_message"]);
+
+const MAX_TARGET_CHARS = 60;
+
+/** The agent's own-reply changes: a failed one must never read "Edited". */
+const OWN_REPLY_FAILED: Record<string, string> = {
+  edit_my_reply: "Couldn't edit its reply",
+  delete_my_reply: "Couldn't delete its reply",
 };
+
+/** An own-reply change in a named conversation: its line once done, and
+ * the verb a held or waiting one names (a message sent as the person goes
+ * through their approval, so "Deleted" would claim what has not happened).
+ * Neutral "a message": it may be the agent's post or one sent as you. */
+const OWN_REPLY_ELSEWHERE: Record<string, { done: string; what: string }> = {
+  edit_my_reply: { done: "Edited a message", what: "edit a message" },
+  delete_my_reply: { done: "Deleted a message", what: "delete a message" },
+};
+
+/** One string field of a JSON object, flattened and capped (untrusted). */
+const fieldOf = (raw: string | undefined, key: string): string | null => {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") return null;
+    const field: unknown = Reflect.get(value, key);
+    if (typeof field !== "string") return null;
+    const flat = field.replace(/\s+/g, " ").trim();
+    if (!flat) return null;
+    return flat.length > MAX_TARGET_CHARS
+      ? `${flat.slice(0, MAX_TARGET_CHARS - 1)}…`
+      : flat;
+  } catch {
+    return null;
+  }
+};
+
+/** How many files a send_message input carries (`files` paths). */
+const filesOf = (raw: string | undefined): number => {
+  if (!raw) return 0;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") return 0;
+    const files: unknown = Reflect.get(value, "files");
+    return Array.isArray(files) ? files.length : 0;
+  } catch {
+    return 0;
+  }
+};
+
+const outcomeOf = (output: string | undefined, isError: boolean) => {
+  if (isError) return "failed" as const;
+  const status = fieldOf(output, "status");
+  switch (status) {
+    case "held":
+      return "held" as const;
+    case "needs_access":
+    case "needs_choice":
+      return "needs_input" as const;
+    case "not_sent":
+      return "not_sent" as const;
+    default:
+      return "done" as const;
+  }
+};
+
+/** What a sending call targets: the conversation (as-you tools) or `to`. */
+const targetOf = (bare: string, input: string | undefined) =>
+  AS_YOU_TOOLS.has(bare)
+    ? fieldOf(input, "conversation")
+    : fieldOf(input, "to");
+
+/** The verb a not-done line names, per tool. */
+const ACTION_WORDS: Record<string, { what: string; asYou: string }> = {
+  send_message: { what: "send", asYou: "send" },
+  send_as_me: { what: "send", asYou: "send as you" },
+  edit_my_message: { what: "edit a message", asYou: "edit a message" },
+  delete_my_message: { what: "delete a message", asYou: "delete a message" },
+};
+
+/**
+ * A tool call's line with its input (and, once finished, its result) when
+ * that says more. The sending tools name their target and say what really
+ * happened: "Sent as you to #general", "Waiting for your approval: send as
+ * you to #general", "Needs your input: send to @Sam", "Couldn't send to
+ * @Sam". Every other tool reads its plain phrase. Input and output are
+ * untrusted model/tool text: callers render the result as text only.
+ */
+export const activityForToolCall = (
+  name: string,
+  input: string | undefined,
+  running: boolean,
+  result?: { output?: string; isError?: boolean },
+): string => {
+  const phrase = phraseFor(name);
+  const base = running ? phrase.running : phrase.done;
+  const bare = bareToolName(name).toLowerCase();
+  const ownReplyFailed = OWN_REPLY_FAILED[bare];
+  if (ownReplyFailed && !running && result?.isError === true) {
+    return ownReplyFailed;
+  }
+  const elsewhere = OWN_REPLY_ELSEWHERE[bare];
+  const where = elsewhere ? fieldOf(input, "conversation") : null;
+  if (elsewhere && where && !running && result?.isError !== true) {
+    switch (outcomeOf(result?.output, false)) {
+      case "held":
+        return `Waiting for your approval: ${elsewhere.what} in ${where}`;
+      case "needs_input":
+        return `Needs your input: ${elsewhere.what} in ${where}`;
+      default:
+        return `${elsewhere.done} in ${where}`;
+    }
+  }
+  if (!SEND_TOOLS.has(bare)) return base;
+  const target = targetOf(bare, input);
+  const words = ACTION_WORDS[bare]!;
+  const to = (prep: string) => (target ? ` ${prep} ${target}` : "");
+  const prep = bare === "send_as_me" || bare === "send_message" ? "to" : "in";
+  // send_message with files: "Sending 2 files to #x", then the outcome.
+  const fileCount = bare === "send_message" ? filesOf(input) : 0;
+  if (fileCount > 0) {
+    const files = `${fileCount} file${fileCount === 1 ? "" : "s"}`;
+    if (running) return `Sending ${files}${to("to")}`;
+    if (result) {
+      switch (outcomeOf(result.output, result.isError === true)) {
+        case "held":
+          return `Waiting for approval: send ${files}${to("to")}`;
+        case "failed":
+          return `Couldn't send ${files}${to("to")}`;
+        case "done":
+          return `Sent ${files}${to("to")}`;
+        default:
+          break;
+      }
+    }
+  }
+  if (!running && result) {
+    const outcome = outcomeOf(result.output, result.isError === true);
+    switch (outcome) {
+      case "held":
+        return `Waiting for your approval: ${words.asYou}${to(prep)}`;
+      case "needs_input":
+        return `Needs your input: ${words.what}${to(prep)}`;
+      case "not_sent":
+        return `Not sent${to(prep)}`;
+      case "failed":
+        return `Couldn't ${words.what}${to(prep)}`;
+      case "done":
+        break;
+    }
+  }
+  if (bare === "send_message" && !running && target) {
+    if (fieldOf(input, "thread")) return `Posted in a thread in ${target}`;
+  }
+  if (!AS_YOU_TOOLS.has(bare) || !target) return base;
+  return `${base}${to(prep)}`;
+};
+
+/** What the tool works on, or undefined when it is not one countable kind. */
+export const toolKind = (name: string): ToolKind | undefined =>
+  phraseFor(name).kind;
+
+/**
+ * A tool's name without the harness's MCP server prefix
+ * (`mcp__onecli__process_status` -> `process_status`). The prefix is
+ * plumbing the harness adds when it advertises a server's tools; every
+ * reader that matches on platform tool names (this activity line, the
+ * supervisor's per-conversation tool attribution) strips it through this one
+ * helper so the two can never disagree on the shape.
+ */
+export const bareToolName = (name: string): string =>
+  name.replace(/^mcp__[^_]+__/, "");
 
 /**
  * The activity line for a reasoning block, or null when there is nothing
@@ -164,4 +472,96 @@ export const activityForReasoning = (raw: string): string | null => {
     .slice(0, cut)
     .replace(/[\uD800-\uDBFF]$/, "")
     .trimEnd()}…`;
+};
+
+/**
+ * How much of a reasoning stream the caption reads: its tail. A model can
+ * think for pages, and the caption only ever wants the latest heading or
+ * sentence, so a bounded tail keeps the per-delta cost flat however long
+ * the block runs.
+ */
+export const REASONING_TAIL_MAX = 4_000;
+
+/** A `**Title**` that closes its line: how reasoning summaries name a step
+ *  (a bold heading, then prose). Models do not always put a newline before
+ *  it (a summary part can follow the previous one directly), so only the
+ *  END of the line is required. Inline emphasis mid-sentence ("this is
+ *  **key** here") is never followed by the line's end, so it never reads
+ *  as a heading. An unclosed `**Checking the con` cannot match at all. */
+const REASONING_TITLE = /\*\*([^*\n]{2,120})\*\*(?=[ \t]*(?:\n|$))/g;
+
+/** A sentence terminator that ENDS a sentence: followed by whitespace or
+ *  the end of the text. Words still being written ("Next I") have none. */
+const TERMINATOR = /[.!?](?=\s|$)/g;
+
+/**
+ * The finished sentences of one line, newest LAST. Linear: it walks the
+ * terminators once and slices between them. (A `[^.!?]+[.!?]` regex
+ * re-scans from every start position on a long line with no terminator,
+ * quadratic in the 4 KB tail, about 10 ms per delta.)
+ */
+const completeSentences = (line: string): string[] => {
+  const out: string[] = [];
+  let start = 0;
+  for (const match of line.matchAll(TERMINATOR)) {
+    const end = match.index + 1;
+    const sentence = line.slice(start, end);
+    if (/[^.!?\s]/.test(sentence)) out.push(sentence);
+    start = end;
+  }
+  return out;
+};
+
+/** The first boundary in a sliced tail: everything before it is the end of
+ *  a sentence whose start was cut away. */
+const FIRST_BOUNDARY = /[.!?](?=\s)|\n/;
+
+/**
+ * The activity line for a reasoning STREAM: everything the model has thought
+ * since the last tool call, accumulated across `thinking.delta` events.
+ *
+ * Why not `activityForReasoning` on each delta: a delta is a slice of the
+ * stream cut wherever a network batch happened to close, so its "first line"
+ * routinely starts mid-word ("ying out the plan…", "ate it."). Reading the
+ * accumulated text instead, and only what the model has FINISHED writing,
+ * the caption is always a whole thought:
+ *
+ * 1. the latest `**Title**` heading (how reasoning summaries name a step), else
+ * 2. the latest finished unit: a complete sentence, or a line the model has
+ *    closed with a newline (a short status line rarely ends in a period), else
+ * 3. nothing yet (null): the previous caption stands rather than flashing a
+ *    fragment.
+ *
+ * Same output contract as `activityForReasoning`: one bounded, inert line.
+ */
+export const activityForReasoningStream = (raw: string): string | null => {
+  let tail = raw;
+  if (raw.length > REASONING_TAIL_MAX) {
+    // The slice starts mid-sentence: skip to the first boundary so the cut
+    // sentence's back half can never be read as a whole one.
+    const sliced = raw.slice(-REASONING_TAIL_MAX);
+    const boundary = sliced.search(FIRST_BOUNDARY);
+    tail = boundary === -1 ? "" : sliced.slice(boundary + 1);
+  }
+
+  const title = [...tail.matchAll(REASONING_TITLE)].at(-1)?.[1];
+  if (title) {
+    const line = activityForReasoning(title);
+    if (line) return line;
+  }
+
+  // Newest first. Every line but the last is closed; the last is still being
+  // written, so only its finished sentences count. A closed line offers its
+  // last sentence, or itself whole when it has none ("Reviewing the diff").
+  const lines = tail.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sentences = completeSentences(lines[i]!);
+    const closed = i < lines.length - 1;
+    const candidates = closed ? [lines[i]!, ...sentences] : sentences;
+    for (let j = candidates.length - 1; j >= 0; j--) {
+      const line = activityForReasoning(candidates[j]!.trim());
+      if (line) return line;
+    }
+  }
+  return null;
 };

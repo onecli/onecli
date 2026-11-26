@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { db, Prisma } from "@onecli/db";
 import { ServiceError } from "../errors";
+import { AUTOMATION_SOURCES } from "../../validations/conversation";
 import { decryptCached } from "./channel-decrypt-cache";
 import {
   CHANNEL_ADAPTER_TOKEN,
@@ -10,6 +11,12 @@ import type { ChannelProviderId, ChannelTransport } from "./types";
 import { publicApiUrl } from "./posture";
 import { sweepStaleSessionReceipts } from "./turn-receipt-service";
 import { agentImageUrlOrNull } from "../agent-image-service";
+import { bumpHomeForAgent } from "../home-sync-service";
+import { listApprovalOutcomes } from "../approval-outcome-service";
+import type { ApprovalOutcome } from "../../validations/approval-outcomes";
+import { logger } from "../../lib/logger";
+
+const log = logger.child({ component: "channel-adapter-service" });
 
 /**
  * The channel adapter's control-plane service: registration and liveness
@@ -204,6 +211,9 @@ export interface AdapterPresenceConfig {
     externalUserId: string | null;
     mirrorCursor: Date | null;
   }[];
+  /** The link the presence's tool-approval cards go to: the approver's own
+   * direct thread, or null when they have none (see approvalsLinkOf). */
+  approvalsLinkId: string | null;
 }
 
 export interface AdapterConfigFeed {
@@ -374,7 +384,7 @@ export const getAdapterConfig = async (
         select: { id: true, name: true, workspaceId: true, imageKey: true },
       },
       integration: { select: { externalId: true, name: true } },
-      apiKey: { select: { key: true } },
+      apiKey: { select: { key: true, userId: true } },
       threadLinks: {
         select: {
           id: true,
@@ -383,7 +393,15 @@ export const getAdapterConfig = async (
           kind: true,
           externalUserId: true,
           mirrorCursor: true,
+          conversation: { select: { direct: true, userId: true } },
         },
+        // Deterministic: an unordered relation read comes back in heap
+        // order, which moves every time a link row is rewritten (the mirror
+        // cursor does that per answer). The instance etag below folds link
+        // ids IN THIS ORDER, so a reshuffle would bust it on every mirrored
+        // turn. And an adapter that predates `approvalsLinkId` still picks
+        // "the first direct link" for its cards, which would flip threads.
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       },
     },
     orderBy: { createdAt: "asc" },
@@ -421,6 +439,12 @@ export const getAdapterConfig = async (
                 l.id,
                 l.mirrorCursor?.toISOString() ?? "",
               ]),
+          // Where approval cards go is a feed output, and it can move with
+          // no other input changing: a link REPOINTED onto the approver's
+          // direct conversation (their Slack account linked after they
+          // first wrote as a guest) keeps its id, and the presence row is
+          // untouched.
+          approvalsLinkOf(r),
         ]),
       ]),
     )
@@ -460,11 +484,46 @@ export const getAdapterConfig = async (
         ? await decryptCached(row.credentials)
         : null,
       approvalsKey: row.apiKey?.key ?? null,
-      links: row.threadLinks,
+      links: row.threadLinks.map(({ conversation, ...link }) => {
+        void conversation;
+        return link;
+      }),
+      approvalsLinkId: approvalsLinkOf(row),
     })),
   );
 
   return { notModified: false, presences, etag };
+};
+
+/**
+ * The thread a presence's tool-approval cards go to: the APPROVER's own
+ * direct thread with the agent. The approver is the owner of the presence's
+ * service key: the identity the gateway decides approvals as. Only that
+ * person's direct conversation qualifies: a guest's DM (an approved external
+ * user talking to the agent) or another member's DM must never receive a
+ * card, since letting someone talk to the agent does not make them its
+ * approver. Null when there is no key (no approvals at all) or the approver
+ * has no DM with the agent yet. The approval stays decidable on the web, and
+ * a card posts once their DM is linked.
+ */
+const approvalsLinkOf = (row: {
+  apiKey: { userId: string } | null;
+  threadLinks: {
+    id: string;
+    kind: string;
+    conversation: { direct: boolean; userId: string | null };
+  }[];
+}): string | null => {
+  const approverId = row.apiKey?.userId;
+  if (!approverId) return null;
+  return (
+    row.threadLinks.find(
+      (l) =>
+        l.kind === "direct" &&
+        l.conversation.direct &&
+        l.conversation.userId === approverId,
+    )?.id ?? null
+  );
 };
 
 /**
@@ -528,8 +587,8 @@ export interface AdapterWorkItem {
     status: string;
     source: string;
     userId: string | null;
-    /** Display name of the person behind `userId`, for cross-surface
-     * attribution ("(from the web — Jonathan)"). Resolved server-side. */
+    /** Display name of the person behind `userId`, for the mirror's
+     * cross-surface attribution. Resolved server-side. */
     userName: string | null;
     message: string;
     error: string | null;
@@ -539,12 +598,33 @@ export interface AdapterWorkItem {
     sourceThreadId: string | null;
     createdAt: Date;
     finishedAt: Date | null;
+    /** The agent's OUTBOUND files for this turn (send_file), oldest first.
+     * Metadata only — the adapter pulls bytes through its fenced route. */
+    attachments: {
+      id: string;
+      name: string;
+      mimeType: string;
+      sizeBytes: number;
+      caption: string | null;
+    }[];
   };
   /** Mid-run follow-ups this turn consumed, oldest first — the mirror posts
-   * the web-sourced ones so both surfaces show the same exchange. Each
+   * the web-sourced ones so both surfaces show the same exchange, and each
+   * one's own reply (stored under its `id`) right after it, in the thread it
+   * was asked in (`sourceThreadId`, the turn's rule per message). Each
    * carries its OWN author's display name: on a group thread the follow-up
    * author can differ from the turn's asker. */
-  followUps: { message: string; source: string; userName: string | null }[];
+  followUps: {
+    id: string;
+    message: string;
+    source: string;
+    userName: string | null;
+    sourceThreadId: string | null;
+    /** Whether the reply feed already posted this follow-up's reply mid-run
+     * (`replyPostedAt` stamped): the completion pass posts the words, not
+     * the reply again. */
+    replyPosted: boolean;
+  }[];
   /** The link's stored mirror cursor when this item was served — the CAS-seed
    * floor for an instance that acquired the link mid-history (its etag no
    * longer folds cursors, so the config feed can't be its seed source). */
@@ -555,7 +635,37 @@ export interface AdapterWork {
   /** Finished turns past each link's mirror cursor — the completion pass
    * posts each exactly once (CAS-gated) and advances the cursor. */
   finished: AdapterWorkItem[];
+  /** Replies already written to mid-run follow-ups of turns STILL RUNNING,
+   * not yet claimed for posting: the mirror posts each the moment it sees
+   * it (claim first, then post), without waiting for the turn to close. */
+  replies: AdapterReplyItem[];
 }
+
+/** A mid-run follow-up's reply, ready to post while its turn still runs. */
+export interface AdapterReplyItem {
+  linkId: string;
+  presenceId: string;
+  conversationId: string;
+  /** The link's own address: the channel the reply posts in. */
+  externalThreadId: string;
+  kind: "direct" | "group";
+  /** The running turn the follow-up joined. */
+  turnId: string;
+  /** The follow-up itself: its words and author travel too, because one
+   * typed on another surface (the web) is not in the channel yet and must
+   * post ahead of its reply, as one exchange. */
+  followUp: {
+    id: string;
+    message: string;
+    source: string;
+    userName: string | null;
+    sourceThreadId: string | null;
+  };
+  reply: string;
+}
+
+/** Bound on one poll's reply feed: a catch-up never floods a provider. */
+const MAX_REPLIES_PER_POLL = 50;
 
 const workTurnSelect = {
   id: true,
@@ -595,7 +705,7 @@ export const getAdapterWork = async (
       agentChannel: { select: { id: true, provider: true } },
     },
   });
-  if (links.length === 0) return { finished: [] };
+  if (links.length === 0) return { finished: [], replies: [] };
 
   const byConversation = new Map(links.map((l) => [l.conversationId, l]));
 
@@ -655,17 +765,25 @@ export const getAdapterWork = async (
             message: true,
             source: true,
             userId: true,
+            sourceThreadId: true,
+            replyPostedAt: true,
           },
           orderBy: { createdAt: "asc" },
         });
 
-  // Who spoke, by name — one batched lookup for the cross-surface
-  // attribution lines ("(from the web — Jonathan)"). Follow-up authors are
-  // resolved too: on a group thread they can differ from the turn's asker,
-  // and the mirror must not put one member's words under another's name.
+  // The replies the agent already wrote to mid-run follow-ups of turns
+  // STILL RUNNING: read here, before the batched lookups, so their authors
+  // and attachment lines resolve in the same two queries as the finished
+  // turns'.
+  const liveReplies = await pendingReplies(byConversation);
+
+  // Who spoke, by name: one batched lookup for the mirror's cross-surface
+  // attribution. Follow-up authors are resolved too: on a group thread they
+  // can differ from the turn's asker, and the mirror must not put one
+  // member's words under another's name.
   const userIds = [
     ...new Set(
-      [...finishedTurns, ...joinedFollowUps]
+      [...finishedTurns, ...joinedFollowUps, ...liveReplies]
         .map((t) => t.userId)
         .filter((id): id is string => !!id),
     ),
@@ -680,24 +798,27 @@ export const getAdapterWork = async (
   // Display name or nothing — never an email-derived fallback: the mirror
   // posts this into a Slack thread whose audience is Slack-defined (guests,
   // external members), not fenced to workspace membership, so a member's
-  // email local-part must not travel there. A name-less member mirrors as
-  // the unnamed "(from the web)".
+  // email local-part must not travel there. A name-less member mirrors with
+  // an unnamed attribution.
   const userNameById = new Map(users.map((u) => [u.id, u.name ?? null]));
 
   // Attachment names, batched for turns AND follow-ups: the mirror's WIRE
   // COPY of a message gains a "📎 name" line so an attachment-only web
   // message never mirrors as a dangling attribution — the stored
   // `turn.message` stays verbatim (the attribution law), only this
-  // adapter-facing copy is decorated.
+  // adapter-facing copy is decorated. INBOUND rows only: the agent's own
+  // send_file rows hang off the same turn, and they belong under the
+  // answer (below), never in the person's mouth.
   const mirroredTurnIds = [
     ...finishedTurns.map((turn) => turn.id),
     ...joinedFollowUps.map((row) => row.id),
+    ...liveReplies.map((row) => row.id),
   ];
   const attachmentRows =
     mirroredTurnIds.length === 0
       ? []
       : await db.conversationAttachment.findMany({
-          where: { turnId: { in: mirroredTurnIds } },
+          where: { turnId: { in: mirroredTurnIds }, direction: "inbound" },
           select: { turnId: true, name: true },
           orderBy: { createdAt: "asc" },
         });
@@ -708,6 +829,45 @@ export const getAdapterWork = async (
     list.push(row.name);
     attachmentNamesByTurn.set(row.turnId, list);
   }
+
+  // The agent's OUTBOUND files (send_file), batched for the finished turns:
+  // the mirror posts them into the thread after the answer. Bound rows only
+  // (an outbound row is created bound; the filter is the law, not a guess).
+  const outboundRows =
+    finishedTurns.length === 0
+      ? []
+      : await db.conversationAttachment.findMany({
+          where: {
+            turnId: { in: finishedTurns.map((turn) => turn.id) },
+            direction: "outbound",
+            status: "bound",
+          },
+          select: {
+            id: true,
+            turnId: true,
+            name: true,
+            mimeType: true,
+            sizeBytes: true,
+            caption: true,
+          },
+          orderBy: { createdAt: "asc" },
+        });
+  const outboundByTurn = new Map<
+    string,
+    AdapterWorkItem["turn"]["attachments"]
+  >();
+  for (const row of outboundRows) {
+    if (!row.turnId) continue;
+    const list = outboundByTurn.get(row.turnId) ?? [];
+    list.push({
+      id: row.id,
+      name: row.name,
+      mimeType: row.mimeType,
+      sizeBytes: row.sizeBytes,
+      caption: row.caption,
+    });
+    outboundByTurn.set(row.turnId, list);
+  }
   const withAttachmentLine = (turnId: string, message: string): string => {
     const names = attachmentNamesByTurn.get(turnId);
     if (!names || names.length === 0) return message;
@@ -715,17 +875,17 @@ export const getAdapterWork = async (
     return message.length > 0 ? `${message}\n${line}` : line;
   };
 
-  const followUpsByTarget = new Map<
-    string,
-    { message: string; source: string; userName: string | null }[]
-  >();
+  const followUpsByTarget = new Map<string, AdapterWorkItem["followUps"]>();
   for (const row of joinedFollowUps) {
     if (!row.followUpOfTurnId) continue;
     const list = followUpsByTarget.get(row.followUpOfTurnId) ?? [];
     list.push({
+      id: row.id,
       message: withAttachmentLine(row.id, row.message),
       source: row.source,
       userName: row.userId ? (userNameById.get(row.userId) ?? null) : null,
+      sourceThreadId: row.sourceThreadId,
+      replyPosted: row.replyPostedAt !== null,
     });
     followUpsByTarget.set(row.followUpOfTurnId, list);
   }
@@ -751,6 +911,7 @@ export const getAdapterWork = async (
         userName: rest.userId ? (userNameById.get(rest.userId) ?? null) : null,
         message: withAttachmentLine(turn.id, rest.message),
         createdAt: timelineOf(turn),
+        attachments: outboundByTurn.get(turn.id) ?? [],
       },
       followUps: followUpsByTarget.get(turn.id) ?? [],
       linkMirrorCursor: link.mirrorCursor,
@@ -761,7 +922,147 @@ export const getAdapterWork = async (
     .map(toItem)
     .filter((item): item is AdapterWorkItem => item !== null);
 
-  return { finished };
+  const replies = liveReplies.flatMap((row): AdapterReplyItem[] => {
+    const link = byConversation.get(row.conversationId);
+    if (!link) return [];
+    return [
+      {
+        linkId: link.id,
+        presenceId: link.agentChannel.id,
+        conversationId: row.conversationId,
+        externalThreadId: link.externalThreadId,
+        kind: link.kind === "direct" ? "direct" : "group",
+        turnId: row.followUpOfTurnId,
+        followUp: {
+          id: row.id,
+          message: withAttachmentLine(row.id, row.message),
+          source: row.source,
+          userName: row.userId ? (userNameById.get(row.userId) ?? null) : null,
+          sourceThreadId: row.sourceThreadId,
+        },
+        reply: row.reply,
+      },
+    ];
+  });
+
+  return { finished, replies };
+};
+
+/** A joined follow-up of a RUNNING turn with the reply the agent stored
+ * under it, not yet claimed for posting. */
+interface PendingReply {
+  id: string;
+  conversationId: string;
+  message: string;
+  source: string;
+  userId: string | null;
+  sourceThreadId: string | null;
+  followUpOfTurnId: string;
+  reply: string;
+}
+
+/**
+ * The reply feed: replies the agent already wrote to mid-run follow-ups of
+ * turns STILL RUNNING in the caller's linked conversations, not yet claimed
+ * for posting. One indexed query over the joined follow-ups, one over their
+ * targets' status, one over the reply rows (the `text` stored under each
+ * follow-up); a follow-up whose reply the agent folded into its closing
+ * words (no `text` of its own) never appears here. Automation follow-ups (a
+ * wake that joined a run) are excluded: their reply is the caption body of
+ * an automation post, which stays the completion pass's.
+ */
+const pendingReplies = async (
+  byConversation: ReadonlyMap<string, unknown>,
+): Promise<PendingReply[]> => {
+  const candidates = await db.turn.findMany({
+    where: {
+      status: "joined",
+      replyPostedAt: null,
+      source: { notIn: [...AUTOMATION_SOURCES] },
+      conversationId: { in: [...byConversation.keys()] },
+      followUpOfTurnId: { not: null },
+    },
+    select: {
+      id: true,
+      conversationId: true,
+      message: true,
+      source: true,
+      userId: true,
+      sourceThreadId: true,
+      followUpOfTurnId: true,
+    },
+    orderBy: { createdAt: "asc" },
+    take: MAX_REPLIES_PER_POLL,
+  });
+  if (candidates.length === 0) return [];
+
+  // Only follow-ups of a turn that is still running: once the turn closes,
+  // the completion pass owns every reply it did not get to.
+  const runningTargets = new Set(
+    (
+      await db.turn.findMany({
+        where: {
+          id: {
+            in: candidates.flatMap((row) =>
+              row.followUpOfTurnId ? [row.followUpOfTurnId] : [],
+            ),
+          },
+          status: "running",
+        },
+        select: { id: true },
+      })
+    ).map((row) => row.id),
+  );
+  const live = candidates.filter(
+    (row): row is typeof row & { followUpOfTurnId: string } =>
+      row.followUpOfTurnId !== null && runningTargets.has(row.followUpOfTurnId),
+  );
+  if (live.length === 0) return [];
+
+  // The reply rows: the durable `text` stored under each follow-up's id.
+  // Last one wins, matching the transcript's own fold.
+  const replyRows = await db.turnEvent.findMany({
+    where: { turnId: { in: live.map((row) => row.id) }, type: "text" },
+    select: { turnId: true, payload: true },
+    orderBy: { seq: "asc" },
+  });
+  const replyByFollowUp = new Map<string, string>();
+  for (const row of replyRows) {
+    const payload = row.payload as { text?: unknown };
+    if (typeof payload.text === "string" && payload.text.length > 0) {
+      replyByFollowUp.set(row.turnId, payload.text);
+    }
+  }
+
+  return live.flatMap((row) => {
+    const reply = replyByFollowUp.get(row.id);
+    return reply === undefined ? [] : [{ ...row, reply }];
+  });
+};
+
+/**
+ * Claim a follow-up's reply for posting: exactly-once by compare-and-set
+ * (`replyPostedAt` NULL to now). The loser of a race (an adapter twin, the
+ * completion pass against the reply feed) writes nothing and posts nothing.
+ * Fenced to the caller's own links: a follow-up this adapter does not serve
+ * is not its to claim.
+ */
+export const claimFollowUpReply = async (
+  adapterId: string,
+  followUpId: string,
+): Promise<boolean> => {
+  const updated = await db.turn.updateMany({
+    where: {
+      id: followUpId,
+      status: "joined",
+      replyPostedAt: null,
+      conversation: {
+        threadLink: { agentChannel: { ownerAdapterId: adapterId } },
+      },
+    },
+    data: { replyPostedAt: new Date() },
+  });
+  return updated.count === 1;
 };
 
 /**
@@ -773,17 +1074,32 @@ export const reportApprovalAuth = async (
   presenceId: string,
   healthy: boolean,
 ): Promise<void> => {
-  if (healthy) {
-    await db.agentChannel.updateMany({
-      where: { id: presenceId, status: "needs_attention" },
-      data: { status: "active" },
-    });
-    return;
-  }
-  await db.agentChannel.updateMany({
-    where: { id: presenceId, status: "active" },
-    data: { status: "needs_attention" },
+  const flipped = healthy
+    ? await db.agentChannel.updateMany({
+        where: { id: presenceId, status: "needs_attention" },
+        data: { status: "active" },
+      })
+    : await db.agentChannel.updateMany({
+        where: { id: presenceId, status: "active" },
+        data: { status: "needs_attention" },
+      });
+  // A flip is a render input for the agent's `channels` section (it says
+  // whether approvals from the channel currently work). Only when the row
+  // actually MOVED: the health report arrives every poll, and a bump per
+  // poll would re-render the doc for nothing.
+  if (flipped.count === 0) return;
+  const presence = await db.agentChannel.findUnique({
+    where: { id: presenceId },
+    select: { agentId: true },
   });
+  if (presence) {
+    void bumpHomeForAgent(presence.agentId).catch((err: unknown) =>
+      log.warn(
+        { err, presenceId },
+        "home bump after an approval-health flip failed",
+      ),
+    );
+  }
 };
 
 // ── Tool-approval cards: dedupe + the update handle, restart-safe ───────────
@@ -866,3 +1182,66 @@ export const listUnsettledToolApprovalCards = async (adapterId: string) =>
       createdAt: true,
     },
   });
+
+/**
+ * How the gateway approvals behind the CALLER'S cards ended, for the
+ * channel-neutral absence arm: a card that merely left the pending set is
+ * labelled from the record ("Cancelled · the agent stopped waiting",
+ * "Approved from the dashboard"), never guessed as "decided".
+ *
+ * Fenced twice: only cards on presences this adapter owns are looked up (an
+ * id of another adapter's card, or no card at all, answers nothing), and
+ * each card's agent is read through `listApprovalOutcomes`, which fences to
+ * that agent's workspace and organization. Ids in; the same record the web
+ * card reads out (outcome, place, time), never the request's content.
+ */
+export const listToolApprovalCardOutcomes = async (
+  adapterId: string,
+  approvalIds: string[],
+): Promise<ApprovalOutcome[]> => {
+  const cards = await db.toolApprovalCard.findMany({
+    where: {
+      approvalId: { in: approvalIds },
+      agentChannel: { ownerAdapterId: adapterId },
+    },
+    select: {
+      approvalId: true,
+      agentChannel: {
+        select: {
+          agent: {
+            select: {
+              id: true,
+              workspaceId: true,
+              workspace: { select: { organizationId: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+  const byAgent = new Map<
+    string,
+    { workspaceId: string; organizationId: string; ids: string[] }
+  >();
+  for (const card of cards) {
+    const { agent } = card.agentChannel;
+    const entry = byAgent.get(agent.id) ?? {
+      workspaceId: agent.workspaceId,
+      organizationId: agent.workspace.organizationId,
+      ids: [],
+    };
+    entry.ids.push(card.approvalId);
+    byAgent.set(agent.id, entry);
+  }
+  const answers = await Promise.all(
+    [...byAgent].map(([agentId, { workspaceId, organizationId, ids }]) =>
+      listApprovalOutcomes({
+        workspaceId,
+        organizationId,
+        agentId,
+        approvalIds: ids,
+      }),
+    ),
+  );
+  return answers.flat();
+};

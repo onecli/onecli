@@ -44,6 +44,22 @@ export const pgAttachmentBlobStore: AttachmentBlobStore = {
     return Buffer.from(row.data);
   },
 
+  async presign() {
+    // Inline bytes have no URL of their own; the api streams them.
+    return null;
+  },
+
+  async expire(refs) {
+    const inline = refs.filter((ref) => ref.storageRef === null);
+    if (inline.length === 0) return;
+    // Null, don't shrink: a bytea rewrite would copy; nulling releases the
+    // TOAST pages for vacuum in one write per row.
+    await db.conversationAttachment.updateMany({
+      where: { id: { in: inline.map((ref) => ref.id) } },
+      data: { data: null },
+    });
+  },
+
   async delete() {
     // Inline bytes die with their rows — the FK cascade owns it.
   },

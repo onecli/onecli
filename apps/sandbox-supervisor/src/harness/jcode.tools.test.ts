@@ -3,9 +3,11 @@ import {
   JCODE_DISABLED_TOOLS_VALUE,
   JCODE_EFFORT,
   JCODE_SWARM_ENV,
+  JCODE_WEBSEARCH_ENV,
   managedConfigToml,
   SWARM_LIGHT_PROMPT,
   SWARM_WORKER_CAP,
+  WEBSEARCH_NATIVE_MAX_USES,
 } from "./jcode";
 
 /**
@@ -32,8 +34,12 @@ describe("the disabled harness-native tools", () => {
     // removal: the native tool is a Firefox-extension bridge that can never
     // work in a headless guest, and its self-description sent the model into
     // setup loops (observed live); chromium is baked into the image instead.
+    // `applet`/`panel`/`side_panel` draw into the vendor's desktop app, which
+    // no platform surface shows, yet report success, so the model pointed
+    // people at a card that was never shown (observed live).
+    // `calendar`/`compile_remote` answer with the vendor's own logins.
     expect(JCODE_DISABLED_TOOLS_VALUE).toBe(
-      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser",
+      "schedule,skill_manage,gmail,integration_tools,memory,maintainer_feedback,jcode_docs,browser,applet,panel,side_panel,calendar,compile_remote",
     );
   });
 });
@@ -56,6 +62,39 @@ describe("the managed config's update opt-out", () => {
     // half (JCODE_NO_AUTO_UPDATE) is asserted by the launch wiring, this
     // pins the config half.
     expect(managedConfigToml).toMatch(/check_updates = false/);
+  });
+});
+
+describe("the managed config's context cap", () => {
+  it("caps the compaction budget at 200k tokens", () => {
+    // MUTATION-PROOF: drop the section or the key and this fails. Without it
+    // a 1M-window model compacts at 80% of its window (~800k), so a long
+    // conversation re-sends that much on every request.
+    expect(managedConfigToml).toMatch(
+      /\[compaction\]\nmax_context_tokens = 200000\n/,
+    );
+  });
+
+  it("pins the one-hour Anthropic prompt cache under [provider]", () => {
+    // Upstream's default today; pinned so a default flip cannot quietly
+    // drop the cache to 5 minutes. MUTATION-PROOF: remove the key, or move
+    // it out of [provider], and this fails. Order within the section is free.
+    expect(managedConfigToml).toMatch(
+      /\[provider\]\n(?:[^[\n][^\n]*\n)*anthropic_cache_ttl_1h = true\n/,
+    );
+  });
+});
+
+describe("the managed config's OpenAI route", () => {
+  it("pins the OpenAI transport to HTTPS under [provider]", () => {
+    // The default ("auto") tries a WebSocket first, and that client ignores
+    // the proxy env, so in a sandbox it can stall on jcode's 8 s connect
+    // timeout before falling back (rationale in the adapter header).
+    // MUTATION-PROOF: remove the key, set it to "auto"/"websocket", or move
+    // it out of [provider], and this fails.
+    expect(managedConfigToml).toMatch(
+      /\[provider\]\n(?:[^[\n][^\n]*\n)*openai_transport = "https"\n/,
+    );
   });
 });
 
@@ -95,6 +134,21 @@ describe("the swarm posture: always on, fenced by env", () => {
     expect(SWARM_WORKER_CAP).toBe(8);
   });
 
+  it("pins provider-native web search on, with a usable per-request cap", () => {
+    // Scraped search (DDG/Bing/Google) from sandbox egress gets CAPTCHA'd
+    // after a handful of requests (prod, 2026-09-29). Native search runs on
+    // the provider's side. Env, not config.toml: env overrides re-apply on
+    // every config reload, so an agent cannot switch scraping back on.
+    expect(JCODE_WEBSEARCH_ENV).toEqual({
+      JCODE_WEBSEARCH_PREFER_NATIVE: "1",
+      JCODE_WEBSEARCH_NATIVE_MAX_USES: String(WEBSEARCH_NATIVE_MAX_USES),
+    });
+    // Upstream's default of 5 stops a single enrichment turn mid-list.
+    expect(WEBSEARCH_NATIVE_MAX_USES).toBeGreaterThan(5);
+    // Native search is attached only when the session offers `websearch`.
+    expect(JCODE_DISABLED_TOOLS_VALUE.split(",")).not.toContain("websearch");
+  });
+
   it("the effort map can never hand jcode a swarm sentinel", () => {
     // jcode's effort vocabulary includes the sentinels "swarm" and
     // "swarm-deep", and swarm-deep on the ROOT session is the one unlock
@@ -110,30 +164,20 @@ describe("the swarm posture: always on, fenced by env", () => {
     ]);
   });
 
-  it("the prompt block states the cap, the flat-fan-out law, and hygiene", () => {
-    expect(SWARM_LIGHT_PROMPT).toContain(`at most ${SWARM_WORKER_CAP} helpers`);
-    expect(SWARM_LIGHT_PROMPT).toContain("helpers never\nspawn their own");
-    expect(SWARM_LIGHT_PROMPT).toContain("headless");
+  it("the prompt block states the cap and the flat-fan-out law", () => {
+    const flat = SWARM_LIGHT_PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(`At most ${SWARM_WORKER_CAP} helpers alive at once`);
+    expect(flat).toContain("helpers never spawn their own");
+    expect(flat).toContain("spawn headless only");
     // The sentinel/deep-mode ban: enforcement is the harness's (root-only
     // spawning + the effort map above); the prompt keeps the model from
     // burning turns discovering the walls.
-    expect(SWARM_LIGHT_PROMPT).toContain('Never pass "swarm" or "swarm-deep"');
-    expect(SWARM_LIGHT_PROMPT).toContain("deep mode");
+    expect(flat).toContain('Never pass "swarm" or "swarm-deep"');
+    expect(flat).toContain("deep mode");
     // The startup-race insurance (observed live: first spawn after a
     // swarm-enabled restart can refuse while membership settles).
-    expect(SWARM_LIGHT_PROMPT).toContain("retry once");
-    // The idle-helper hygiene rule (observed live: finished helpers sat
-    // "ready" holding server memory until asked about — and a finished
-    // worker keeps consuming a cap slot until stopped or reaped).
-    expect(SWARM_LIGHT_PROMPT).toContain("stop or clean up");
-    // The deliverable-extraction laws (observed live: every relay of helper
-    // text truncates long content, a message to a completed helper drops
-    // after reporting success, and a stop before collection loses the
-    // deliverable for good). Raw pins — each fragment sits inside one
-    // physical line of the block, like the pins above.
-    expect(SWARM_LIGHT_PROMPT).toContain("name an exact file path");
-    expect(SWARM_LIGHT_PROMPT).toContain("one at a time");
-    expect(SWARM_LIGHT_PROMPT).toContain("already completed");
-    expect(SWARM_LIGHT_PROMPT).toContain("verified in hand");
+    expect(flat).toContain("retry once");
+    // Collection and idle-helper hygiene live in the swarm tool's own
+    // description (SWARM_PROMPT_OVERRIDE, pinned in jcode.prompt.test.ts).
   });
 });

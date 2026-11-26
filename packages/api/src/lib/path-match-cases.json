@@ -1,0 +1,129 @@
+{
+  "_comment": "Shared path_matches corpus. The SAME cases are asserted by the TS port (path-match-parity.test.ts) and the Rust gateway (inject/src/lib.rs, include_str!). A divergence means the gateway enforces something other than what the API believes it granted.",
+  "cases": [
+    { "path": "/anything/at/all", "pattern": "*", "want": true },
+
+    { "path": "/v1", "pattern": "/v1/*", "want": true },
+    { "path": "/v1/foo", "pattern": "/v1/*", "want": true },
+    { "path": "/v1/foo/bar", "pattern": "/v1/*", "want": true },
+    { "path": "/v1beta/foo", "pattern": "/v1/*", "want": false },
+
+    {
+      "path": "/v1.0/me/messages/123",
+      "pattern": "/v1.0/me/messages*",
+      "want": true
+    },
+    {
+      "path": "/v1.0/me/messagesX",
+      "pattern": "/v1.0/me/messages*",
+      "want": true
+    },
+    { "path": "/v1.0/me/mail", "pattern": "/v1.0/me/messages*", "want": false },
+
+    { "path": "/exact", "pattern": "/exact", "want": true },
+    { "path": "/exact/", "pattern": "/exact", "want": false },
+    { "path": "/exact/x", "pattern": "/exact", "want": false },
+    {
+      "path": "/exact?service=git-receive-pack",
+      "pattern": "/exact",
+      "want": true
+    },
+
+    { "path": "/repos/r/issues", "pattern": "/repos/*/issues", "want": true },
+    {
+      "path": "/repos/r/issues?state=open",
+      "pattern": "/repos/*/issues",
+      "want": true
+    },
+    { "path": "/repos/issues", "pattern": "/repos/*/issues", "want": false },
+    {
+      "path": "/repos/r/sub/issues",
+      "pattern": "/repos/*/issues",
+      "want": false
+    },
+    { "path": "/repos/r/issues/", "pattern": "/repos/*/issues", "want": false },
+
+    {
+      "path": "/gmail/v1/users/me/messages/abc",
+      "pattern": "/gmail/v1/users/*/messages/*",
+      "want": true
+    },
+    {
+      "path": "/gmail/v1/users/me/messages/abc/def",
+      "pattern": "/gmail/v1/users/*/messages/*",
+      "want": true
+    },
+    {
+      "path": "/gmail/v1/users/me/messages",
+      "pattern": "/gmail/v1/users/*/messages/*",
+      "want": false
+    },
+
+    {
+      "path": "/v1/proj/models/ep1:predict",
+      "pattern": "/v1/*/models/*:predict",
+      "want": true
+    },
+    {
+      "path": "/v1/proj/models/ep1:other",
+      "pattern": "/v1/*/models/*:predict",
+      "want": false
+    },
+
+    {
+      "path": "/services/data/v59.0/sobjects/Contact/",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": true
+    },
+    {
+      "path": "/services/data/v59.0/sobjects/Contact",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": true
+    },
+    {
+      "path": "/services/data/v59.0/sobjects/Contact?x=1",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": true
+    },
+    {
+      "path": "/services/data/v59.0/sobjects/Contact/003xx",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": false
+    },
+    {
+      "path": "/services/data/v59.0/sobjects/Contact/003xx/",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": false
+    },
+    {
+      "path": "/services/data/v59.0/sobjects",
+      "pattern": "/services/data/v*/sobjects/*/",
+      "want": false
+    },
+    {
+      "path": "/services/data/v59.0/",
+      "pattern": "/services/data/v*/",
+      "want": true
+    },
+    {
+      "path": "/services/data/v59.0",
+      "pattern": "/services/data/v*/",
+      "want": true
+    },
+    {
+      "path": "/services/data/v59.0/graphql",
+      "pattern": "/services/data/v*/",
+      "want": false
+    },
+    {
+      "path": "/api/0/projects/acme/web/issues",
+      "pattern": "/api/0/projects/*/*/issues/",
+      "want": true
+    },
+    {
+      "path": "/api/0/projects/acme/issues",
+      "pattern": "/api/0/projects/*/*/issues/",
+      "want": false
+    }
+  ]
+}

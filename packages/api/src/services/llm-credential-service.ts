@@ -17,7 +17,7 @@ import {
   isLlmProviderId,
   llmProvider,
 } from "../llm/registry";
-import type { LlmProviderId } from "../llm/types";
+import type { LlmAuthMode, LlmProviderId } from "../llm/types";
 import { injectableSecretWhere } from "./injectable-secrets";
 
 /**
@@ -37,7 +37,7 @@ import { injectableSecretWhere } from "./injectable-secrets";
 export interface ResolvedLlmCredential {
   provider: LlmProviderId;
   secretId: string;
-  authMode: "api-key" | "oauth";
+  authMode: LlmAuthMode;
   /**
    * "workspace" | "organization" — which grant won, for explaining the
    * choice — or "platform" for the trial-credit credential (see below).
@@ -50,7 +50,7 @@ export interface ResolvedLlmCredential {
 const authModeOf = (
   provider: LlmProviderId,
   metadata: unknown,
-): "api-key" | "oauth" => {
+): LlmAuthMode => {
   const parsed =
     provider === "anthropic"
       ? parseAnthropicMetadata(metadata)
@@ -107,7 +107,9 @@ const byPrecedence = (
  * Eligibility is decided on the UNFILTERED org+workspace pool — NOT the
  * grant-narrowed `where` — mirroring the gateway exactly: an
  * existing-but-restricted LLM key counts as present, so a restriction is
- * never bypassed with free credit.
+ * never bypassed with free credit. The org's founding owner must also be
+ * trusted (Google sign-in, or a non-consumer-Microsoft address), the same
+ * owner and the same rule the gateway applies before injecting.
  *
  * The shape is honest about what the control plane holds: `hasReadableValue:
  * false` (the key lives only in the gateway's env; the models catalog serves
@@ -120,11 +122,22 @@ const platformTrialCredential = async (
 ): Promise<ResolvedLlmCredential | null> => {
   const platform = getPlatformLlm();
   if (!platform) return null;
-  const pool = await db.secret.findMany({
-    where: { OR: [{ workspaceId }, { organizationId, scope: "organization" }] },
-    select: { type: true, hostPattern: true },
-  });
-  if (!platform.trialCreditApplies(pool)) return null;
+  const [pool, owner] = await Promise.all([
+    db.secret.findMany({
+      where: {
+        OR: [{ workspaceId }, { organizationId, scope: "organization" }],
+      },
+      select: { type: true, hostPattern: true },
+    }),
+    // The credit's subject: the org's founding owner, picked exactly as the
+    // gateway's `founding_owner` picks it (earliest active owner, then id).
+    db.organizationMember.findFirst({
+      where: { organizationId, role: "owner", status: "active" },
+      orderBy: [{ createdAt: "asc" }, { userId: "asc" }],
+      select: { user: { select: { email: true, signInProvider: true } } },
+    }),
+  ]);
+  if (!platform.trialCreditApplies(pool, owner?.user ?? null)) return null;
   return {
     provider: "anthropic",
     secretId: PLATFORM_LLM_SECRET_ID,
@@ -167,6 +180,51 @@ export const resolveAgentLlmCredential = async (
     hasReadableValue:
       winner.valueSource !== "onepassword" && winner.encryptedValue !== null,
   };
+};
+
+/**
+ * The most context, in tokens, this agent's conversations may run at given
+ * the credential it runs on, or null for no limit. Only the platform's trial
+ * credit has one (`PlatformLlmProvider.trialMaxContextTokens`); an agent on
+ * a key of its own is unlimited, and the harness still clamps every size to
+ * the model's own window. Resolved through `resolveAgentLlmCredential`, so
+ * "on the trial credit" means exactly what every other door means by it.
+ * Short-circuits with no query when no deployment limit exists (every
+ * self-host): the common case pays nothing.
+ */
+export const agentContextTokenLimit = async (
+  agentId: string,
+): Promise<number | null> => {
+  const limit = getPlatformLlm()?.trialMaxContextTokens;
+  if (limit === undefined) return null;
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      id: true,
+      workspaceId: true,
+      workspace: { select: { organizationId: true } },
+    },
+  });
+  if (!agent) return null;
+  const credential = await resolveAgentLlmCredential(
+    agent,
+    agent.workspace.organizationId,
+  );
+  return credential?.secretId === PLATFORM_LLM_SECRET_ID ? limit : null;
+};
+
+/**
+ * The context size a turn of this agent ships with: the conversation's
+ * chosen size, never above the agent's credential limit. Undefined when the
+ * conversation has no size of its own (the harness default stands).
+ */
+export const deliveredContextTokens = async (
+  agentId: string,
+  chosen: number | undefined,
+): Promise<number | undefined> => {
+  if (chosen === undefined) return undefined;
+  const limit = await agentContextTokenLimit(agentId);
+  return limit === null ? chosen : Math.min(chosen, limit);
 };
 
 /**

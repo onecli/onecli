@@ -4,9 +4,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { getApps } from "@onecli/api/apps/registry";
+import { getApp, getApps } from "@onecli/api/apps/registry";
 import type { AppDefinition } from "@onecli/api/apps/types";
-import { Search } from "lucide-react";
+import {
+  MAX_CUSTOM_CONNECTION_LABEL_CHARS,
+  cleanLabel,
+} from "@onecli/agent-protocol/text";
+import { ChevronRight, KeyRound, Search } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -16,51 +20,86 @@ import {
 } from "@onecli/ui/components/dialog";
 import { Input } from "@onecli/ui/components/input";
 import { AppIcon } from "@/lib/components/app-icon";
-import { WORKSPACE_PATH_RE, connectionsPath } from "@/lib/navigation";
+import { RequestAppSlot } from "@/lib/components/request-app-slot";
+import {
+  WORKSPACE_PATH_RE,
+  agentSectionPath,
+  connectionsPath,
+  mergedSectionPath,
+} from "@/lib/navigation";
+import { withConnectLinkAgent } from "@/lib/connect-link-agent";
+import { useChatSend } from "@/lib/chat/chat-send";
+import { useInstance } from "@/hooks/use-instance";
 import { connectPopupHeight, openConnectPopup } from "@/lib/connect-popup";
 import { queryKeys } from "@/lib/api/keys";
 import { useAppMessages } from "@/hooks/use-app-connected";
 import { useAgentDetail } from "@/hooks/use-agents";
 import { useAvailableApps } from "@/hooks/use-available-apps";
 import { useConnections } from "@/hooks/use-connections";
-import { useSetConnectionGrant } from "@/hooks/use-grants";
+import { useInvalidateGrants } from "@/hooks/use-grants";
+import {
+  GITHUB_APP_PROVIDER,
+  useSharedGitHubInstallations,
+} from "@/hooks/use-github-app-share";
+import { GitHubAppConnectDialog } from "@/app/(dashboard)/w/[workspaceId]/connections/_components/github-app-connect-dialog";
+
+/** What the picker sends the agent when the catalog has no match: the agent
+ * researches the app's API and answers with a custom-connection card. */
+const customConnectionRequest = (name: string): string =>
+  `I want to connect ${name} as a custom connection with an API key.`;
 
 /**
  * The agent-scoped app picker: search the catalog, Connect opens the OAuth
- * popup in place (the shared `openConnectPopup`), and the fresh connection is
- * granted to THIS agent automatically the moment the popup lands (full
- * access — Manage is the scoping-down door). The catalog honors the org
- * app-availability restriction exactly like the connections page's picker.
- * Shared by the agent Connections section's Add button and the chat's
- * connector card, so both doors keep one contract.
+ * popup in place (the shared `openConnectPopup`). The connect carries THIS
+ * agent, so a new account lands switched on for it alone (the API's
+ * connecting-agent grant): read tools allowed, writes needing approval, and
+ * requests outside the tool list needing approval too unless the catalog
+ * was checked safe for reads. The dialog shows no consent paragraph (kept
+ * short on purpose); what lands is visible and adjustable under Manage.
+ * There is no grant to write here, and Manage is the scoping door.
+ * The catalog honors the org app-availability restriction exactly like the
+ * connections page's picker. Shared by the agent Connections section's Add
+ * button and the chat's connector card, so both doors keep one contract.
  */
 export const ConnectAppPickerDialog = ({
   agentId,
   open,
   onOpenChange,
-  onGranted,
+  onConnected,
 }: {
   agentId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Fires after the fresh connection's grant to this agent committed —
-   *  the caller decides what "next" looks like (the section opens its
+  /** Fires when a connect this dialog started CREATED an account. The
+   *  caller decides what "next" looks like (the section opens its
    *  permissions sheet; the chat card toasts). */
-  onGranted?: (connectionId: string) => void;
+  onConnected?: (connectionId: string) => void;
 }) => {
   const [query, setQuery] = useState("");
+  // Only inside an agent chat: there a search with no match can be handed
+  // to the agent as a custom connection.
+  const chatSend = useChatSend();
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const invalidateGrants = useInvalidateGrants();
   const { data: connections = [] } = useConnections("workspace");
   const { data: availableApps } = useAvailableApps("workspace");
   // For the popup's success screen ("Go back to <agent>…") — cached from the
   // agent page's own detail read.
   const { data: agent } = useAgentDetail(agentId);
-  const setGrant = useSetConnectionGrant();
-  // Auto-grant only what THIS dialog initiated — a global message listener
+  const instance = useInstance();
+  // React only to what THIS dialog initiated: a global message listener
   // also hears popups opened elsewhere (another tab, another surface).
   const initiated = useRef(new Set<string>());
+  // GitHub App: an org admin is offered the installations already connected
+  // in the org (shared with the org, never copied) before a GitHub install
+  // popup. Members (no installations offered) get the popup.
+  const [githubShareOpen, setGithubShareOpen] = useState(false);
+  const { data: sharedInstallations = [] } = useSharedGitHubInstallations(
+    "workspace",
+    open,
+  );
 
   // Each open starts fresh (the 1Password picker's rule) — the dialog stays
   // mounted across opens, so yesterday's search would leak into today's.
@@ -72,23 +111,13 @@ export const ConnectAppPickerDialog = ({
     onConnected: ({ provider, connectionId }) => {
       if (!provider || !initiated.current.has(provider)) return;
       initiated.current.delete(provider);
-      // The pool changed whether or not the grant leg runs (a fresh account,
-      // or a reconnect the callback deduped onto an existing one) — refresh
-      // the list and the count badges unconditionally, the same sweep the
-      // connections page's listener does.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.connections.all(),
-      });
+      // The pool changed (a fresh account, or a re-add the callback deduped
+      // onto an existing one), and either arrives switched on for this agent:
+      // refresh the list, the grant views and the count badges.
+      invalidateGrants();
       void queryClient.invalidateQueries({ queryKey: queryKeys.counts.all() });
-      // Fresh connection from this agent's surface: attach it to THIS agent
-      // with full access — scoping down afterwards is what Manage is for.
       // Reconnects carry no connectionId and keep their grants.
-      if (connectionId) {
-        setGrant.mutate(
-          { agentId, connectionId, input: { access: "full" } },
-          { onSuccess: () => onGranted?.(connectionId) },
-        );
-      }
+      if (connectionId) onConnected?.(connectionId);
       onOpenChange(false);
     },
     // The popup reports an app that needs credentials configured before it
@@ -100,8 +129,15 @@ export const ConnectAppPickerDialog = ({
       if (!initiated.current.has(provider)) return;
       initiated.current.delete(provider);
       onOpenChange(false);
+      // The connect that follows the setup is still this agent's.
       router.push(
-        connectionsPath({ pathname }, `/apps/${encodeURIComponent(provider)}`),
+        withConnectLinkAgent(
+          connectionsPath(
+            { pathname },
+            `/apps/${encodeURIComponent(provider)}`,
+          ),
+          agentId,
+        ),
       );
     },
   });
@@ -129,10 +165,43 @@ export const ConnectAppPickerDialog = ({
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [query, availableApps]);
 
-  const connect = (app: AppDefinition) => {
+  // Slack is not a catalog app (the gateway never injects Slack creds): its
+  // read access is a per-agent connection in this agent's Contacts ("acts as
+  // you"), so the row is a door there, offered only where entitled.
+  const showSlack =
+    instance?.entitled === true &&
+    (!query.trim() || "slack".includes(query.trim().toLowerCase()));
+  // The search as an app name for a custom connection: control and invisible
+  // characters dropped, clipped to a connection name's length. Offered only
+  // in a chat, and only when no built-in app matches at all, including one
+  // the org hides here: the platform refuses a custom connection for a
+  // built-in app.
+  const customName = cleanLabel(query, MAX_CUSTOM_CONNECTION_LABEL_CHARS);
+  const offerCustom =
+    customName !== "" &&
+    !showSlack &&
+    !getApps().some((a) =>
+      a.name.toLowerCase().includes(customName.toLowerCase()),
+    );
+  const hasSlackApp = (agent?.channels ?? []).some(
+    (c) => c.provider === "slack" && c.status !== "pending_setup",
+  );
+  const openSlack = () => {
+    onOpenChange(false);
+    // With Slack attached, connecting your own Slack lives in Contacts
+    // ("acts as you"); without it, the Slack page adds the agent first.
+    router.push(
+      hasSlackApp
+        ? agentSectionPath(pathname, agentId, "contacts")
+        : mergedSectionPath(pathname, agentId, "channels"),
+    );
+  };
+
+  const openPopupFor = (app: AppDefinition) => {
     initiated.current.add(app.id);
     const popup = openConnectPopup(app.id, {
       agentName: agent?.name,
+      agentId,
       workspaceId: pathname.match(WORKSPACE_PATH_RE)?.[1],
       height: connectPopupHeight(app),
     });
@@ -144,74 +213,152 @@ export const ConnectAppPickerDialog = ({
     }
   };
 
+  const connect = (app: AppDefinition) => {
+    if (app.id === GITHUB_APP_PROVIDER && sharedInstallations.length > 0) {
+      onOpenChange(false);
+      setGithubShareOpen(true);
+      return;
+    }
+    openPopupFor(app);
+  };
+
+  const githubApp = getApp(GITHUB_APP_PROVIDER);
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Connect an app</DialogTitle>
-          <DialogDescription>
-            Connecting gives this agent full access. Adjust it anytime under
-            Manage.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="relative">
-          <Search
-            className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-            aria-hidden
-          />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search apps…"
-            aria-label="Search apps"
-            className="pl-9"
-            autoFocus
-          />
-        </div>
-        <div className="-mx-1 max-h-80 space-y-0.5 overflow-y-auto px-1">
-          {apps.map((app) => {
-            const connected = connectedCount.get(app.id) ?? 0;
-            return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Connect an app</DialogTitle>
+            <DialogDescription className="sr-only">
+              Search for an app to connect.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative">
+            <Search
+              className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+              aria-hidden
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search apps…"
+              aria-label="Search apps"
+              className="pl-9"
+              autoFocus
+            />
+          </div>
+          <div className="-mx-1 max-h-80 space-y-0.5 overflow-y-auto px-1">
+            {showSlack && (
               <button
-                key={app.id}
                 type="button"
-                onClick={() => connect(app)}
-                title={
-                  connected > 0
-                    ? `Connect another ${app.name} account`
-                    : undefined
-                }
+                onClick={openSlack}
                 className="hover:bg-muted flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors"
               >
                 <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
-                  <AppIcon
-                    icon={app.icon}
-                    darkIcon={app.darkIcon}
-                    name={app.name}
-                    size={18}
-                  />
+                  <AppIcon icon="/icons/slack.svg" name="Slack" size={18} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{app.name}</p>
+                  <p className="truncate text-sm font-medium">Slack</p>
                   <p className="text-muted-foreground truncate text-xs">
-                    {app.description}
+                    {hasSlackApp
+                      ? "Connect your Slack so this agent can read channels you pick"
+                      : "Add this agent to Slack first, then share channels"}
                   </p>
                 </div>
-                {connected > 0 && (
-                  <span className="text-brand shrink-0 text-xs font-medium">
-                    {connected === 1 ? "Connected" : `${connected} connected`}
-                  </span>
-                )}
+                <ChevronRight
+                  className="text-muted-foreground size-4 shrink-0"
+                  aria-hidden
+                />
               </button>
-            );
-          })}
-          {apps.length === 0 && (
-            <p className="text-muted-foreground py-6 text-center text-sm">
-              No apps found.
-            </p>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
+            )}
+            {apps.map((app) => {
+              const connected = connectedCount.get(app.id) ?? 0;
+              return (
+                <button
+                  key={app.id}
+                  type="button"
+                  onClick={() => connect(app)}
+                  title={
+                    connected > 0
+                      ? `Connect another ${app.name} account`
+                      : undefined
+                  }
+                  className="hover:bg-muted flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors"
+                >
+                  <div className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg border dark:bg-white/10 dark:border-white/10">
+                    <AppIcon
+                      icon={app.icon}
+                      darkIcon={app.darkIcon}
+                      name={app.name}
+                      size={18}
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{app.name}</p>
+                    <p className="text-muted-foreground truncate text-xs">
+                      {app.description}
+                    </p>
+                  </div>
+                  {connected > 0 && (
+                    <span className="text-brand shrink-0 text-xs font-medium">
+                      {connected === 1 ? "Connected" : `${connected} connected`}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            {apps.length === 0 && !showSlack && (
+              <p className="text-muted-foreground py-6 text-center text-sm">
+                No apps found.
+              </p>
+            )}
+            {chatSend && offerCustom && (
+              <button
+                type="button"
+                onClick={() => {
+                  chatSend(customConnectionRequest(customName));
+                  onOpenChange(false);
+                }}
+                className="hover:bg-muted border-brand/30 bg-brand/5 mb-1 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors"
+              >
+                <div className="bg-brand/10 text-brand flex size-9 shrink-0 items-center justify-center rounded-lg">
+                  <KeyRound className="size-4" aria-hidden />
+                </div>
+                <div className="min-w-0 flex-1">
+                  {/* Two lines, not one: truncated, the dialog's width cut
+                      the label at "custom conne…", hiding what it does. */}
+                  <p className="line-clamp-2 text-sm font-medium break-words">
+                    Connect &ldquo;{customName}&rdquo; as a custom connection
+                  </p>
+                  <p className="text-muted-foreground truncate text-xs">
+                    The agent finds its API and asks you for the key
+                  </p>
+                </div>
+                <ChevronRight
+                  className="text-muted-foreground size-4 shrink-0"
+                  aria-hidden
+                />
+              </button>
+            )}
+            {/* Always last, searching included: a search that finds nothing
+                is when someone wants to ask for the app. */}
+            <div className="mt-1 grid">
+              <RequestAppSlot initialName={query.trim() || undefined} />
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <GitHubAppConnectDialog
+        open={githubShareOpen}
+        onOpenChange={setGithubShareOpen}
+        pageScope="workspace"
+        agentId={agentId}
+        onInstallNew={() => {
+          if (githubApp) openPopupFor(githubApp);
+        }}
+        onConnected={(connectionId) => onConnected?.(connectionId)}
+      />
+    </>
   );
 };

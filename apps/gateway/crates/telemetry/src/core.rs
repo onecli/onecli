@@ -1,8 +1,6 @@
-//! Shared telemetry types and utilities.
-//!
-//! Both OSS and cloud telemetry implementations import from this module.
-//! The swapped `telemetry` module re-exports [`RequestEvent`] and [`on_request`]
-//! so consumer code uses `crate::*` without change.
+//! Shared telemetry types and utilities: the event types, the channel, and
+//! the flush plumbing. The crate root owns the sinks and re-exports
+//! [`RequestEvent`] and [`on_request`].
 
 use std::sync::{Mutex, OnceLock};
 
@@ -13,7 +11,12 @@ pub const FLUSH_BATCH_SIZE: usize = 500;
 pub const CHANNEL_CAPACITY: usize = 10_000;
 const MAX_PATH_LEN: usize = 2048;
 
-#[allow(dead_code)] // variants read by cloud telemetry (extra_data), unused in OSS
+/// What a [`RequestDecision::DestinationRefused`] row is attributed to in the
+/// activity feed's "Blocked by" slot. Not a policy rule: the destination
+/// guard is fixed behavior, so the name says so instead of pretending a
+/// rule exists.
+pub const DESTINATION_GUARD_RULE_NAME: &str = "Non-public destination";
+
 pub enum RequestDecision {
     Allowed,
     Blocked {
@@ -25,13 +28,18 @@ pub enum RequestDecision {
     ApprovalPending {
         approval_id: String,
         triggered_at: String,
+        /// Whether the approval card came from the readable fallback (no
+        /// app summarizer knew the request), logged so the fallback rate
+        /// can be tracked.
+        generic_card: bool,
     },
     ApprovalDenied {
         approval_id: String,
         reason: String,
         triggered_at: String,
         resolved_at: String,
-        /// The user who denied, or `None` for a system auto-deny (timeout).
+        /// The user who denied, or `None` when nobody decided (expiry,
+        /// store failure, restart) or the decision carried no attribution.
         approved_by: Option<String>,
     },
     ApprovalApproved {
@@ -41,14 +49,46 @@ pub enum RequestDecision {
         /// The user who approved the request.
         approved_by: Option<String>,
     },
+    /// Let through without a card by an open "Approve similar" window
+    /// (`approval::similar`): `approval_id` is the card the reviewer approved
+    /// that opened it, `approved_by` who.
+    ApprovedBySimilar {
+        approval_id: String,
+        approved_by: Option<String>,
+    },
     BlockedByDefaultPolicy,
+    /// The upstream refused an uncredentialed request and the gateway
+    /// answered with its own guidance (`app_not_connected`,
+    /// `access_restricted`, `credential_not_found`, `credential_unavailable`,
+    /// `connection_host_mismatch`). Its own variant — not `Allowed` — so the
+    /// request log keeps the row: an un-injected Allowed event is dropped by
+    /// design, which made these failures invisible in the activity feed.
+    /// `error` is the guidance error code the agent received.
+    NeedsConnection {
+        error: String,
+    },
+    /// The destination guard refused the request: the host resolved only to
+    /// non-public addresses the operator has not allowed (`proxy::egress`).
+    /// Nothing was dialed. Its own variant so the activity feed shows the
+    /// refusal as a block attributed to the guard, not a plain 403.
+    DestinationRefused,
+    /// An open-lane CONNECT (`proxy::tunnel`): the client's bytes were relayed
+    /// to the host untouched, so there was no request to log; this is the
+    /// one row the tunnel leaves, written when it closes, with how much
+    /// crossed in each direction. Its own variant so `keeps_event` persists
+    /// it: an un-injected `Allowed` row is dropped by design, and a tunnel
+    /// that left no trace would be the open relay the token check exists to
+    /// prevent.
+    Tunneled {
+        bytes_up: u64,
+        bytes_down: u64,
+    },
 }
 
-/// A metered spend charge attached to a request event (cloud budget feature).
-/// Plain data so this shared core stays independent of the swapped `budget`
-/// module; the cloud telemetry flush reads it to accumulate spend. `cost_nanos`
+/// A metered spend charge attached to a request event (licensed budget feature).
+/// Plain data so this shared core stays independent of the licensed `budget`
+/// module; the telemetry budget flush reads it to accumulate spend. `cost_nanos`
 /// is already priced by the meter — the flush stays provider-agnostic.
-#[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
 pub struct BudgetCharge {
     pub secret_id: String,
     /// Rendered budget subject (`org:<id>` / `user:<id>`) — who the spend is
@@ -59,11 +99,9 @@ pub struct BudgetCharge {
 }
 
 pub struct RequestEvent {
-    #[allow(dead_code)] // read by cloud telemetry (Redis counters), unused in OSS
     pub org_id: String,
     pub workspace_id: String,
     pub agent_id: String,
-    #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub agent_name: String,
     pub method: String,
     pub host: String,
@@ -72,24 +110,23 @@ pub struct RequestEvent {
     pub status: u16,
     pub latency_ms: u32,
     pub injection_count: u16,
-    #[allow(dead_code)] // read by cloud telemetry (PostHog), unused in OSS
     pub timestamp: String,
     pub injected: bool,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub decision: RequestDecision,
-    #[allow(dead_code)] // read by cloud telemetry (extra_data), unused in OSS
     pub connection_label: Option<String>,
-    #[allow(dead_code)] // read by cloud telemetry (update path), unused in OSS
     pub existing_log_id: Option<String>,
-    #[allow(dead_code)] // read by cloud telemetry (pre-assigned INSERT id), unused in OSS
     pub log_id: Option<String>,
-    /// Cloud-only: a metered spend charge to accumulate in the budget flush.
-    /// `None` for non-budgeted requests; always `None` in OSS.
-    #[allow(dead_code)] // read by cloud telemetry (budget flush), unused in OSS
+    /// A metered spend charge to accumulate in the budget flush. `None` for
+    /// non-budgeted requests (every request when the deployment lacks the
+    /// enterprise entitlement).
     pub budget_charge: Option<BudgetCharge>,
     /// The v2 policy rule that decided this request (rule- or default-decided).
     /// `None` for plain allows and whenever the legacy path decided.
     pub matched_rule: Option<policy::MatchedRule>,
+    /// A database statement this row is about, literals already replaced by
+    /// placeholders (`dbproxy`). Recorded in the request log's `extra_data`
+    /// only; never sent to analytics. `None` on every HTTP row.
+    pub statement: Option<String>,
 }
 
 /// Common telemetry fields for a proxied request, filled by the forward path
@@ -116,6 +153,8 @@ pub struct RequestMeta {
     /// The v2 rule that decided this (allowed) request, when the new engine is
     /// authoritative — threaded to telemetry for "decided by rule X".
     pub matched_rule: Option<policy::MatchedRule>,
+    /// See [`RequestEvent::statement`].
+    pub statement: Option<String>,
 }
 
 impl RequestMeta {
@@ -142,6 +181,7 @@ impl RequestMeta {
             log_id: None,
             budget_charge,
             matched_rule: self.matched_rule,
+            statement: self.statement,
         }
     }
 }
@@ -171,8 +211,8 @@ fn flush_down_tx() -> &'static watch::Sender<bool> {
 
 /// Spawn the flush loop, keeping its handle for [`shutdown`].
 ///
-/// Both editions' `init` call this instead of `tokio::spawn` — the only thing
-/// they need to change to become drainable.
+/// The crate root's `init` calls this instead of `tokio::spawn`, which is what
+/// makes the loop drainable.
 pub fn spawn_flush_loop<F>(flush_loop: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -193,10 +233,10 @@ fn fill(rx: &mut mpsc::Receiver<RequestEvent>, buffer: &mut Vec<RequestEvent>) {
 /// Drain available events from the channel into the buffer.
 /// Returns `false` when there is nothing more to flush and the loop should end.
 ///
-/// The buffer is always empty on entry (both flush loops drain and clear it
+/// The buffer is always empty on entry (the flush loop drains and clears it
 /// before looping), so during shutdown this returns `true` for the final
 /// non-empty batch and `false` on the call after it — which is what lets the
-/// loops exit through the `break` they already have.
+/// loop exit through its `break`.
 #[must_use]
 pub async fn collect_batch(
     rx: &mut mpsc::Receiver<RequestEvent>,
@@ -260,7 +300,6 @@ pub struct BatchColumns {
     pub statuses: Vec<i32>,
     pub latencies: Vec<i32>,
     pub injections: Vec<i32>,
-    #[allow(dead_code)] // bound only by the cloud INSERT; the OSS column stays NULL
     pub matched_rule_logical_ids: Vec<Option<String>>,
 }
 
@@ -315,6 +354,7 @@ mod tests {
             log_id: None,
             budget_charge: None,
             matched_rule: None,
+            statement: None,
         }
     }
 

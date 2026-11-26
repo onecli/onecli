@@ -15,13 +15,16 @@ aws-sigv4 = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 dashmap = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true }
+hex = { workspace = true }
 approval = { path = "../approval" }
 apps = { path = "../apps" }
 ca = { path = "../ca" }
 cache = { path = "../cache" }
 common = { path = "../common" }
 context = { path = "../context" }
+crypto = { path = "../crypto" }
 db = { path = "../db" }
 ee = { path = "../ee/ee" }
 inject = { path = "../inject" }
@@ -35,6 +38,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 percent-encoding = { workspace = true }
 reqwest = { workspace = true }
+ring = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -44,3 +48,8 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+# `test-util` pauses the clock, so the relay's idle timeout is observed
+# without waiting ten minutes for it.
+tokio = { workspace = true, features = ["test-util"] }

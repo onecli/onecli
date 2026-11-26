@@ -42,7 +42,7 @@ export const CliAuthConfirm = ({ code }: CliAuthConfirmProps) => {
             <Check className="text-brand size-8" strokeWidth={2.5} />
           </div>
           <div>
-            <h1 className="font-[family-name:var(--font-serif)] text-3xl font-semibold tracking-tight">
+            <h1 className="text-3xl font-semibold tracking-tight">
               You&apos;re connected
             </h1>
             <p className="text-muted-foreground mt-2">
@@ -98,7 +98,7 @@ export const CliAuthConfirm = ({ code }: CliAuthConfirmProps) => {
   return (
     <Layout>
       <div className="mb-8 text-center">
-        <h1 className="font-[family-name:var(--font-serif)] text-4xl font-semibold tracking-tight">
+        <h1 className="text-4xl font-semibold tracking-tight">
           Connect your terminal
         </h1>
         <p className="text-muted-foreground mt-3 text-lg">
@@ -204,9 +204,7 @@ const Message = ({
 }) => (
   <Layout>
     <div className="flex max-w-sm flex-col items-center gap-3 text-center">
-      <h1 className="font-[family-name:var(--font-serif)] text-3xl font-semibold tracking-tight">
-        {title}
-      </h1>
+      <h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
       <p className="text-muted-foreground">{description}</p>
       {action && <div className="mt-3">{action}</div>}
     </div>

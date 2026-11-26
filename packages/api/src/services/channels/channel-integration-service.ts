@@ -5,10 +5,13 @@ import { DeadIntegrationCredentialError } from "./errors";
 import { channelProvider } from "./registry";
 import type {
   ChannelProviderId,
+  ChannelTransport,
   UserLinkSource,
   ValidatedIntegrationCredential,
 } from "./types";
 import { logger } from "../../lib/logger";
+import { agentImageUrlOrNull } from "../agent-image-service";
+import { defaultTransport } from "./posture";
 
 const log = logger.child({ component: "channel-integration-service" });
 
@@ -187,7 +190,15 @@ export const disconnectIntegration = async (
     // A live shared-app install rides this row too — deleting it would
     // cascade the installation away as a side effect of dropping a mere
     // automation credential.
-    existing._count.installations === 0
+    existing._count.installations === 0 &&
+    // A deferred remote cleanup (channel-cleanup-service) is fenced to THIS
+    // integration id: the app it tears down was minted under it. Deleting
+    // the row would strand the job as blocked, and a reconnect would mint a
+    // new id the fence rejects. Only a completed job has let go of the row;
+    // until then the row stays, credential-less.
+    (await db.channelCleanup.count({
+      where: { integrationId: existing.id, state: { not: "completed" } },
+    })) === 0
   ) {
     await withIntegrationRotateLock(existing.id, (tx) =>
       tx.channelIntegration.delete({ where: { id: existing.id } }),
@@ -406,7 +417,38 @@ export const withFreshIntegrationCredentials = async <T>(
   organizationId: string,
   provider: ChannelProviderId,
   fn: (accessToken: string, integrationId: string) => Promise<T>,
+  expectedIdentity?: { integrationId: string; externalId: string },
 ): Promise<T> => {
+  // Deferred cleanup must never borrow a credential from a replacement
+  // integration or a reconnected tenant. Re-check at the callback boundary:
+  // resolving/rotating a credential can yield while the org reconnects.
+  const assertExpectedIdentity = async (actualIntegrationId?: string) => {
+    if (!expectedIdentity) return;
+    const current = await db.channelIntegration.findUnique({
+      where: { organizationId_provider: { organizationId, provider } },
+      select: { id: true, externalId: true },
+    });
+    if (
+      current?.id !== expectedIdentity.integrationId ||
+      current.externalId !== expectedIdentity.externalId ||
+      (actualIntegrationId !== undefined &&
+        actualIntegrationId !== expectedIdentity.integrationId)
+    ) {
+      throw new ServiceError(
+        "CONFLICT",
+        "The channel integration no longer matches the original workspace. Remote cleanup was not attempted.",
+      );
+    }
+  };
+  await assertExpectedIdentity();
+  const withExpectedIdentity = async (
+    accessToken: string,
+    integrationId: string,
+  ): Promise<T> => {
+    await assertExpectedIdentity(integrationId);
+    return fn(accessToken, integrationId);
+  };
+
   // FAST PATH (managed-apps arm): the provider's shared workspace install
   // may carry a credential that can mint agent apps — the same manifest API
   // the automation credential drives, minus the paste and the rotation.
@@ -415,7 +457,10 @@ export const withFreshIntegrationCredentials = async <T>(
   // real `fn` error propagates — it must never run twice.
   const sharedApp = channelProvider(provider).sharedApp;
   if (sharedApp?.configured()) {
-    const minted = await sharedApp.tryMintWith({ organizationId, fn });
+    const minted = await sharedApp.tryMintWith({
+      organizationId,
+      fn: withExpectedIdentity,
+    });
     if (minted) return minted.result;
   }
 
@@ -460,7 +505,7 @@ export const withFreshIntegrationCredentials = async <T>(
   const { accessToken } = JSON.parse(result.credentialsJson) as {
     accessToken: string;
   };
-  return fn(accessToken, row.id);
+  return withExpectedIdentity(accessToken, row.id);
 };
 
 /** Proactively rotate anything not rotated for this long. Half the 12h
@@ -635,4 +680,124 @@ export const removeUserLink = async (
   if (removed.count === 0) {
     throw new ServiceError("NOT_FOUND", "Link not found");
   }
+};
+
+/** One agent's place on the org Channels page. `none` = never added;
+ * `pending` = the app exists but the install never finished (the stuck
+ * state a skipped Allow leaves behind); `active` = in the workspace;
+ * `attention` = disabled or needs re-auth. */
+export type AgentChannelState = "none" | "pending" | "active" | "attention";
+
+export interface OrgChannelAgent {
+  id: string;
+  name: string;
+  /** The agent's avatar (null = the default mark). */
+  imageUrl: string | null;
+  state: AgentChannelState;
+  /** `pending` only: the transport the half-finished app was stamped with.
+   * A socket app finishes by pasting tokens on the agent's own page, not by
+   * a consent click, so the org page must know which it is. */
+  pendingTransport: ChannelTransport | null;
+  /** Live in the provider: where to open it and how to @mention it. */
+  slack: { appId: string; teamId: string; handle: string | null } | null;
+}
+
+export interface OrgChannelWorkspace {
+  id: string;
+  name: string | null;
+  agents: OrgChannelAgent[];
+}
+
+export interface OrgChannelAgents {
+  /** What a fresh "Add to Slack" from this page would be stamped with:
+   * events (a consent click) or socket (a create, then tokens pasted on the
+   * agent's page). The same posture the agent's own page reads. */
+  posture: { transport: ChannelTransport };
+  workspaces: OrgChannelWorkspace[];
+}
+
+const stateOf = (status: string | undefined): AgentChannelState => {
+  if (status === undefined) return "none";
+  if (status === "active") return "active";
+  if (status === "pending_setup") return "pending";
+  return "attention";
+};
+
+/**
+ * Every hosted agent in the org, grouped by OneCLI workspace, with where it
+ * stands in one provider: the org Channels page's one-click list, so an
+ * admin who connected the org token can see which agents are in Slack and
+ * finish an install they started.
+ *
+ * Visibility: the org Channels routes are org-ADMIN only (the guard), and an
+ * admin manages every workspace in the org (`canManageAllWorkspaces`), so
+ * the org fence IS the caller's visibility here; on non-RBAC editions every
+ * member manages every workspace too. The org is the only filter, applied
+ * once at the workspace level: a foreign workspace never contributes a row,
+ * and its agents are never read. One query, no per-workspace fan-out.
+ */
+export const listOrgChannelAgents = async (input: {
+  organizationId: string;
+  provider: ChannelProviderId;
+}): Promise<OrgChannelAgents> => {
+  const workspaces = await db.workspace.findMany({
+    where: { organizationId: input.organizationId },
+    select: {
+      id: true,
+      name: true,
+      agents: {
+        // BYO agents cannot join channels, so they are not offered.
+        where: { kind: "hosted" },
+        select: {
+          id: true,
+          name: true,
+          imageKey: true,
+          // At most one row per (agent, provider) by constraint.
+          channels: {
+            where: { provider: input.provider },
+            select: {
+              status: true,
+              transport: true,
+              externalId: true,
+              identityName: true,
+              integration: { select: { externalId: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  return {
+    posture: { transport: defaultTransport() },
+    workspaces: workspaces.map((workspace) => ({
+      id: workspace.id,
+      name: workspace.name,
+      agents: workspace.agents.map((agent) => {
+        const presence = agent.channels[0];
+        const state = stateOf(presence?.status);
+        return {
+          id: agent.id,
+          name: agent.name,
+          imageUrl: agentImageUrlOrNull(agent.id, agent.imageKey),
+          state,
+          pendingTransport:
+            state === "pending" && presence
+              ? (presence.transport as ChannelTransport)
+              : null,
+          // Only a LIVE app can be opened or mentioned: a pending one isn't
+          // installed yet, so the link would land on nothing.
+          slack:
+            state === "active" && presence
+              ? {
+                  appId: presence.externalId,
+                  teamId: presence.integration.externalId,
+                  handle: presence.identityName,
+                }
+              : null,
+        };
+      }),
+    })),
+  };
 };

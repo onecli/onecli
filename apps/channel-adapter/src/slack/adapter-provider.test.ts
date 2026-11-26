@@ -51,21 +51,81 @@ const openWithSpies = () => {
   const approvals: unknown[] = [];
   const reaches: unknown[] = [];
   const actions: unknown[] = [];
+  const groups: unknown[] = [];
+  const cardStops: unknown[] = [];
+  const rowActions: unknown[] = [];
   const handlers: ProviderTransportHandlers = {
     onEvent: () => {},
     onApprovalDecision: (d) => approvals.push(d),
+    onGroupApprovalDecision: (d) => groups.push(d),
     onReachDecision: (d) => reaches.push(d),
     onActionDecision: (d) => actions.push(d),
+    onCardStop: (d) => cardStops.push(d),
+    onCardFollowUpAction: (d) => rowActions.push(d),
     onPermanentFailure: () => {},
     onLog: () => {},
   };
   const transport = slackAdapterProvider.openTransport(presence, handlers);
   expect(transport).not.toBeNull();
   if (!socketMock.onInteractive) throw new Error("socket never dialed");
-  return { approvals, reaches, actions, deliver: socketMock.onInteractive };
+  return {
+    approvals,
+    reaches,
+    actions,
+    groups,
+    cardStops,
+    rowActions,
+    deliver: socketMock.onInteractive,
+  };
 };
 
 describe("slack adapter-provider — interactivity classification", () => {
+  it("routes a grouped card's Approve all to onGroupApprovalDecision with the shown ids", () => {
+    const { approvals, groups, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      channel: { id: "D100" },
+      actions: [{ action_id: "channel_group_approve", value: "ap-1,ap-2" }],
+    });
+    expect(groups).toEqual([
+      {
+        approvalIds: ["ap-1", "ap-2"],
+        decision: "approve",
+        clickerExternalUserId: "U-CLICKER",
+        channel: "D100",
+      },
+    ]);
+    expect(approvals).toEqual([]);
+  });
+
+  it("routes a row's menu choice as ONE id, and drops a malformed group value", () => {
+    const { groups, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [
+        {
+          action_id: "channel_group_row:4",
+          selected_option: { value: "deny|ap-9" },
+        },
+      ],
+    });
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "channel_group_deny", value: "ap-1,<!here>" }],
+    });
+    expect(groups).toEqual([
+      {
+        approvalIds: ["ap-9"],
+        decision: "deny",
+        clickerExternalUserId: "U-CLICKER",
+        channel: null,
+      },
+    ]);
+  });
+
   it("routes a reach-card click to onReachDecision with only the opaque grant id", () => {
     const { approvals, reaches, deliver } = openWithSpies();
     deliver({
@@ -83,7 +143,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(approvals).toEqual([]);
   });
 
-  it("routes the members-only button as members_only", () => {
+  it("routes the RETIRED members-only button (reach_members) as approved: old cards still settle", () => {
     const { reaches, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -93,7 +153,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([
       {
         grantId: "grant-9",
-        decision: "members_only",
+        decision: "approved",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -115,7 +175,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     ]);
   });
 
-  it("still honors the PRE-RENAME reach_deny id: a card posted before the third button existed settles as members_only", () => {
+  it("still honors the PRE-RENAME reach_deny id: an old card settles as approved", () => {
     const { reaches, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -125,7 +185,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([
       {
         grantId: "grant-old",
-        decision: "members_only",
+        decision: "approved",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -142,6 +202,24 @@ describe("slack adapter-provider — interactivity classification", () => {
       {
         approvalId: "appr-1",
         decision: "approve",
+        clickerExternalUserId: "U-CLICKER",
+      },
+    ]);
+    expect(reaches).toEqual([]);
+  });
+
+  it("routes Approve similar as an approve carrying the similar scope, with only the opaque id", () => {
+    const { approvals, reaches, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      actions: [{ action_id: "channel_approve_similar", value: "appr-2" }],
+    });
+    expect(approvals).toEqual([
+      {
+        approvalId: "appr-2",
+        decision: "approve",
+        scope: "similar",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -166,7 +244,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(reaches).toEqual([]);
   });
 
-  it("routes the always-allow button as approve_always - the standing upgrade", () => {
+  it("routes the RETIRED always-allow button (older cards) as approve", () => {
     const { actions, deliver } = openWithSpies();
     deliver({
       type: "block_actions",
@@ -176,7 +254,7 @@ describe("slack adapter-provider — interactivity classification", () => {
     expect(actions).toEqual([
       {
         approvalId: "act-9",
-        decision: "approve_always",
+        decision: "approve",
         clickerExternalUserId: "U-CLICKER",
       },
     ]);
@@ -218,6 +296,60 @@ describe("slack adapter-provider — interactivity classification", () => {
     });
     expect(approvals).toEqual([]);
     expect(reaches).toEqual([]);
+    expect(actions).toEqual([]);
+  });
+
+  it("routes the narration card's Stop to onCardStop with ONLY the card's address and the clicker", () => {
+    const { cardStops, actions, approvals, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      // The value is meaningless by design: it must not travel anywhere.
+      actions: [{ action_id: "turn_stop", value: "turn-of-someone-else" }],
+    });
+    expect(cardStops).toEqual([
+      { channel: "D1", cardTs: "1700.42", clickerExternalUserId: "U-CLICKER" },
+    ]);
+    expect(actions).toEqual([]);
+    expect(approvals).toEqual([]);
+  });
+
+  it("drops a Stop click with no clicker or no card address", () => {
+    const { cardStops, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      actions: [{ action_id: "turn_stop", value: "stop" }],
+    });
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "view", view_id: "V1" },
+      actions: [{ action_id: "turn_stop", value: "stop" }],
+    });
+    expect(cardStops).toEqual([]);
+  });
+
+  it("routes a waiting message's Send now to onCardFollowUpAction with the card's address, the row and the clicker", () => {
+    const { rowActions, cardStops, actions, deliver } = openWithSpies();
+    deliver({
+      type: "block_actions",
+      user: { id: "U-CLICKER" },
+      container: { type: "message", channel_id: "D1", message_ts: "1700.42" },
+      actions: [{ action_id: "follow_up_send_now", value: "fu-7" }],
+    });
+    expect(rowActions).toEqual([
+      {
+        channel: "D1",
+        cardTs: "1700.42",
+        clickerExternalUserId: "U-CLICKER",
+        action: "send_now",
+        followUpId: "fu-7",
+      },
+    ]);
+    // Never mistaken for Stop (the card's other control), nor an approval.
+    expect(cardStops).toEqual([]);
     expect(actions).toEqual([]);
   });
 });

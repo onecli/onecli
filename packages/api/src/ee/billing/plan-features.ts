@@ -6,21 +6,24 @@ import type { Plan } from "./plans";
  * feature key with its minimum plan and both sides pick it up automatically.
  */
 export type PremiumFeature =
-  | "policy.manual_approval"
   | "policy.rate_limit"
   | "policy.deny_mode"
   | "sso"
-  | "groups";
+  | "groups"
+  | "app_availability";
 
 export const PREMIUM_FEATURES: Record<PremiumFeature, Plan> = {
-  "policy.manual_approval": "team",
   "policy.rate_limit": "pro",
   "policy.deny_mode": "team",
-  // Verified email domains + SSO.
-  sso: "enterprise",
+  // Verified email domains, SAML/OIDC SSO, enforcement and SCIM.
+  sso: "scale",
   // Directory groups and everything built on them (SCIM group sync, access
   // bindings, role mappings).
   groups: "enterprise",
+  // Restricting which apps a workspace may connect. Sold from Scale up: it is
+  // a fleet-management control, not a directory feature (rules can target
+  // individual members, so it stands without the enterprise directory).
+  app_availability: "scale",
 };
 
 /** The minimum plan required to use a premium feature. */
@@ -33,12 +36,10 @@ export const isPremiumFeature = (value: string): value is PremiumFeature =>
 
 /**
  * The premium feature a policy-rule action maps to, or `null` for ungated
- * actions (`block`/`allow` are always available on every plan).
+ * actions (`block`/`allow` and manual approval are available on every plan).
  */
 export const ruleActionFeature = (action: string): PremiumFeature | null => {
   switch (action) {
-    case "manual_approval":
-      return "policy.manual_approval";
     case "rate_limit":
       return "policy.rate_limit";
     case "identity_directory":

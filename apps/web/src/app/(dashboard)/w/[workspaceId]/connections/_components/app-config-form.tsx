@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useRef,
   useState,
@@ -35,6 +36,7 @@ import { Switch } from "@onecli/ui/components/switch";
 import { cn } from "@onecli/ui/lib/utils";
 import { SecretInput } from "@/components/secret-input";
 import type { PageScope } from "@/lib/api";
+import type { OAuthConfigField } from "@onecli/api/apps/types";
 import {
   useAppConfigStatus,
   useSaveAppConfig,
@@ -42,7 +44,16 @@ import {
   useToggleAppConfig,
 } from "@/hooks/use-app-config";
 import { CloudUpsell } from "@/lib/components/cloud-upsell";
+import {
+  credentialsScopeNote,
+  groupOf,
+  oauthClientGroupName,
+} from "@onecli/api/apps/oauth/groups";
 import { RedirectUri } from "./redirect-uri";
+import { ConfigFieldOptions } from "./config-field-options";
+import { buildConfigPayload, resolveConfigValue } from "./config-field-values";
+import { CredentialsGuide } from "./credentials-guide";
+import { appConfigErrorMessage } from "./app-config-error";
 
 export interface AppConfigFormHandle {
   /** Open the Custom credentials section, scroll it into view, and briefly highlight it. */
@@ -52,15 +63,13 @@ export interface AppConfigFormHandle {
 interface AppConfigFormProps {
   provider: string;
   appName: string;
-  fields: {
-    name: string;
-    label: string;
-    description?: string;
-    placeholder: string;
-    secret?: boolean;
-  }[];
+  fields: OAuthConfigField[];
   hint?: string;
+  /** The app's OneCLI setup guide (`AppDefinition.setupGuideUrl`). */
+  setupGuideUrl?: string;
   hasEnvDefaults: boolean;
+  /** Some account this config's client serves is connected in this scope:
+   *  this app's, or (for a vendor-shared client) any app of the vendor. */
   isConnected: boolean;
   pageScope?: PageScope;
   /** Imperative handle so the page header can open + scroll to this section. */
@@ -72,6 +81,7 @@ export const AppConfigForm = ({
   appName,
   fields,
   hint,
+  setupGuideUrl,
   hasEnvDefaults,
   isConnected,
   pageScope = "workspace",
@@ -87,6 +97,9 @@ export const AppConfigForm = ({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const wantScrollRef = useRef(false);
+  // Per-instance field ids: ConfigureCredentialsDialog renders the same
+  // fields on the same page, so a shared `config-…` id would collide.
+  const idPrefix = useId();
 
   const statusQuery = useAppConfigStatus(provider, pageScope);
   const saveMutation = useSaveAppConfig(provider, pageScope);
@@ -145,14 +158,17 @@ export const AppConfigForm = ({
   }, [hasStatus, settings]);
 
   // On first load, open the section by default when custom credentials are
-  // enabled or there are no platform defaults to fall back on. Adjusted during
-  // render (guarded) so the section mounts already-open — no open/close flash;
-  // never overrides an explicit reveal() or later refetches.
+  // enabled, or when there is nothing to fall back on AND nothing connected
+  // yet (the page's only next step is these fields). A connected app keeps
+  // it collapsed: the accounts are the page, the form is a footnote.
+  // Adjusted during render (guarded) so the section mounts already-open,
+  // no open/close flash; never overrides an explicit reveal() or later
+  // refetches.
   if (!loading && !openInitialized) {
     setOpenInitialized(true);
     // Org-inherited credentials behave like platform defaults here: the app is
     // usable without workspace-level setup, so the section stays collapsed.
-    if (enabled || (!hasEnvDefaults && !orgInherited)) {
+    if (enabled || (!hasEnvDefaults && !orgInherited && !isConnected)) {
       setOpenValue("credentials");
     }
   }
@@ -203,10 +219,10 @@ export const AppConfigForm = ({
 
   const doSave = async () => {
     try {
-      await saveMutation.mutateAsync(values);
+      await saveMutation.mutateAsync(buildConfigPayload(fields, values));
       toast.success("Credentials saved");
-    } catch {
-      toast.error("Failed to save credentials");
+    } catch (err) {
+      toast.error(appConfigErrorMessage(err, "Failed to save credentials"));
     }
   };
 
@@ -226,7 +242,8 @@ export const AppConfigForm = ({
             ? "Custom credentials enabled"
             : "Custom credentials disabled",
         ),
-      onError: () => toast.error("Failed to update"),
+      onError: (err) =>
+        toast.error(appConfigErrorMessage(err, "Failed to update")),
     });
   };
 
@@ -243,8 +260,8 @@ export const AppConfigForm = ({
     try {
       await deleteMutation.mutateAsync();
       toast.success("Credentials removed");
-    } catch {
-      toast.error("Failed to remove credentials");
+    } catch (err) {
+      toast.error(appConfigErrorMessage(err, "Failed to remove credentials"));
     }
   };
 
@@ -257,6 +274,13 @@ export const AppConfigForm = ({
 
   const hasInput = fields.some((f) => !!values[f.name]);
   const saving = saveMutation.isPending;
+  const scopeNote = credentialsScopeNote(provider, pageScope);
+  // A vendor-shared client: changing or removing it affects every app of the
+  // vendor, so the dialogs name the vendor rather than the app on screen.
+  const group = groupOf(provider);
+  const vendorApps = group && `${oauthClientGroupName(group)} apps`;
+  const disconnectSubject = vendorApps ? `your ${vendorApps}` : appName;
+  const removalSubject = vendorApps ? `All ${vendorApps}` : appName;
 
   if (loading) {
     return (
@@ -286,13 +310,17 @@ export const AppConfigForm = ({
           </span>
         </AccordionTrigger>
         <AccordionContent className="pb-1">
-          <Card className="p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">
+          <Card className="gap-4 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 space-y-0.5">
+                <p
+                  id={`${idPrefix}-custom-label`}
+                  className="text-sm font-medium"
+                >
                   Use your own developer credentials
                 </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
+                <p className="text-muted-foreground text-xs">
+                  {scopeNote}{" "}
                   {enabled
                     ? "Your custom credentials are active."
                     : hasCredentials
@@ -309,52 +337,82 @@ export const AppConfigForm = ({
                   />
                 )}
               </div>
-              <Switch checked={enabled} onCheckedChange={handleToggle} />
+              <Switch
+                checked={enabled}
+                onCheckedChange={handleToggle}
+                aria-labelledby={`${idPrefix}-custom-label`}
+                className="mt-0.5"
+              />
             </div>
 
-            {fields.map((field) => (
-              <div key={field.name} className="grid gap-1.5">
-                <Label htmlFor={`config-${field.name}`}>{field.label}</Label>
-                {field.description && (
-                  <p className="text-xs text-muted-foreground">
-                    {field.description}
-                  </p>
-                )}
-                {field.secret ? (
-                  <SecretInput
-                    id={`config-${field.name}`}
-                    value={values[field.name] ?? ""}
-                    onChange={(e) =>
-                      setValues((prev) => ({
-                        ...prev,
-                        [field.name]: e.target.value,
-                      }))
-                    }
-                    placeholder={
-                      hasCredentials
-                        ? "Leave empty to keep current"
-                        : field.placeholder
-                    }
-                  />
-                ) : (
-                  <Input
-                    id={`config-${field.name}`}
-                    type="text"
-                    value={values[field.name] ?? ""}
-                    onChange={(e) =>
-                      setValues((prev) => ({
-                        ...prev,
-                        [field.name]: e.target.value,
-                      }))
-                    }
-                    placeholder={field.placeholder}
-                    className="font-mono text-sm"
-                  />
-                )}
-              </div>
-            ))}
-
+            {/* Guide, then the URI to register, then the credentials it
+                produces. */}
+            <CredentialsGuide
+              provider={provider}
+              appName={appName}
+              setupGuideUrl={setupGuideUrl}
+            />
             <RedirectUri provider={provider} />
+
+            {fields.map((field) => {
+              const inputId = `${idPrefix}-${field.name}`;
+              const labelId = `${inputId}-label`;
+              return (
+                <div key={field.name} className="grid gap-1.5">
+                  <Label
+                    id={labelId}
+                    htmlFor={field.options ? undefined : inputId}
+                  >
+                    {field.label}
+                  </Label>
+                  {field.description && (
+                    <p className="text-xs text-muted-foreground">
+                      {field.description}
+                    </p>
+                  )}
+                  {field.options ? (
+                    <ConfigFieldOptions
+                      labelId={labelId}
+                      options={field.options}
+                      value={resolveConfigValue(field, values)}
+                      onChange={(value) =>
+                        setValues((prev) => ({ ...prev, [field.name]: value }))
+                      }
+                    />
+                  ) : field.secret ? (
+                    <SecretInput
+                      id={inputId}
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        setValues((prev) => ({
+                          ...prev,
+                          [field.name]: e.target.value,
+                        }))
+                      }
+                      placeholder={
+                        hasCredentials
+                          ? "Leave empty to keep current"
+                          : field.placeholder
+                      }
+                    />
+                  ) : (
+                    <Input
+                      id={inputId}
+                      type="text"
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        setValues((prev) => ({
+                          ...prev,
+                          [field.name]: e.target.value,
+                        }))
+                      }
+                      placeholder={field.placeholder}
+                      className="font-mono text-sm"
+                    />
+                  )}
+                </div>
+              );
+            })}
 
             <div className="flex items-center gap-3">
               <Button
@@ -383,8 +441,8 @@ export const AppConfigForm = ({
                       </AlertDialogTitle>
                       <AlertDialogDescription>
                         {hasEnvDefaults
-                          ? `This will delete your credentials. ${appName} will fall back to platform defaults.`
-                          : `This will delete your credentials. ${appName} will no longer be available until reconfigured.`}
+                          ? `This will delete your credentials. ${removalSubject} will fall back to platform defaults.`
+                          : `This will delete your credentials. ${removalSubject} will no longer be available until reconfigured.`}
                         {dependentSentence ? ` ${dependentSentence}` : ""}
                       </AlertDialogDescription>
                     </AlertDialogHeader>
@@ -414,11 +472,15 @@ export const AppConfigForm = ({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>This will disconnect {appName}</AlertDialogTitle>
+            <AlertDialogTitle>
+              This will disconnect {disconnectSubject}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {dependentSentence
                 ? `${dependentSentence} You'll need to reconnect afterward.`
-                : `Changing credentials will disconnect your current ${appName} connection. You'll need to reconnect afterward.`}
+                : group
+                  ? `Changing credentials will disconnect every ${oauthClientGroupName(group)} app connected here. You'll need to reconnect afterward.`
+                  : `Changing credentials will disconnect your current ${appName} connection. You'll need to reconnect afterward.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

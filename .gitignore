@@ -62,6 +62,7 @@ cdk.out.*
 
 # Rust
 apps/gateway/target/
+apps/sandbox-home-device/target/
 
 # Playwright MCP
 .playwright-mcp

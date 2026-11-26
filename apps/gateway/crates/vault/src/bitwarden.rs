@@ -3,6 +3,10 @@
 //! Contains all Bitwarden-specific logic: `RemoteClient` lifecycle, PSK pairing,
 //! Noise protocol, credential caching, and session restore. Per-account sessions are
 //! stored in a `DashMap<workspace_id, Arc<BitwardenUserSession>>`.
+//!
+//! A cached session is re-checked against its `vault_connections` row on every
+//! use (see the crate docs), so a disconnect or re-pair made through any
+//! gateway instance closes this instance's client on the next request.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,10 +26,14 @@ use tracing::{info, warn};
 
 use super::bitwarden_db::{
     decrypt_connection_data, encrypt_connection_data, BitwardenConnectionStore,
-    BitwardenIdentityProvider,
+    BitwardenIdentityProvider, SharedGeneration,
 };
-use super::{PairResult, ProviderStatus, VaultCredential, VaultProvider};
+use super::{
+    check_session, PairResult, ProviderStatus, SessionCheck, VaultCredential, VaultProvider,
+};
 use crypto::CryptoService;
+
+const PROVIDER: &str = "bitwarden";
 
 /// Parse a hex-encoded fingerprint string into an `IdentityFingerprint`.
 pub(super) fn parse_fingerprint(hex_str: &str) -> Option<IdentityFingerprint> {
@@ -116,6 +124,10 @@ struct CachedCredential {
 struct BitwardenUserSession {
     client: Mutex<Option<RemoteClient>>,
     identity: BitwardenIdentityProvider,
+    /// The row generation this session is valid at. Shared with the session's
+    /// connection store, whose write-throughs advance it (see
+    /// [`SharedGeneration`]).
+    generation: SharedGeneration,
     /// Cached connectionData from DB — avoids redundant reads during lazy restore.
     connection_data: Option<BitwardenConnectionData>,
     credential_cache: DashMap<String, CachedCredential>,
@@ -130,6 +142,18 @@ struct BitwardenUserSession {
     error_until: std::sync::Mutex<Option<Instant>>,
     /// Set by the notification listener when `Ready { can_request_credentials: true }` is received.
     is_ready: Arc<AtomicBool>,
+}
+
+impl BitwardenUserSession {
+    fn generation(&self) -> Option<db::VaultGeneration> {
+        self.generation.lock().ok().and_then(|g| *g)
+    }
+
+    fn set_generation(&self, generation: db::VaultGeneration) {
+        if let Ok(mut current) = self.generation.lock() {
+            *current = Some(generation);
+        }
+    }
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -196,15 +220,36 @@ impl BitwardenVaultProvider {
         });
     }
 
-    /// Load an existing session from memory or DB. Returns `None` if the workspace
-    /// has never paired (no VaultConnection row). Does NOT generate a new identity.
+    /// Load the workspace's session, or `None` if it is not paired (no
+    /// VaultConnection row). Does NOT generate a new identity.
+    ///
+    /// A cached session is served only after its row confirms it: gone means
+    /// disconnected (close the client, return `None`), a new generation means
+    /// re-paired (close it and load the new pairing). A database error fails
+    /// the call and keeps the session.
     async fn load_session(&self, workspace_id: &str) -> Result<Option<Arc<BitwardenUserSession>>> {
-        if let Some(session) = self.sessions.get(workspace_id) {
-            return Ok(Some(Arc::clone(session.value())));
+        // Clone out of the map so no shard lock is held across the await.
+        let cached = self
+            .sessions
+            .get(workspace_id)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(session) = cached {
+            match check_session(&self.pool, workspace_id, PROVIDER, session.generation()).await? {
+                SessionCheck::Current => return Ok(Some(session)),
+                SessionCheck::Gone => {
+                    self.evict(workspace_id, session);
+                    info!(workspace_id = %workspace_id, "bitwarden: connection removed; session closed");
+                    return Ok(None);
+                }
+                SessionCheck::Superseded => {
+                    self.evict(workspace_id, session);
+                    info!(workspace_id = %workspace_id, "bitwarden: connection re-paired; reloading session");
+                }
+            }
         }
 
         // Load from DB — if no row, workspace has never paired
-        let row = match db::find_vault_connection(&self.pool, workspace_id, "bitwarden").await? {
+        let row = match db::find_vault_connection(&self.pool, workspace_id, PROVIDER).await? {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -229,6 +274,7 @@ impl BitwardenVaultProvider {
         let session = Arc::new(BitwardenUserSession {
             client: Mutex::new(None),
             identity,
+            generation: Arc::new(std::sync::Mutex::new(Some(row.generation))),
             connection_data: cd,
             credential_cache: DashMap::new(),
             last_used: std::sync::Mutex::new(Instant::now()),
@@ -242,22 +288,57 @@ impl BitwardenVaultProvider {
         Ok(Some(session))
     }
 
-    /// Create a new session with a fresh identity for pairing.
-    fn create_pairing_session(&self, workspace_id: &str) -> Arc<BitwardenUserSession> {
-        let session = Arc::new(BitwardenUserSession {
+    /// Drop `session` from the map — only if it is still the one there, so a
+    /// concurrent reload's fresh session is never removed in its place — and
+    /// close its client. Exactly one caller wins the removal, so exactly one
+    /// close is scheduled per session.
+    ///
+    /// The close runs in the background: it waits for the client lock, which
+    /// an in-flight credential request may hold for its full timeout, and the
+    /// caller must not stall on that. The session is unreachable from the map
+    /// the moment `remove_if` returns, so nothing new can use it meanwhile.
+    /// The close is skipped if `pair` reinstated this very session in the
+    /// meantime (a lookup that raced a pairing's own row write), so a late
+    /// close never tears down the client that pairing just connected.
+    fn evict(&self, workspace_id: &str, session: Arc<BitwardenUserSession>) {
+        let removed = self
+            .sessions
+            .remove_if(workspace_id, |_, current| Arc::ptr_eq(current, &session));
+        if removed.is_none() {
+            return;
+        }
+        let sessions = Arc::clone(&self.sessions);
+        let workspace_id = workspace_id.to_string();
+        tokio::spawn(async move {
+            let mut guard = session.client.lock().await;
+            let reinstated = sessions
+                .get(&workspace_id)
+                .is_some_and(|current| Arc::ptr_eq(current.value(), &session));
+            if reinstated {
+                return;
+            }
+            guard.take(); // dropping the handle disconnects
+            session.credential_cache.clear();
+            session.is_ready.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Create a new session with a fresh identity for pairing. Its generation
+    /// is unknown until the pairing writes the row, so it is NOT installed in
+    /// the map here: `pair` installs it once the row exists, or a concurrent
+    /// lookup would find a session with no row behind it and drop it.
+    fn new_pairing_session() -> Arc<BitwardenUserSession> {
+        Arc::new(BitwardenUserSession {
             client: Mutex::new(None),
             identity: BitwardenIdentityProvider::generate(),
+            generation: Arc::new(std::sync::Mutex::new(None)),
             connection_data: None,
             credential_cache: DashMap::new(),
             last_used: std::sync::Mutex::new(Instant::now()),
             last_error: Arc::new(std::sync::Mutex::new(None)),
             error_until: std::sync::Mutex::new(None),
             is_ready: Arc::new(AtomicBool::new(false)),
-        });
-
-        self.sessions
-            .insert(workspace_id.to_string(), Arc::clone(&session));
-        session
+        })
     }
 
     /// Create a connected `RemoteClient` for a workspace session.
@@ -278,6 +359,7 @@ impl BitwardenVaultProvider {
             key_data,
             Arc::clone(&self.crypto),
             session.connection_data.as_ref(),
+            Arc::clone(&session.generation),
         );
 
         let RemoteClientHandle {
@@ -371,7 +453,7 @@ impl BitwardenVaultProvider {
 #[async_trait]
 impl VaultProvider for BitwardenVaultProvider {
     fn provider_name(&self) -> &'static str {
-        "bitwarden"
+        PROVIDER
     }
 
     async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult> {
@@ -391,7 +473,7 @@ impl VaultProvider for BitwardenVaultProvider {
 
         let session = match self.load_session(workspace_id).await? {
             Some(s) => s,
-            None => self.create_pairing_session(workspace_id),
+            None => Self::new_pairing_session(),
         };
 
         // Create the DB row BEFORE pairing so that ConnectionStore::save()'s
@@ -403,14 +485,23 @@ impl VaultProvider for BitwardenVaultProvider {
             transport_state: None,
         };
         let encrypted_cd = encrypt_connection_data(&self.crypto, &initial_cd).await?;
-        db::upsert_vault_connection(
+        let generation = db::upsert_vault_connection(
             &self.pool,
             workspace_id,
-            "bitwarden",
+            PROVIDER,
             "paired",
             Some(&encrypted_cd),
         )
         .await?;
+        // This instance's own write: the session moves to the row's new
+        // generation rather than reading it as a re-pair from elsewhere. The
+        // pairing's write-through below advances it again the same way.
+        session.set_generation(generation);
+        // (Re)install it now that it matches the row. A concurrent lookup that
+        // raced the upsert may have dropped it as superseded; this puts the
+        // pairing session back as the workspace's one session.
+        self.sessions
+            .insert(workspace_id.to_string(), Arc::clone(&session));
 
         let client = self
             .create_and_connect_client(workspace_id, &session)
@@ -690,5 +781,160 @@ mod tests {
         assert!(deserialized.fingerprint.is_none());
         assert!(deserialized.key_data.is_none());
         assert!(deserialized.transport_state.is_none());
+    }
+
+    // ── Cross-instance revocation, over a real Postgres ─────────────────
+    //
+    // Two providers over one database stand in for two gateway instances.
+    // Pairing dials the Bitwarden relay, so these write the row the way a
+    // pairing does and drive the session machinery directly.
+
+    use crate::bitwarden_db::{BitwardenConnectionStore, BitwardenIdentityProvider};
+    use crate::test_support::{seed_workspace, test_crypto, test_pool};
+    use crate::VaultService;
+    use ap_client::{ConnectionInfo, ConnectionStore};
+
+    fn provider(pool: &PgPool, crypto: &Arc<CryptoService>) -> BitwardenVaultProvider {
+        BitwardenVaultProvider::new(
+            BitwardenConfig {
+                // Never dialed: these tests never connect a client.
+                proxy_url: "ws://127.0.0.1:9".into(),
+            },
+            pool.clone(),
+            Arc::clone(crypto),
+        )
+    }
+
+    /// Write a paired row with a fresh identity, the way `pair` does; returns
+    /// the identity's fingerprint.
+    async fn write_pairing(pool: &PgPool, crypto: &CryptoService, workspace_id: &str) -> String {
+        let identity = BitwardenIdentityProvider::generate();
+        let cd = BitwardenConnectionData {
+            fingerprint: Some(hex::encode([7u8; 32])),
+            key_data: Some(identity.to_cose()),
+            transport_state: None,
+        };
+        let encrypted = encrypt_connection_data(crypto, &cd).await.expect("encrypt");
+        db::upsert_vault_connection(pool, workspace_id, PROVIDER, "paired", Some(&encrypted))
+            .await
+            .expect("upsert");
+        hex::encode(identity.fingerprint().0)
+    }
+
+    async fn identity_served(p: &BitwardenVaultProvider, workspace_id: &str) -> Option<String> {
+        p.load_session(workspace_id)
+            .await
+            .expect("load session")
+            .map(|s| hex::encode(s.identity.fingerprint().0))
+    }
+
+    #[tokio::test]
+    async fn a_re_pair_on_another_instance_replaces_the_cached_identity() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vbw1").await;
+        let crypto = test_crypto();
+        let b = provider(&pool, &crypto);
+
+        let first = write_pairing(&pool, &crypto, &ws).await;
+        assert_eq!(identity_served(&b, &ws).await, Some(first));
+
+        let second = write_pairing(&pool, &crypto, &ws).await;
+        assert_eq!(identity_served(&b, &ws).await, Some(second));
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_on_another_instance_drops_the_cached_session() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vbw2").await;
+        let crypto = test_crypto();
+        let a = Arc::new(provider(&pool, &crypto));
+        let b = provider(&pool, &crypto);
+        let service_a =
+            VaultService::new(vec![Arc::clone(&a) as Arc<dyn VaultProvider>], pool.clone());
+
+        write_pairing(&pool, &crypto, &ws).await;
+        assert!(identity_served(&b, &ws).await.is_some());
+
+        service_a
+            .disconnect(&ws, PROVIDER)
+            .await
+            .expect("disconnect");
+
+        assert_eq!(identity_served(&b, &ws).await, None);
+        assert!(!b.sessions.contains_key(&ws));
+        assert!(b.request_credential(&ws, "example.com").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_sessions_own_write_through_does_not_invalidate_it() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vbw3").await;
+        let crypto = test_crypto();
+        let b = provider(&pool, &crypto);
+
+        write_pairing(&pool, &crypto, &ws).await;
+        let session = b.load_session(&ws).await.expect("load").expect("session");
+
+        // The relay client persists transport state through the session's
+        // store mid-pairing and on reconnect. That write moves the row's
+        // generation; the session must move with it.
+        let mut store = BitwardenConnectionStore::new(
+            pool.clone(),
+            ws.clone(),
+            Some(session.identity.to_cose()),
+            Arc::clone(&crypto),
+            session.connection_data.as_ref(),
+            Arc::clone(&session.generation),
+        );
+        store
+            .save(ConnectionInfo {
+                fingerprint: IdentityFingerprint([7u8; 32]),
+                name: None,
+                cached_at: 0,
+                last_connected_at: 0,
+                transport_state: None,
+            })
+            .await
+            .expect("save");
+
+        let again = b.load_session(&ws).await.expect("load").expect("session");
+        assert!(
+            Arc::ptr_eq(&session, &again),
+            "a session must not read its own write-through as a re-pair"
+        );
+
+        // A write from ANOTHER instance still supersedes it.
+        write_pairing(&pool, &crypto, &ws).await;
+        let after = b.load_session(&ws).await.expect("load").expect("session");
+        assert!(!Arc::ptr_eq(&session, &after));
+    }
+
+    #[tokio::test]
+    async fn a_database_error_fails_closed_and_keeps_the_session() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let ws = seed_workspace(&pool, "vbw4").await;
+        let crypto = test_crypto();
+        write_pairing(&pool, &crypto, &ws).await;
+
+        let url = std::env::var("GATEWAY_TEST_DATABASE_URL").expect("url");
+        let b_pool = db::create_pool(&url).await.expect("pool");
+        let b = provider(&b_pool, &crypto);
+        assert!(identity_served(&b, &ws).await.is_some());
+
+        b_pool.close().await;
+        assert!(b.load_session(&ws).await.is_err());
+        assert!(b.request_credential(&ws, "example.com").await.is_none());
+        assert!(
+            b.sessions.contains_key(&ws),
+            "a database blip must not tear the session down"
+        );
     }
 }

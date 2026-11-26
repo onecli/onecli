@@ -9,12 +9,12 @@ import {
 const log = logger.child({ component: "event-bus-redis" });
 
 /**
- * The cloud live fan-out bus (plans/sandbox-platform-issues.md "EventBus
- * cross-instance fan-out"). The api-server runs multiple pods; the runner's
- * event POST and a browser's SSE stream land on independently-chosen pods, so
- * an in-process emitter delivers a publish to no one when they differ. This
- * bus carries every publish over Redis pub/sub, so a publish on any pod
- * reaches the SSE stream on whichever pod holds it.
+ * The cross-instance live fan-out bus. With multiple api-server instances,
+ * the runner's event POST and a browser's SSE stream land on
+ * independently-chosen instances, so an in-process emitter delivers a publish
+ * to no one when they differ. This bus carries every publish over Redis
+ * pub/sub, so a publish on any instance reaches the SSE stream on whichever
+ * instance holds it.
  *
  * Injected as the cloud edition default (`edition-defaults.ts`) — shared code
  * never imports it (ioredis stays out of every client bundle). Onprem keeps
@@ -47,7 +47,7 @@ export interface RedisEventBusDeps {
 export const createRedisEventBus = (deps: RedisEventBusDeps): EventBus => {
   // The local fan-out half is the exact in-process emitter — same delivery,
   // same throwing-listener isolation, same map-leak guard, same test seams.
-  // This bus only adds the Redis hop between pods.
+  // This bus only adds the Redis hop between instances.
   const local = createInProcessEventBus();
 
   // channel → the pending-or-acked SUBSCRIBE promise. Presence here — not the
@@ -100,7 +100,7 @@ export const createRedisEventBus = (deps: RedisEventBusDeps): EventBus => {
 
     subscribe(conversationId, listener) {
       // Register locally FIRST and synchronously. Only a channel with no
-      // (pending or acked) SUBSCRIBE talks to Redis, so a pod holds exactly
+      // (pending or acked) SUBSCRIBE talks to Redis, so an instance holds exactly
       // the channels it is actually tailing — never every conversation
       // fleet-wide.
       const localSub = local.subscribe(conversationId, listener);
@@ -150,7 +150,7 @@ export const createRedisEventBus = (deps: RedisEventBusDeps): EventBus => {
         if (released) return;
         released = true;
         localSub.release();
-        // Last local tailer gone → stop carrying this channel on this pod.
+        // Last local tailer gone → stop carrying this channel on this instance.
         // Forgetting the ack entry here is what lets a later 0→1 transition
         // re-issue the SUBSCRIBE (ioredis serializes the UNSUBSCRIBE and any
         // later SUBSCRIBE on the one connection, so the end state is right).

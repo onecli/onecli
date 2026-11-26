@@ -15,20 +15,22 @@ import {
   type ToolRollupStatus,
 } from "./effective-tools";
 import { buildInjectionProbe, injectionIdentityMatches } from "./injection";
-import type { CredentialProvenance } from "./effective-credentials";
+import {
+  toProvenance,
+  type CredentialProvenance,
+  type RuleRef,
+} from "./effective-credentials";
 
 // The per-agent reflection behind the connection "agent access" dialog
 // (step 9.7b): for every agent in the caller's workspace, TWO axes —
 //
-// 1. CREDENTIAL (primary — the old dialog's full/assigned/none meaning): would
-//    this connection inject for the agent, under the same laws as the
-//    effective-credentials reflection (inject_select.rs): an ALL-mode agent
-//    draws the whole pool ("full"); a SELECTIVE agent is attached iff ASSIGNED
-//    (an AgentAppConnection row — injection-live via the bridge) or GRANTED by
-//    a published, enabled allow rule with an EXPLICIT matching identity whose
-//    target names this connection (`connection.appConnectionId`) or its
-//    provider pool (`app` + `connectionScope` matching the connection's level).
-//    Empty identities never inject.
+// 1. CREDENTIAL (primary): would this connection inject for the agent, under
+//    the same laws as the effective-credentials reflection (inject_select.rs):
+//    the agent is attached ("viaRule") iff GRANTED by a published, enabled
+//    allow rule (`equipment` ones included) with an EXPLICIT matching identity
+//    whose target names this connection (`connection.appConnectionId`) or its
+//    provider pool (`app` + `connectionScope` matching the connection's level);
+//    otherwise "none". Empty identities never inject.
 // 2. DECISIONS (secondary): the per-tool rollup of the provider's catalog under
 //    the same engine as the effective-app-permissions reflection —
 //    `{allowedTools, totalTools, anyApproval, anyRateLimit}` where "allowed"
@@ -92,40 +94,6 @@ export interface EffectiveAgentsCtx {
   organizationId: string;
   viewerSeesOrgRules: boolean;
 }
-
-interface RuleRef {
-  scope: "organization" | "workspace";
-  logicalId: string;
-  name: string;
-}
-
-/** Collapse rule refs into provenance, org refs redacted for non-admins (one
- * marker regardless of count — the effective-credentials contract). */
-const toProvenance = (
-  refs: RuleRef[],
-  viewerSeesOrgRules: boolean,
-): CredentialProvenance[] => {
-  const out: CredentialProvenance[] = [];
-  const seen = new Set<string>();
-  let redactedEmitted = false;
-  for (const ref of refs) {
-    if (ref.scope === "organization" && !viewerSeesOrgRules) {
-      if (!redactedEmitted) {
-        out.push({ kind: "rule", scope: "organization", redacted: true });
-        redactedEmitted = true;
-      }
-      continue;
-    }
-    if (seen.has(ref.logicalId)) continue;
-    seen.add(ref.logicalId);
-    out.push({
-      kind: "rule",
-      scope: ref.scope,
-      rule: { logicalId: ref.logicalId, name: ref.name },
-    });
-  }
-  return out;
-};
 
 export const effectiveAgents = async (
   connectionId: string,

@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import {
+  clearChunkErrorReload,
+  useChunkErrorReload,
+} from "@/hooks/use-chunk-error-reload";
 
 /**
- * Global error boundary for the entire app.
- *
- * Handles ChunkLoadError gracefully — after a deployment, cached HTML may
- * reference old JS chunks that no longer exist. A single reload fetches
- * the new HTML with correct chunk references. Session storage prevents
- * infinite reload loops.
+ * Global error boundary for the entire app. Reloads once on a ChunkLoadError
+ * after a deploy (see `useChunkErrorReload`).
  */
 export default function GlobalError({
   error,
@@ -17,24 +16,7 @@ export default function GlobalError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
-  useEffect(() => {
-    if (
-      error.name === "ChunkLoadError" ||
-      error.message?.includes("ChunkLoadError")
-    ) {
-      const key = "chunk-error-reloaded";
-      const alreadyReloaded = sessionStorage.getItem(key);
-
-      if (!alreadyReloaded) {
-        sessionStorage.setItem(key, "1");
-        window.location.reload();
-        return;
-      }
-
-      // Clear flag so future deploys can retry
-      sessionStorage.removeItem(key);
-    }
-  }, [error]);
+  useChunkErrorReload(error);
 
   return (
     <html>
@@ -58,7 +40,7 @@ export default function GlobalError({
           </p>
           <button
             onClick={() => {
-              sessionStorage.removeItem("chunk-error-reloaded");
+              clearChunkErrorReload();
               reset();
             }}
             style={{

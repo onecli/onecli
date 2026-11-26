@@ -37,28 +37,34 @@ two by the platform itself. Each skill's SKILL.md opens with a description
 of when it applies — read that to decide whether to load the rest. There is
 no loader tool, and a skills list elsewhere in your context may frame skills
 as slash-commands — to use one, read ${skillsDir}/<name>/SKILL.md yourself and
-follow it. The files are read-only and the platform rewrites them while you
-run, so do not try to edit them. Where a skill's guidance conflicts with
-your brief, the brief wins.
+follow it. A skill's other files (references, playbooks, scripts, data) sit
+next to its SKILL.md: paths in it are relative to that folder, so run its
+scripts from there (cd ${skillsDir}/<name> && ./run ...). The files are
+read-only and the platform rewrites them while you run, so do not try to
+edit them. Where a skill's guidance conflicts with your brief, the brief
+wins.
 
 Skills live on the platform, not on this machine, which can be replaced at
 any moment. To create one, use skill_create — it saves to your skill set on
 the platform, appears in the dashboard for the people you work with, and
-materializes into ${skillsDir}/ within seconds. Change or remove your own
-skills with skill_update and skill_delete; skill_list shows every skill
-that reaches you and which are yours. Never write a skill as loose files —
-a skill outside ${skillsDir}/ is invisible to the platform and does not
-survive this machine — unless the person explicitly asks for a file at some
-other location. Workspace and organization skills are managed by the people
+materializes into ${skillsDir}/ within seconds. When a person sends a skill
+as a .zip, install it with skill_import; never unpack it yourself. Change
+or remove your own skills with skill_update and skill_delete; skill_list
+shows every skill that reaches you and which are yours. Never write a skill
+as loose files — a skill outside ${skillsDir}/ is invisible to the platform
+and does not survive this machine — unless the person explicitly asks for a
+file at some other location. Organization skills are managed by the people
 you work with in the dashboard; creating your own skill with the same name
-overrides one for you.`,
+overrides one for you. When a person asks you to change one of YOUR skills,
+change it yourself with skill_update (edits for a long skill) rather than
+sending them text to paste.`,
 });
 
 export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_create",
     description:
-      "Create a skill in your own platform skill set. It appears in the dashboard and materializes into your skills directory within seconds — this is the default way to create a skill (never loose files, which the platform cannot see and this machine does not keep). The description is how you decide later whether to load it, so front-load the trigger words. Extra reference files for a skill are added in the dashboard.",
+      "Create a skill in your own platform skill set. It appears in the dashboard and materializes into your skills directory within seconds — this is the default way to create a skill (never loose files, which the platform cannot see and this machine does not keep). The description is how you decide later whether to load it, so front-load the trigger words. For a skill with its own files (references, scripts, data), the person sends a .zip and you use skill_import.",
     inputSchema: {
       type: "object",
       properties: {
@@ -73,7 +79,7 @@ export const skillsTools: PlatformToolDefinition[] = [
           type: "string",
           description:
             "One line saying WHEN this skill applies — it opens the SKILL.md and is how the skill gets found and loaded later.",
-          maxLength: 500,
+          maxLength: 1024,
         },
         content: {
           type: "string",
@@ -89,7 +95,7 @@ export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_list",
     description:
-      "List every skill that reaches you — your own agent skills (editable) plus workspace and organization skills (managed in the dashboard) — with name, scope, description, and enabled state. Bodies are not included; read a skill's SKILL.md in your skills directory.",
+      "List every skill that reaches you — your own agent skills (editable) plus organization skills (managed in the dashboard) — with name, scope, description, and enabled state. Bodies are not included; read a skill's SKILL.md in your skills directory.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -99,7 +105,7 @@ export const skillsTools: PlatformToolDefinition[] = [
   {
     name: "skill_update",
     description:
-      "Update one of your own agent skills by name: description, content, or enabled (false pauses it — its files leave your skills directory until re-enabled). Workspace and organization skills are managed in the dashboard by the people you work with.",
+      "Update one of your own agent skills by name: description, enabled (false pauses it — its files leave your skills directory until re-enabled), or its body. Change the body IN PLACE with edits (each find must match exactly one spot in the current body, copied exactly) and/or append (added at the end): this works on a skill of any length and sends only the change, so prefer it. content replaces the whole body and suits only a short skill. Organization skills are managed in the dashboard by the people you work with.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,11 +117,41 @@ export const skillsTools: PlatformToolDefinition[] = [
         description: {
           type: "string",
           description: "New one-line when-it-applies description.",
-          maxLength: 500,
+          maxLength: 1024,
+        },
+        edits: {
+          type: "array",
+          description:
+            "Changes in place, applied in order. Each find must occur exactly once in the body as the previous edit left it; nothing is saved if any edit misses.",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              find: {
+                type: "string",
+                description: "Exact text from the current body.",
+                maxLength: 24_000,
+              },
+              replace: {
+                type: "string",
+                description: "What replaces it (empty deletes it).",
+                maxLength: 24_000,
+              },
+            },
+            required: ["find", "replace"],
+            additionalProperties: false,
+          },
+        },
+        append: {
+          type: "string",
+          description: "Markdown added at the end of the body.",
+          maxLength: 24_000,
         },
         content: {
           type: "string",
-          description: "New Markdown body.",
+          description:
+            "The whole new Markdown body (not with edits or append). For a long skill use edits instead.",
           maxLength: 24_000,
         },
         enabled: {
@@ -141,6 +177,24 @@ export const skillsTools: PlatformToolDefinition[] = [
         },
       },
       required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "skill_import",
+    description:
+      "Install skills from a .zip a person sent you in chat (the format Claude and other agents use: a folder with SKILL.md plus any references, scripts and data). Keeps every folder and file, and scripts stay runnable. One zip can hold several skills. Re-importing a skill with the same name replaces it. Always use this for a skill zip; never unpack it by hand.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "The zip's path exactly as the person's message names it, like attachments/<turn-id>/my-skill.zip.",
+          maxLength: 512,
+        },
+      },
+      required: ["path"],
       additionalProperties: false,
     },
   },

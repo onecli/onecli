@@ -10,6 +10,13 @@ import {
 } from "../services/secret-service";
 import { createSecretSchema, updateSecretSchema } from "../validations/secret";
 import { getResourceHooks } from "../providers";
+import { getSecretAgentAccess } from "../services/grants-service";
+import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICES,
+  AUDIT_SOURCE,
+  withAudit,
+} from "../services/audit-service";
 
 export const secretRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -39,14 +46,49 @@ export const secretRoutes = () => {
 
     await getResourceHooks().beforeCreateSecret(auth.organizationId);
 
-    const secret = await createSecret(
-      { workspaceId: requireWorkspaceId(auth) },
-      parsed.data,
-      // The grantor recorded on any grant the service auto-attaches.
-      auth.userId,
+    const workspaceId = requireWorkspaceId(auth);
+    const secret = await withAudit(
+      () =>
+        createSecret(
+          { workspaceId },
+          parsed.data,
+          // The grantor recorded on an auto-attached LLM key grant (a custom
+          // secret is granted to no agent).
+          auth.userId,
+        ),
+      (created) => ({
+        workspaceId,
+        userId: auth.userId,
+        userEmail: auth.userEmail,
+        action: AUDIT_ACTIONS.CREATE,
+        service: AUDIT_SERVICES.SECRET,
+        source: AUDIT_SOURCE.API,
+        // Ids and names only, never the value.
+        metadata: {
+          secretId: created.id,
+          name: parsed.data.name,
+          type: parsed.data.type,
+        },
+      }),
     );
     invalidateGatewayCache(c.req.raw);
     return c.json(secret, 201);
+  });
+
+  // GET /secrets/:secretId/agents: every agent of the workspace against this
+  // secret: the custom connection's "choose agents" window (read-only, no
+  // audit). Toggles write through the agent grants routes.
+  app.get("/:secretId/agents", async (c) => {
+    const auth = c.get("auth");
+    return c.json(
+      await getSecretAgentAccess(
+        {
+          workspaceId: requireWorkspaceId(auth),
+          organizationId: auth.organizationId,
+        },
+        c.req.param("secretId"),
+      ),
+    );
   });
 
   // PATCH /secrets/:secretId

@@ -4,6 +4,7 @@ import {
   ResolverUnreachableError,
   type Resolver,
 } from "./backend/types";
+import { boundedWait } from "./bounded-wait";
 import {
   ControlPlaneUnreachableError,
   type ControlPlaneClient,
@@ -53,33 +54,13 @@ const PROGRESS_THROTTLE_MS = 10_000;
  * Same ordering rule as the terminator server's refusal path: writing the
  * banner and calling `endConnection()` in the SAME tick loses it — OpenSSH
  * takes the DISCONNECT out of the same read batch and exits without flushing.
- * Measured on the dev live gate: deleting the terminator pod dropped a live
+ * Measured live: stopping the terminator dropped a live
  * PTY session in 0.8s but printed a bare "Received disconnect … :11:" instead
  * of "the server is shutting down, reconnect shortly". Revocation, max
  * duration and idle timeout all ride the same path, so all four reasons were
  * invisible.
  */
 const BANNER_DRAIN_TIMEOUT_MS = 2_000;
-
-/** Resolves when `settle` reports done, or when the drain bound elapses —
- * never rejects, so a wedged peer cannot pin a closing session's socket. */
-const drainBounded = (settle: (done: () => void) => void): Promise<void> =>
-  new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, BANNER_DRAIN_TIMEOUT_MS);
-    timer.unref();
-    try {
-      settle(finish);
-    } catch {
-      finish();
-    }
-  });
 
 /**
  * Resolves when the channel reports closed, or when the bound elapses.
@@ -98,7 +79,7 @@ const drainBounded = (settle: (done: () => void) => void): Promise<void> =>
 const closeAcked = (channel: NotifiableChannel): Promise<void> => {
   const once = channel.once?.bind(channel);
   if (!once) return Promise.resolve();
-  return drainBounded((done) => once("close", done));
+  return boundedWait((done) => once("close", done), BANNER_DRAIN_TIMEOUT_MS);
 };
 
 export class WakeTimeoutError extends Error {
@@ -157,8 +138,8 @@ export interface ConnectionSession<T> {
   /**
    * Drop the cached exec target so the next ensureTarget re-resolves. The
    * cache holds a target for up to ~570s with no failure-driven refresh —
-   * a reaped session trio or a re-pinned pod makes it stale mid-session,
-   * and the dial-retry path (server.ts) is what heals that (step 6).
+   * a reaped session or a relocated sandbox makes it stale mid-session,
+   * and the dial-retry path (server.ts) is what heals that.
    */
   invalidateTarget(): void;
   registerChannel(channel: NotifiableChannel, hasPty: boolean): () => void;
@@ -291,7 +272,10 @@ export const createConnectionSession = <T>(
             const acked = closeAcked(channel);
             flushes.push(
               // The write flush: the banner bytes reached our socket.
-              drainBounded((done) => channel.write(`\r\n${banner}\r\n`, done)),
+              boundedWait(
+                (done) => channel.write(`\r\n${banner}\r\n`, done),
+                BANNER_DRAIN_TIMEOUT_MS,
+              ),
               acked,
             );
           }

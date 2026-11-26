@@ -27,7 +27,10 @@ export const supabasePermissions: AppPermissionDefinition = {
           name: "Get project",
           description: "Retrieve details of a specific project",
           hostPattern: "api.supabase.com",
-          pathPattern: "/v1/projects/*",
+          // Trailing slash = exactly one segment: the project itself. A raw
+          // `/projects/*` prefix also matched `/api-keys?reveal=true` and
+          // `/secrets`, so a read-only grant handed out the project's keys.
+          pathPattern: "/v1/projects/*/",
           method: "GET",
         },
         {

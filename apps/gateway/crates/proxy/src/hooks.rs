@@ -128,17 +128,21 @@ pub async fn pre_forward(
     if let Some(denial) = ee::granular_access::enforce_request(
         rules.session_policy.as_ref(),
         host,
+        method,
         path,
         headers,
         body,
-    ) {
-        warn!(host = %common::util::strip_port(host), %path, reason = %denial.reason, "granular access denied");
+    )
+    .await
+    {
+        warn!(host = %common::util::strip_port(host), path = %super::log_redact::redact_for_log(path), reason = %denial.reason, "granular access denied");
         // The block returns before forward.rs emits telemetry, so log it here —
         // surfaces as a "Blocked" row in the activity feed.
         emit_block_telemetry(proxy_ctx, host, method, path, denial.rule_name);
         return Some(ee_response::forbidden_resource(
             &denial.reason,
             &denial.allowed,
+            denial.hint,
         ));
     }
 
@@ -215,41 +219,49 @@ pub fn track_and_wrap(
     Box::pin(stream.map_ok(Frame::data))
 }
 
-// ── Blocked-request telemetry ───────────────────────────────────────────
+// ── Request telemetry ───────────────────────────────────────────────────
 
-/// Emits a request-log event for a request the guard blocked. The guard
-/// returns before `forward.rs` runs its normal telemetry, so without this the
-/// denial would be invisible in the activity feed. Mirrors
-/// `emit_policy_telemetry`; renders as a red "Blocked" row attributed to
-/// `rule_name`.
-fn emit_block_telemetry(
+/// Current UTC time as an ISO 8601 string, the format every telemetry
+/// timestamp is recorded in, on every lane.
+pub fn iso_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_default()
+}
+
+/// The telemetry fields every request-log event shares, on every lane:
+/// who (from the proxy context), where (host, the query-stripped path, the
+/// provider the request is attributed to), what came back (status, latency).
+/// `None` for an unauthenticated request, which is never logged.
+///
+/// The decision, injection facts, and log-row linkage are the caller's: this
+/// starts every event as an un-injected plain allow, and each emitter sets
+/// what it knows. The provider is the one the agent's guidance is about
+/// (`apps::guidance_provider_for`): the injecting provider for the host and
+/// path, else the provider owning the host as a non-injecting alias, else
+/// the bare hostname.
+#[must_use]
+pub fn request_meta(
     proxy_ctx: &ProxyContext,
     host: &str,
     method: &str,
     path: &str,
-    rule_name: &str,
-) {
-    let (Some(pid), Some(aid)) = (
-        proxy_ctx.workspace_id.as_deref(),
-        proxy_ctx.agent_id.as_deref(),
-    ) else {
-        return;
-    };
+    status: u16,
+    latency_ms: u32,
+) -> Option<RequestMeta> {
+    let workspace_id = proxy_ctx.workspace_id.as_deref()?;
+    let agent_id = proxy_ctx.agent_id.as_deref()?;
     let hostname = common::util::strip_port(host);
-    let (provider, _) =
-        apps::provider_for_host_and_path(hostname, path).unwrap_or((hostname, hostname));
-    let ts = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .unwrap_or_default();
+    let (provider, _) = apps::guidance_provider_for(hostname, path).unwrap_or((hostname, hostname));
     let telemetry_path = path.split('?').next().unwrap_or(path);
-    telemetry::on_request(telemetry::RequestEvent {
+    Some(RequestMeta {
         org_id: proxy_ctx
             .organization_id
             .as_deref()
             .unwrap_or("")
             .to_string(),
-        workspace_id: pid.to_string(),
-        agent_id: aid.to_string(),
+        workspace_id: workspace_id.to_string(),
+        agent_id: agent_id.to_string(),
         agent_name: proxy_ctx
             .agent_name
             .as_deref()
@@ -259,29 +271,212 @@ fn emit_block_telemetry(
         host: host.to_string(),
         path: telemetry_path.to_string(),
         provider: provider.to_string(),
-        // Every guard block is a 403 Forbidden.
-        status: 403,
-        latency_ms: 0,
+        status,
+        latency_ms,
         injection_count: 0,
-        timestamp: ts,
+        timestamp: iso_now(),
         injected: false,
-        decision: telemetry::core::RequestDecision::Blocked {
-            rule_name: rule_name.to_string(),
-        },
         connection_label: None,
         existing_log_id: None,
-        log_id: None,
-        // Blocked before forwarding upstream — no spend incurred.
-        budget_charge: None,
-        // Guard blocks (budget/granular) are not v2 policy rules.
+        decision: None,
         matched_rule: None,
+        statement: None,
+    })
+}
+
+/// Label a row with the app connection that actually injected into it.
+/// `request_meta` resolves the provider from the host, which cannot tell two
+/// apps on one host apart: every GitHub App request resolved to `github`, so
+/// the app was invisible in the activity feed. Uncredentialed rows keep the
+/// host's provider.
+pub(crate) fn attribute_to_connection(
+    meta: &mut RequestMeta,
+    rules: &ResolvedRules,
+    injection_count: usize,
+) {
+    if injection_count == 0 {
+        return;
+    }
+    if let Some(provider) = rules.winning_provider.as_deref() {
+        meta.provider = provider.to_string();
+    }
+}
+
+/// Emits a request-log event for a request the guard blocked. The guard
+/// returns before `forward.rs` runs its normal telemetry, so without this the
+/// denial would be invisible in the activity feed. Mirrors the policy-refusal
+/// rows in `forward.rs`; renders as a red "Blocked" row attributed to
+/// `rule_name`.
+pub(crate) fn emit_block_telemetry(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    rule_name: &str,
+) {
+    // Every guard block is a 403 Forbidden, decided before anything was
+    // forwarded (no latency, no spend). Guard blocks (budget/granular) are
+    // not v2 policy rules, so no rule is attributed.
+    let Some(mut meta) = request_meta(proxy_ctx, host, method, path, 403, 0) else {
+        return;
+    };
+    meta.decision = Some(telemetry::core::RequestDecision::Blocked {
+        rule_name: rule_name.to_string(),
     });
+    telemetry::on_request(meta.into_event(None));
+}
+
+/// Records a request the gateway answered with its own guidance instead of
+/// an upstream response (`error` is the guidance code in the body, e.g.
+/// `connection_host_mismatch`). Its own decision, `NeedsConnection`, because
+/// an un-injected `Allowed` row is never persisted: without it the failure
+/// an agent hit (the Salesforce and Snowflake incidents) was visible only in
+/// server logs, never in the activity feed.
+pub(crate) fn record_needs_connection(mut meta: RequestMeta, error: &str) {
+    meta.decision = Some(telemetry::core::RequestDecision::NeedsConnection {
+        error: error.to_string(),
+    });
+    telemetry::on_request(meta.into_event(None));
+}
+
+/// Records a destination-guard refusal (`crate::egress`): a 403 decided
+/// before anything was dialed, so no latency and no spend. Shared by the
+/// HTTP forward path and the WebSocket upgrade. Un-injected and not a policy
+/// rule, so without its own decision the row would be dropped and an agent
+/// probing internal addresses would leave no trace in the activity feed.
+pub(crate) fn record_destination_refused(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+) {
+    let Some(mut meta) = request_meta(proxy_ctx, host, method, path, 403, 0) else {
+        return;
+    };
+    meta.decision = Some(telemetry::core::RequestDecision::DestinationRefused);
+    telemetry::on_request(meta.into_event(None));
+}
+
+/// Records the `connection_host_mismatch` answer to a request that never
+/// reached its upstream (the host did not resolve or refused): the
+/// transport-failure twin of the guidance answers in `forward.rs`, shared by
+/// the CONNECT (MITM) and absolute-form HTTP proxy paths. The Snowflake
+/// incident took exactly this path: `api.snowflake.com` does not resolve.
+pub fn record_host_mismatch_failure(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::MISDIRECTED_REQUEST,
+        super::response::ERROR_CONNECTION_HOST_MISMATCH,
+    );
+}
+
+/// Records the `connection_needs_reconnect` answer to a request resolution
+/// refused before policy (its connection's provider refused the stored
+/// credential for good), shared by the CONNECT (MITM) and absolute-form HTTP
+/// proxy paths. Without it the request, which used to show as an injected
+/// 401, would vanish from the activity feed.
+pub fn record_needs_reconnect(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+) {
+    record_unforwarded_guidance(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        start,
+        hyper::StatusCode::UNAUTHORIZED,
+        super::response::ERROR_CONNECTION_NEEDS_RECONNECT,
+    );
+}
+
+/// A guidance answer (`error`, sent with `status`) to a request the gateway
+/// never forwarded: recorded as `NeedsConnection`, like the guidance answers
+/// `forward.rs` gives after an upstream response.
+fn record_unforwarded_guidance(
+    proxy_ctx: &ProxyContext,
+    host: &str,
+    method: &str,
+    path: &str,
+    start: std::time::Instant,
+    status: hyper::StatusCode,
+    error: &str,
+) {
+    if let Some(meta) = request_meta(
+        proxy_ctx,
+        host,
+        method,
+        path,
+        status.as_u16(),
+        start.elapsed().as_millis() as u32,
+    ) {
+        record_needs_connection(meta, error);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::edition::Edition;
+
+    fn agent_ctx() -> ProxyContext {
+        ProxyContext {
+            workspace_id: Some("ws".into()),
+            organization_id: Some("org".into()),
+            agent_id: Some("agent".into()),
+            agent_name: None,
+            agent_identifier: None,
+            agent_token: "aoc_test".into(),
+        }
+    }
+
+    /// The one builder every forward-path request-log row goes through: an
+    /// unauthenticated request is never logged, the query string never
+    /// reaches the log, and each row starts as an un-injected plain allow
+    /// for its emitter to qualify.
+    #[test]
+    fn request_meta_is_the_shared_row_contract() {
+        let mut anonymous = agent_ctx();
+        anonymous.agent_id = None;
+        assert!(request_meta(&anonymous, "api.github.com", "GET", "/user", 200, 1).is_none());
+
+        let meta = request_meta(
+            &agent_ctx(),
+            "api.github.com:443",
+            "GET",
+            "/user?access_token=leak",
+            200,
+            7,
+        )
+        .expect("authenticated request");
+        assert_eq!(meta.path, "/user", "the query never reaches the log");
+        assert_eq!(meta.host, "api.github.com:443");
+        assert_eq!(meta.provider, "github");
+        assert_eq!(meta.agent_name, "unknown");
+        assert_eq!((meta.status, meta.latency_ms), (200, 7));
+        assert!(!meta.injected && meta.injection_count == 0);
+        assert!(meta.decision.is_none() && meta.existing_log_id.is_none());
+
+        // A non-injecting alias host is attributed to the provider that owns
+        // it; an unknown host to itself (port stripped).
+        let alias = request_meta(&agent_ctx(), "login.salesforce.com", "GET", "/", 401, 0);
+        assert_eq!(alias.expect("row").provider, "salesforce");
+        let unknown = request_meta(&agent_ctx(), "example.com:8443", "GET", "/", 200, 0);
+        assert_eq!(unknown.expect("row").provider, "example.com");
+    }
 
     // The free tier caps injected integration calls; every paid plan is
     // unlimited (0 means no limit). A nonzero limit leaking onto a paid plan is

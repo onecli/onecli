@@ -5,6 +5,7 @@ import {
   MessageScrollerViewport,
   useMessageScroller,
 } from "@onecli/ui/components/message-scroller";
+import { cn } from "@onecli/ui/lib/utils";
 
 /**
  * The transcript viewport, with follow-output that survives gestures that
@@ -72,7 +73,22 @@ const EDGE_THRESHOLD_PX = 8;
 const distanceFromBottom = (el: HTMLElement): number =>
   el.scrollHeight - el.scrollTop - el.clientHeight;
 
+/**
+ * Hide the scrollbar during a programmatic follow-scroll WITHOUT changing its
+ * width. The vendored viewport pairs `scrollbar-gutter-stable` with
+ * `data-autoscrolling:scrollbar-none`, and `scrollbar-width: none` collapses
+ * the reserved gutter. The primitive sets `data-autoscrolling` for ~180ms on
+ * every follow-scroll, so with classic (always-shown) scrollbars the viewport
+ * widened by the gutter and the centered transcript jumped sideways, then back,
+ * several times a second while an agent streamed. Keeping the width at `thin`
+ * and painting the bar transparent hides it the same way with no layout
+ * change. `!` because both rules sit on the same variant and specificity.
+ */
+const STEADY_AUTOSCROLL_SCROLLBAR =
+  "data-autoscrolling:[scrollbar-width:thin]! data-autoscrolling:[scrollbar-color:transparent_transparent]!";
+
 export const FollowingViewport = ({
+  className,
   onWheel,
   onKeyDown,
   onTouchMove,
@@ -119,6 +135,7 @@ export const FollowingViewport = ({
   return (
     <MessageScrollerViewport
       ref={setRef}
+      className={cn(STEADY_AUTOSCROLL_SCROLLBAR, className)}
       onWheel={(event) => {
         // Toward the end only. A wheel-up is real scroll-away intent and must
         // keep releasing follow, or the reader could never leave the bottom.

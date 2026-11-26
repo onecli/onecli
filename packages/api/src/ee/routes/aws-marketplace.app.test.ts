@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 import { generateKeyPairSync, createSign } from "node:crypto";
 
-// Integration-boundary lock for the AWS Marketplace event intake: infra
-// (packages/infra/lib/api-server-stack.ts) subscribes the SNS relay topic to
+// Integration-boundary lock for the AWS Marketplace event intake: the
+// deployment subscribes the SNS relay topic to
 //   https://<apiDomain>/v1/billing/aws-marketplace/events
 // so this test drives the REAL app (createApiApp — basePath, error handler,
 // the full middleware chain, registerEeRoutes) at that exact path, not a

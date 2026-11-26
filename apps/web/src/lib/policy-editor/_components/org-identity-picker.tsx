@@ -51,7 +51,7 @@ const EMPTY: never[] = [];
  * The org policy-rule "Applies to" picker: select any mix of users and
  * user-groups (empty = all agents / "any"). A popover over a searchable
  * checkbox list grouped by kind; selections show as removable chips.
- * EE-only — the directory reads are org-admin-gated (empty for non-admins).
+ * The directory reads are org-admin-gated (empty for non-admins).
  */
 export const OrgIdentityPicker = ({
   value,

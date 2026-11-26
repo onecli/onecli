@@ -4,10 +4,12 @@ import {
   ATTACHMENT_CHUNK_RAW_BYTES,
   INLINE_IMAGE_MAX_BYTES,
   MAX_ATTACHMENT_NAME_CHARS,
+  attachmentDownloadDisposition,
   attachmentSandboxPath,
   dedupeAttachmentNames,
   isInlineableImage,
   isPreviewableImageType,
+  normalizeAttachmentCaption,
   sanitizeAttachmentName,
 } from "./attachments";
 import {
@@ -214,5 +216,55 @@ describe("attachmentManifestEntrySchema", () => {
       attachmentManifestEntrySchema.safeParse({ ...entry, sha256: "xyz" })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("normalizeAttachmentCaption", () => {
+  it("keeps one printable line, collapses whitespace, strips control chars, caps length, and nulls the empty", () => {
+    expect(normalizeAttachmentCaption("the run")).toBe("the run");
+    expect(normalizeAttachmentCaption("  the\n\nrun\t\tlive \r\n")).toBe(
+      "the run live",
+    );
+    expect(normalizeAttachmentCaption("a\u0007b\u001bc\u007fd")).toBe(
+      "a b c d",
+    );
+    expect(normalizeAttachmentCaption("x".repeat(600))).toHaveLength(500);
+    expect(normalizeAttachmentCaption("")).toBeNull();
+    expect(normalizeAttachmentCaption("\u0000\u0001 \n")).toBeNull();
+    expect(normalizeAttachmentCaption(null)).toBeNull();
+    expect(normalizeAttachmentCaption(undefined)).toBeNull();
+  });
+});
+
+describe("attachmentDownloadDisposition", () => {
+  it("is always an attachment with an ASCII fallback and the UTF-8 real name", () => {
+    expect(attachmentDownloadDisposition("clip <1>.webm")).toBe(
+      `attachment; filename="clip <1>.webm"; filename*=UTF-8''clip%20%3C1%3E.webm`,
+    );
+    expect(attachmentDownloadDisposition("résumé.pdf")).toBe(
+      `attachment; filename="r_sum_.pdf"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf`,
+    );
+  });
+
+  it("a hostile name cannot break out of the quoted-string: no injected parameter, no CR/LF", () => {
+    const header = attachmentDownloadDisposition('a"; filename="evil.html\\');
+    expect(header).toBe(
+      `attachment; filename="a'; filename='evil.html'"; filename*=UTF-8''a%22%3B%20filename%3D%22evil.html%5C`,
+    );
+    expect(header).not.toMatch(/[\\\r\n]/);
+    // Parsed as RFC 6266 does (split on ; outside quotes): three params.
+    const params: string[] = [];
+    let cur = "";
+    let quoted = false;
+    for (const ch of header) {
+      if (ch === '"') quoted = !quoted;
+      if (ch === ";" && !quoted) {
+        params.push(cur.trim());
+        cur = "";
+      } else cur += ch;
+    }
+    params.push(cur.trim());
+    expect(params).toHaveLength(3);
+    expect(params[0]).toBe("attachment");
   });
 });

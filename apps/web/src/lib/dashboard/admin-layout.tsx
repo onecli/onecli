@@ -1,12 +1,14 @@
 import { redirect } from "next/navigation";
 import { userIsOrgAdmin } from "@onecli/api/services/workspace-access-check";
 import { resolveOrgContext } from "@/lib/actions/resolve-user";
+import { resolveOrgHome } from "@/lib/dashboard/home-landing";
 
 /**
  * Layout choke-point for the org-level `(admin)` route group. Every admin/
  * owner-only screen — settings, team, global rules, global connections,
  * billing, usage — renders as a child of this layout, so the role guard runs
- * on entry into the group and members are redirected to /workspaces. Provider-
+ * on entry into the group and members are redirected to the org's home (its
+ * first workspace's first agent). Provider-
  * driven: RBAC deployments (cloud, licensed self-host) require admin/owner;
  * non-RBAC deployments enforce no roles, so every member passes (the flat
  * team — today's self-host behavior).
@@ -30,7 +32,7 @@ export default async function AdminLayout({
     allowed = false;
   }
   if (!allowed) {
-    redirect(`/org/${organizationId}/workspaces`);
+    redirect(await resolveOrgHome(organizationId));
   }
   return <>{children}</>;
 }

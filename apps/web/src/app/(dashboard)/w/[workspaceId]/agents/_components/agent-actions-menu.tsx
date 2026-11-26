@@ -3,16 +3,15 @@
 import { useState } from "react";
 import {
   MoreHorizontal,
-  RotateCw,
+  RefreshCcw,
   Trash2,
-  KeyRound,
   Pencil,
   Info,
+  History,
 } from "lucide-react";
 import { Button } from "@onecli/ui/components/button";
 import { Input } from "@onecli/ui/components/input";
 import { Label } from "@onecli/ui/components/label";
-import { Checkbox } from "@onecli/ui/components/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,87 +36,48 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@onecli/ui/components/dialog";
-import {
-  useDeleteAgent,
-  useRegenerateToken,
-  useRenameAgent,
-} from "@/hooks/use-agents";
+import { useRenameAgent, useRestartAgent } from "@/hooks/use-agents";
 import { providerLabel } from "@/lib/agents/channel-provider-ui";
-
-/**
- * "Slack app (@donna)" — the handle a human sees in the workspace, so the
- * acknowledgement names the thing they'd recognize. Falls back to the app id
- * where we never learned the handle (the OAuth arm, and presences that
- * predate it), which is still verifiable in Slack's app settings.
- */
-const channelAppLabel = (channel: {
-  provider: string;
-  identityName?: string | null;
-  externalId?: string;
-}) => {
-  const name = channel.identityName?.trim();
-  const suffix = name ? `@${name}` : channel.externalId;
-  return `${providerLabel(channel.provider)} app${suffix ? ` (${suffix})` : ""}`;
-};
+import type { AgentKind } from "@/lib/api/types";
+import {
+  DeleteAgentDialog,
+  type DeleteAgentDialogProps,
+} from "./delete-agent-dialog";
 
 interface AgentActionsMenuProps {
-  agent: {
-    id: string;
-    name: string;
-    /** Attached channel presences — deletion removes these from the
-     * customer's workspace, so the confirmation names them. */
-    channels?: {
-      provider: string;
-      identityName?: string | null;
-      externalId?: string;
-    }[];
+  agent: DeleteAgentDialogProps["agent"] & {
+    /** "hosted" agents get "Restart agent": only they have a computer and
+     * conversations to restart. */
+    kind: AgentKind;
   };
-  /** The owner renders the credential-access reflection dialog (the card also
-   * opens it from an inline button, so the dialog cannot live in the menu). */
-  onCredentialAccess: () => void;
-  /** The agent page's "Details" entry: the agent's facts as a dialog. Omitted
-   * by the list card, whose row already shows them. */
-  onDetails?: () => void;
-  /** Detail-page hook: navigate away after a successful delete. */
-  onDeleted?: () => void;
+  /** The agent page's "Details" entry: the agent's facts as a dialog. */
+  onDetails: () => void;
+  /** Open Activity narrowed to this agent (its runs and requests). */
+  onViewActivity: () => void;
+  /** Navigate away after a successful delete. */
+  onDeleted: () => void;
 }
 
-/** The agent kebab — one implementation shared by the list card and the agent
- * detail page header, so the action set can never drift between them. */
+/** The agent kebab in the agent page header. */
 export const AgentActionsMenu = ({
   agent,
-  onCredentialAccess,
   onDetails,
+  onViewActivity,
   onDeleted,
 }: AgentActionsMenuProps) => {
-  const deleteMutation = useDeleteAgent();
-  const regenerateMutation = useRegenerateToken();
   const renameMutation = useRenameAgent();
-  const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
+  const restartMutation = useRestartAgent();
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
-  const [acknowledged, setAcknowledged] = useState(() => new Set<string>());
-
+  // The restart confirm names the channels a reset reaches.
   const channels = agent.channels ?? [];
-  // Same shape as the org-deletion confirm: every attached app has to be
-  // ticked before the destructive action unlocks, so the provider-side
-  // consequence cannot be missed.
-  const canDelete =
-    acknowledged.size === channels.length && !deleteMutation.isPending;
 
-  const toggleAcknowledged = (provider: string) =>
-    setAcknowledged((prev) => {
-      const next = new Set(prev);
-      if (next.has(provider)) next.delete(provider);
-      else next.add(provider);
-      return next;
+  const handleRestart = () =>
+    restartMutation.mutate(agent.id, {
+      onSuccess: () => setRestartDialogOpen(false),
     });
-
-  const handleRegenerate = () => regenerateMutation.mutate(agent.id);
-
-  const handleDelete = () =>
-    deleteMutation.mutate(agent.id, { onSuccess: () => onDeleted?.() });
 
   const handleRename = () => {
     if (!newName.trim()) return;
@@ -137,12 +97,14 @@ export const AgentActionsMenu = ({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {onDetails && (
-            <DropdownMenuItem onSelect={onDetails}>
-              <Info className="size-4" />
-              Details
-            </DropdownMenuItem>
-          )}
+          <DropdownMenuItem onSelect={onDetails}>
+            <Info className="size-4" />
+            Details
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onViewActivity}>
+            <History className="size-4" />
+            View activity
+          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => {
               setNewName(agent.name);
@@ -152,14 +114,12 @@ export const AgentActionsMenu = ({
             <Pencil className="size-4" />
             Rename
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={onCredentialAccess}>
-            <KeyRound className="size-4" />
-            Credential access
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setRotateDialogOpen(true)}>
-            <RotateCw className="size-4" />
-            Rotate token
-          </DropdownMenuItem>
+          {agent.kind === "hosted" && (
+            <DropdownMenuItem onSelect={() => setRestartDialogOpen(true)}>
+              <RefreshCcw className="size-4" />
+              Restart agent
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
@@ -171,95 +131,54 @@ export const AgentActionsMenu = ({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <AlertDialog open={rotateDialogOpen} onOpenChange={setRotateDialogOpen}>
+      <AlertDialog open={restartDialogOpen} onOpenChange={setRestartDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Rotate token?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The current token for <strong>{agent.name}</strong> will be
-              invalidated immediately. Any agents using the old token will lose
-              access.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleRegenerate}
-              disabled={regenerateMutation.isPending}
-            >
-              {regenerateMutation.isPending ? "Rotating..." : "Rotate"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog
-        open={deleteDialogOpen}
-        onOpenChange={(o) => {
-          setDeleteDialogOpen(o);
-          if (!o) setAcknowledged(new Set());
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete agent?</AlertDialogTitle>
+            <AlertDialogTitle>Restart agent?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                {channels.length > 0 && (
-                  <>
-                    <p>Acknowledge each app that leaves your workspace:</p>
-                    <div className="rounded-md border">
-                      {channels.map((channel) => (
-                        <label
-                          key={channel.provider}
-                          className="hover:bg-muted/50 flex cursor-pointer items-center gap-3 border-b px-4 py-3 last:border-b-0"
-                        >
-                          <Checkbox
-                            checked={acknowledged.has(channel.provider)}
-                            onCheckedChange={() =>
-                              toggleAcknowledged(channel.provider)
-                            }
-                          />
-                          <span className="text-foreground text-sm font-medium">
-                            {channelAppLabel(channel)}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                    <p>
-                      Its{" "}
-                      {channels
-                        .map((c) => providerLabel(c.provider))
-                        .join(" and ")}{" "}
-                      app is uninstalled from your workspace, and anyone talking
-                      to it there loses the agent.
-                    </p>
-                  </>
-                )}
                 <p>
-                  This will permanently delete <strong>{agent.name}</strong> and
-                  its access token. This action cannot be undone.
+                  <strong>{agent.name}</strong> starts fresh in every
+                  conversation, in the dashboard
+                  {channels
+                    .map((c) => ` and in ${providerLabel(c.provider)}`)
+                    .join("")}
+                  . The chat history stays visible, but the agent won&apos;t
+                  remember it.
+                </p>
+                <p>
+                  Anything it&apos;s working on stops now, including background
+                  processes and open SSH sessions. Your next message starts it
+                  again.
                 </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>
+            <AlertDialogCancel disabled={restartMutation.isPending}>
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
-              variant="destructive"
               onClick={(e) => {
+                // Close on success only: a failed restart leaves the dialog
+                // up, so the person sees it did not happen.
                 e.preventDefault();
-                handleDelete();
+                handleRestart();
               }}
-              disabled={!canDelete}
+              disabled={restartMutation.isPending}
             >
-              {deleteMutation.isPending ? "Deleting..." : "Delete"}
+              {restartMutation.isPending ? "Restarting..." : "Restart"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <DeleteAgentDialog
+        agent={agent}
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        onDeleted={onDeleted}
+      />
 
       <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
         <DialogContent>

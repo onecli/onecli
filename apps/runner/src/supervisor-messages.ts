@@ -1,11 +1,17 @@
+import { createHash } from "node:crypto";
 import {
+  MAX_OUTBOUND_ATTACHMENT_BYTES,
+  MAX_SESSION_REF_CHARS,
   MAX_TOOL_ERROR_CHARS,
   MAX_TOOL_RESULT_CHARS,
+  TURN_FAILURE_CODES,
+  type RunnerAttachmentUploadResponse,
   type RunnerEvent,
   type RunnerMemoryWriteResponse,
   type SupervisorMessage,
   type WorkItem,
 } from "@onecli/agent-protocol";
+import type { PortHub } from "./port-hub";
 import type { TurnEventCollector } from "./turn-events";
 import { log } from "./log";
 
@@ -23,6 +29,23 @@ import { log } from "./log";
 export const MAX_INFLIGHT_MEMORY_WRITES_PER_SANDBOX = 8;
 
 /**
+ * Concurrent outbound file uploads (send_file) per sandbox, AFTER reassembly
+ * — each holds up to 25 MB awaiting the api. The supervisor's tool sends
+ * files one at a time (the model calls send_file serially), so 2 is the
+ * ceiling for a legitimate agent and only a flood trips it; the excess gets a
+ * retryable refusal the tool surfaces to the model. Reassembly itself is
+ * bounded separately: ONE in-progress chunk run per sandbox (below).
+ */
+export const MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX = 2;
+
+/**
+ * A chunk run with no new part for this long is dropped: a supervisor that
+ * died mid-file must not pin 25 MB of partial buffer forever. Well above the
+ * inter-frame gap of a healthy stream (parts are sent back to back).
+ */
+export const FILE_UPLOAD_STALE_MS = 60_000;
+
+/**
  * The ONE place a supervisor message becomes a control-plane event.
  *
  * An exhaustive switch on purpose: nothing downstream references the message
@@ -33,16 +56,17 @@ export const MAX_INFLIGHT_MEMORY_WRITES_PER_SANDBOX = 8;
  */
 
 export interface SupervisorMessageHandlerDeps {
-  /** Queue an event for the control plane (ordered, bounded — see index.ts). */
+  /** Queue an event for the control plane (ordered, bounded, and lossy:
+   * see report-chain.ts). */
   report: (event: RunnerEvent) => void;
   collector: Pick<TurnEventCollector, "add" | "flush">;
   /**
    * Relay a platform-tool call to the control plane and return its answer
    * (step 7). Awaited on its OWN path, never through `report` — the report
-   * chain is ordered-but-lossy by design (drops under backpressure, swallows
-   * failed posts), which is fine for advisory events and fatal for an RPC:
-   * a dropped event costs a reconnect, a dropped reply hangs a tool call
-   * into its timeout.
+   * chain is ordered-but-lossy by design (drops under backpressure, and
+   * re-sends nothing but a provably-unsent turn end), which is fine for
+   * advisory events and fatal for an RPC: a dropped event costs a
+   * reconnect, a dropped reply hangs a tool call into its timeout.
    */
   toolCall: (
     sandboxId: string,
@@ -59,8 +83,20 @@ export interface SupervisorMessageHandlerDeps {
     sandboxId: string,
     write: Extract<SupervisorMessage, { kind: "memory.write" }>,
   ) => Promise<RunnerMemoryWriteResponse>;
+  /**
+   * Relay a fully reassembled outbound file (send_file) to the control
+   * plane. The memoryWrite contract exactly: awaited on its OWN path, throws
+   * on transport failure, and the handler answers the sandbox in BOTH
+   * outcomes with exactly one `file.result`.
+   */
+  uploadAttachment: (
+    sandboxId: string,
+    file: OutboundFile,
+  ) => Promise<RunnerAttachmentUploadResponse>;
   /** Send a work item back down the sandbox's channel (the tool.result). */
   sendToSandbox: (sandboxId: string, item: WorkItem) => boolean;
+  /** Test seam for the stale-run sweep clock. */
+  now?: () => number;
   /**
    * The container this runner spawned for a sandbox (step 10). Stamped onto
    * process.state events so the control plane can tell a live process from a
@@ -69,6 +105,54 @@ export interface SupervisorMessageHandlerDeps {
    * no record of this sandbox's container, so the fact cannot be stamped.
    */
   containerRefOf: (sandboxId: string) => string | undefined;
+  /**
+   * The machine the substrate placed this sandbox on, as the runner last
+   * saw it (the backend's own snapshot). Stamped onto a read-only-home
+   * report so the control plane can tell one bad machine from a fleet-wide
+   * problem; never the supervisor's word. Optional: undefined (a
+   * single-host backend, a sandbox not listed yet) sends no node.
+   */
+  nodeOf?: (sandboxId: string) => string | undefined;
+  /**
+   * Sandbox ports (plans/sandbox-ports.md §7): the byte-stream hub. Port
+   * frames are routed straight to it on the ws message path (never the lossy
+   * report chain — they are a live pipe, not events). Optional so callers
+   * that don't serve previews (tests, self-host) are unaffected; frames then
+   * drop, and a supervisor never gets asked to open a stream anyway.
+   */
+  portHub?: Pick<PortHub, "handle">;
+  /** A supervisor finished booting: arm what only a live channel can hold
+   * (the port allowlist). Fire-and-forget; never blocks the report chain. */
+  onReady?: (sandboxId: string) => void;
+}
+
+/** A reassembled, checksum-verified outbound file, ready for the api. */
+export interface OutboundFile {
+  uploadId: string;
+  conversationId: string;
+  turnId: string;
+  name: string;
+  mimeType: string;
+  sha256: string;
+  caption?: string;
+  /** "send" = staged for send_message; absent = attach to the reply. */
+  purpose?: "send";
+  bytes: Buffer;
+}
+
+type FilePart = Extract<SupervisorMessage, { kind: "file.part" }>;
+
+/** The one in-progress chunk run a sandbox may have (the inbound assembler's
+ * law, reversed): a different uploadId or an out-of-order part resets it
+ * fail-closed and the abandoned run is answered with a refusal. */
+interface FileRun {
+  uploadId: string;
+  nextPart: number;
+  of: number;
+  sizeBytes: number;
+  chunks: Buffer[];
+  total: number;
+  lastPartAt: number;
 }
 
 /** Bound the serialized result at the SENDER (the wire law): an oversized
@@ -84,13 +168,32 @@ const boundedResult = (
   };
 };
 
+/**
+ * A supervisor's session ref, as the runner wire may carry it: only when it
+ * fits `MAX_SESSION_REF_CHARS`. Dropped, never truncated, when it does not
+ * (a cut ref would name a session that does not exist), and dropped HERE,
+ * at the sender: an oversized one would fail the control plane's parse of
+ * the whole event, losing the heartbeat or the terminal report it rides on.
+ */
+const relayableSessionRef = (
+  sessionRef: string | undefined,
+): { sessionRef?: string } =>
+  sessionRef && sessionRef.length <= MAX_SESSION_REF_CHARS
+    ? { sessionRef }
+    : {};
+
 export const createSupervisorMessageHandler = ({
   report,
   collector,
   toolCall,
   memoryWrite,
+  uploadAttachment,
   sendToSandbox,
   containerRefOf,
+  nodeOf,
+  portHub,
+  onReady,
+  now = () => Date.now(),
 }: SupervisorMessageHandlerDeps) => {
   const relayToolCall = async (
     sandboxId: string,
@@ -194,8 +297,201 @@ export const createSupervisorMessageHandler = ({
     }
   };
 
+  // ── send_file: reassemble chunk runs, relay whole files ─────────────────
+
+  const fileRuns = new Map<string, FileRun>();
+  const inflightUploads = new Map<string, number>();
+
+  const fileResult = (
+    sandboxId: string,
+    uploadId: string,
+    outcome: RunnerAttachmentUploadResponse,
+  ): void => {
+    const delivered = sendToSandbox(sandboxId, {
+      kind: "file.result",
+      uploadId,
+      ok: outcome.ok,
+      ...(outcome.attachmentId !== undefined && {
+        attachmentId: outcome.attachmentId,
+      }),
+      ...(outcome.retryable !== undefined && { retryable: outcome.retryable }),
+      ...(outcome.error !== undefined && {
+        error: outcome.error.slice(0, MAX_TOOL_ERROR_CHARS),
+      }),
+    });
+    if (!delivered) {
+      log("warn", "file result had no channel to return on", {
+        sandboxId,
+        uploadId,
+      });
+    }
+  };
+
+  const relayFile = async (
+    sandboxId: string,
+    file: OutboundFile,
+  ): Promise<void> => {
+    const inflight = inflightUploads.get(sandboxId) ?? 0;
+    if (inflight >= MAX_INFLIGHT_FILE_UPLOADS_PER_SANDBOX) {
+      // Refused BEFORE the control-plane round-trip: a flood cannot amplify
+      // into the api or retain more buffers than the ceiling allows.
+      fileResult(sandboxId, file.uploadId, {
+        ok: false,
+        retryable: true,
+        error: "Too many files in flight — retry shortly.",
+      });
+      return;
+    }
+    inflightUploads.set(sandboxId, inflight + 1);
+    let outcome: RunnerAttachmentUploadResponse;
+    try {
+      outcome = await uploadAttachment(sandboxId, file);
+    } catch (error) {
+      // The operator's line carries the cause (undici wraps the socket error
+      // as `fetch failed`); the model's line stays short and honest.
+      log("warn", "attachment upload failed", {
+        sandboxId,
+        uploadId: file.uploadId,
+        sizeBytes: file.bytes.byteLength,
+        error: String(error).slice(0, 200),
+        cause:
+          error instanceof Error && error.cause !== undefined
+            ? String(error.cause).slice(0, 200)
+            : undefined,
+      });
+      outcome = {
+        ok: false,
+        retryable: true,
+        error: `The platform could not be reached: ${String(error).slice(0, 200)}`,
+      };
+    } finally {
+      const remaining = (inflightUploads.get(sandboxId) ?? 1) - 1;
+      if (remaining <= 0) inflightUploads.delete(sandboxId);
+      else inflightUploads.set(sandboxId, remaining);
+    }
+    fileResult(sandboxId, file.uploadId, outcome);
+  };
+
+  /** Drop the sandbox's in-progress run, answering it so the supervisor's
+   * correlator never has to time out. */
+  const abandonRun = (sandboxId: string, why: string): void => {
+    const run = fileRuns.get(sandboxId);
+    if (!run) return;
+    fileRuns.delete(sandboxId);
+    fileResult(sandboxId, run.uploadId, { ok: false, error: why });
+  };
+
+  const applyFilePart = (sandboxId: string, part: FilePart): void => {
+    // Stale sweep, lazily on the next frame from ANY sandbox: a run whose
+    // supervisor died mid-file must not pin its buffer forever.
+    const clock = now();
+    for (const [other, run] of fileRuns) {
+      if (clock - run.lastPartAt > FILE_UPLOAD_STALE_MS) {
+        abandonRun(other, "The upload stalled and was dropped; send it again.");
+      }
+    }
+
+    if (part.part === 1) {
+      // A new run. If one was in progress it is abandoned fail-closed (the
+      // inbound law): the supervisor never interleaves, so this only
+      // happens after a supervisor-side failure or a redelivery.
+      if (fileRuns.has(sandboxId)) {
+        abandonRun(
+          sandboxId,
+          "A new upload started before this one finished; send it again.",
+        );
+      }
+      // The declared size must fit the belt BEFORE a byte is buffered.
+      if (part.sizeBytes > MAX_OUTBOUND_ATTACHMENT_BYTES) {
+        fileResult(sandboxId, part.uploadId, {
+          ok: false,
+          error: `Files are capped at ${Math.floor(MAX_OUTBOUND_ATTACHMENT_BYTES / (1024 * 1024))}MB.`,
+        });
+        return;
+      }
+      fileRuns.set(sandboxId, {
+        uploadId: part.uploadId,
+        nextPart: 1,
+        of: part.of,
+        sizeBytes: part.sizeBytes,
+        chunks: [],
+        total: 0,
+        lastPartAt: clock,
+      });
+    }
+
+    const run = fileRuns.get(sandboxId);
+    if (
+      !run ||
+      run.uploadId !== part.uploadId ||
+      run.nextPart !== part.part ||
+      run.of !== part.of
+    ) {
+      // Discontinuity: reset fail-closed and answer whichever run this part
+      // belongs to, so nothing waits out a timeout.
+      const current = run?.uploadId;
+      abandonRun(sandboxId, "The upload arrived out of order; send it again.");
+      if (current !== part.uploadId) {
+        fileResult(sandboxId, part.uploadId, {
+          ok: false,
+          error: "The upload arrived out of order; send it again.",
+        });
+      }
+      return;
+    }
+
+    const chunk = Buffer.from(part.dataBase64, "base64");
+    run.total += chunk.byteLength;
+    if (run.total > run.sizeBytes) {
+      // More bytes than declared: the sender lied or the stream is corrupt.
+      abandonRun(sandboxId, "The upload exceeded its declared size.");
+      return;
+    }
+    run.chunks.push(chunk);
+    run.nextPart += 1;
+    run.lastPartAt = clock;
+
+    if (part.part < part.of) return;
+
+    // Final part: the run is complete. Verify before relaying.
+    fileRuns.delete(sandboxId);
+    const bytes = Buffer.concat(run.chunks);
+    if (bytes.byteLength !== part.sizeBytes) {
+      fileResult(sandboxId, part.uploadId, {
+        ok: false,
+        error: "The upload was shorter than its declared size.",
+      });
+      return;
+    }
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (digest !== part.sha256) {
+      fileResult(sandboxId, part.uploadId, {
+        ok: false,
+        error: "The file's bytes did not match its checksum; send it again.",
+      });
+      return;
+    }
+    void relayFile(sandboxId, {
+      uploadId: part.uploadId,
+      conversationId: part.conversationId,
+      turnId: part.turnId,
+      name: part.name,
+      mimeType: part.mimeType,
+      sha256: part.sha256,
+      ...(part.caption !== undefined && { caption: part.caption }),
+      ...(part.purpose !== undefined && { purpose: part.purpose }),
+      bytes,
+    });
+  };
+
   return (sandboxId: string, message: SupervisorMessage): void => {
     switch (message.kind) {
+      case "file.part":
+        // Reassembly is synchronous and bounded (one run per sandbox, size
+        // declared up front); only the relay of a COMPLETE file is
+        // fire-and-track, and it answers in BOTH outcomes.
+        applyFilePart(sandboxId, message);
+        break;
       case "tool.call":
         // Fire-and-track: the handler must return immediately (it runs on
         // the ws message path), and relayToolCall answers the sandbox in
@@ -208,6 +504,7 @@ export const createSupervisorMessageHandler = ({
         break;
       case "ready":
         report({ kind: "supervisor.ready", sandboxId });
+        onReady?.(sandboxId);
         break;
       case "home.synced":
         // The sync ack (step 9) rides the ordered report chain. `sandboxId`
@@ -260,15 +557,31 @@ export const createSupervisorMessageHandler = ({
         // batches, and a control plane that predates the kind rejects one
         // heartbeat's POST instead of poisoning a shared batch. As with
         // `event`, `sandboxId` is the authenticated channel's.
+        //
+        // The turn's buffered events go FIRST: the control plane stamps only
+        // a running turn, and the first beat arrives right behind the
+        // `turn.started` still sitting in the buffer. Posted ahead of it,
+        // that beat would land on a turn not yet running and stamp nothing.
+        collector.flush(message.turnId);
         report({
           kind: "turn.progress",
           sandboxId,
           conversationId: message.conversationId,
           turnId: message.turnId,
+          // The resume handle, forwarded only when it fits the runner wire
+          // (see `relayableSessionRef`).
+          ...relayableSessionRef(message.sessionRef),
         });
         break;
       case "turn.result":
-        // Anything still buffered belongs before the terminal report.
+        // Anything still buffered belongs before the terminal report: the
+        // turn's own events, and the replies to the follow-ups it reports
+        // (each stored under its follow-up's own id, so buffered apart). The
+        // close is what the channel mirror waits on to post a turn, so a
+        // reply that landed after it would miss its post.
+        for (const followUp of message.followUps ?? []) {
+          collector.flush(followUp.turnId);
+        }
         collector.flush(message.turnId);
         report({
           kind: "turn.finished",
@@ -289,31 +602,102 @@ export const createSupervisorMessageHandler = ({
             errorCode: message.errorCode.slice(0, 64),
           }),
           ...(message.usage && { usage: message.usage }),
-          ...(message.sessionRef && { sessionRef: message.sessionRef }),
+          ...relayableSessionRef(message.sessionRef),
           // Steer outcomes ride the terminal report so the settle and the
           // close arrive (or are lost) together.
           ...(message.followUps && { followUps: message.followUps }),
         });
         break;
-      case "unhealthy":
+      case "unhealthy": {
         // A sandbox that says it can no longer serve turns IS stopped, as far
         // as the control plane is concerned — the supervisor ends its process
         // right after saying so, which stops the container.
         //
-        // `stopped` rather than `failed`, deliberately: it is the same report
-        // `deliverTurn` makes for an unreachable sandbox, so it rejoins the
+        // `stopped` rather than `failed`, deliberately: it rejoins the
         // ordinary wake path with no retry backoff, and it fails the turns
         // whose harness session just went away.
+        //
+        // Stamped with the container this socket authenticated as: the copy
+        // holding the socket need not own the sandbox's lifecycle, and the
+        // control plane applies an observed-container report only while it
+        // is still the sandbox's container. No container known means no
+        // socket: nothing true to say.
         log("warn", "sandbox reported itself unhealthy", {
           sandboxId,
           reason: message.reason,
         });
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) break;
+        // A read-only home is the one stop the control plane budgets
+        // (each restart is capped, and a burst of them on one machine holds
+        // them all), so it rides the existing `reasonCode` slot. The code is
+        // the supervisor's (untrusted: it only ever concerns THIS sandbox);
+        // the node is the runner's own, from the substrate.
+        const readOnly = message.code === TURN_FAILURE_CODES.homeReadOnly;
+        const node = readOnly ? nodeOf?.(sandboxId) : undefined;
         report({
           kind: "sandbox.status",
           sandboxId,
           status: "stopped",
           error: message.reason,
+          observedContainerRef: containerRef,
+          ...(readOnly && { reasonCode: TURN_FAILURE_CODES.homeReadOnly }),
+          ...(node && { node }),
         });
+        break;
+      }
+      case "port.opened":
+      case "port.data":
+      case "port.ack":
+      case "port.close":
+      case "port.error":
+        // A live byte pipe: straight to the hub, synchronously. `sandboxId`
+        // is the authenticated channel's — the hub fences streams on it.
+        portHub?.handle(sandboxId, message);
+        break;
+      case "ports.state": {
+        // Port discovery (plans/sandbox-ports.md §7): same chain and same
+        // stamping rule as process.state. The control plane keys the set on
+        // the sandbox row, so the dashboard reads it from the DB in every
+        // edition. An unstampable frame is dropped; the ~30s re-send heals it.
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) {
+          log("warn", "ports state with no known container; dropping", {
+            sandboxId,
+          });
+          break;
+        }
+        report({
+          kind: "sandbox.ports",
+          sandboxId,
+          containerRef,
+          ports: message.ports,
+        });
+        break;
+      }
+      case "desktop.state": {
+        // Desktop presence: the same chain and stamping rule as
+        // ports.state; it rides the same re-send beat.
+        const containerRef = containerRefOf(sandboxId);
+        if (!containerRef) {
+          log("warn", "desktop state with no known container; dropping", {
+            sandboxId,
+          });
+          break;
+        }
+        report({
+          kind: "sandbox.desktop",
+          sandboxId,
+          containerRef,
+          viewable: message.viewable,
+        });
+        break;
+      }
+      case "heartbeat":
+        // Channel liveness (`CHANNEL_LIVENESS`): the supervisor's probe that
+        // its socket is still attached to a live runner. The answer is the
+        // ack the ws server sends for every sequenced frame, already gone
+        // by the time this runs; nothing to report.
         break;
       default: {
         const unreachable: never = message;

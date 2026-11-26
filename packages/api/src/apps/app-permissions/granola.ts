@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const granolaPermissions: AppPermissionDefinition = {
   provider: "granola",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

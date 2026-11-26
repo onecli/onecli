@@ -3,10 +3,13 @@ import Stripe from "stripe";
 import { db } from "@onecli/db";
 import { getStripe } from "../billing/stripe";
 import { STRIPE_WEBHOOK_SECRET } from "../billing/env";
-import { normalizePlan, type Plan } from "../billing/plans";
+import type { Plan } from "../billing/plans";
 import {
   findActivePlanSubscription,
   findOrgLiveSubscriptions,
+  isLiveSubscription,
+  isPastDueSubscription,
+  stripeRefId,
 } from "../billing/plan-switch";
 import { resolveSubscriptionPlan } from "../billing/subscription-plan";
 import { cloudOnly } from "../middleware/cloud-only";
@@ -43,10 +46,7 @@ const adoptSubscriptionCustomer = async (
   organizationId: string,
   subscription: Stripe.Subscription,
 ) => {
-  const customerId =
-    typeof subscription.customer === "string"
-      ? subscription.customer
-      : subscription.customer?.id;
+  const customerId = stripeRefId(subscription.customer);
   if (!customerId) return;
 
   try {
@@ -69,6 +69,107 @@ const adoptSubscriptionCustomer = async (
       "failed to adopt subscription customer id",
     );
   }
+};
+
+/**
+ * Another live subscription the org still holds besides `lapsed`, or
+ * undefined when there is none (a superseded trial whose marker didn't stick,
+ * an ops duplicate cleanup).
+ *
+ * Searched by org metadata, not just the lapsed sub's customer: after a
+ * Checkout conversion the org's live subscription can sit on a DIFFERENT
+ * customer, and looking only at this one would report "nothing left" and
+ * downgrade a still-paying org to free.
+ *
+ * Scoped to the org's OWN stored customer, not the lapsed sub's: the lookup's
+ * metadata-less fallback is only legitimate on the customer the org row
+ * uniquely claims, and the lapsed sub's customer can be a shared one whose
+ * unlabeled (dashboard-created) subscription belongs to another org.
+ *
+ * The lapsed sub is excluded by id: Stripe's search index is eventually
+ * consistent and can still return it as "active" for a while after it
+ * lapsed. Without the filter, the org keeps its paid plan until the next
+ * reconcile-on-read.
+ */
+const findRemainingLiveSubscription = async (
+  stripe: Stripe,
+  organizationId: string,
+  lapsed: Stripe.Subscription,
+): Promise<Stripe.Subscription | undefined> => {
+  const orgRow = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { stripeCustomerId: true },
+  });
+  const remaining = (
+    await findOrgLiveSubscriptions(
+      stripe,
+      organizationId,
+      orgRow?.stripeCustomerId ?? null,
+    )
+  ).find((m) => m.subscription.id !== lapsed.id);
+  if (remaining) return remaining.subscription;
+
+  // Mid-drift the lapsed sub's customer can differ from the stored one, and
+  // when search is unavailable the lookup above cannot see it. A
+  // metadata-fenced subscription there still counts; only the unlabeled
+  // fallback stays reserved for the org-claimed customer.
+  const lapsedCustomerId = stripeRefId(lapsed.customer);
+  if (!lapsedCustomerId) return undefined;
+  const labeled = await findActivePlanSubscription(
+    stripe,
+    lapsedCustomerId,
+    organizationId,
+  );
+  return labeled && labeled.id !== lapsed.id ? labeled : undefined;
+};
+
+/**
+ * Settles the org's plan after `lapsed` stopped granting one: it was canceled,
+ * or a payment on it failed (past due). The org keeps the plan of any other
+ * live subscription it holds, otherwise it drops to free. A failed lookup
+ * also falls back to free: a lapsed subscription is never a reason to keep a
+ * paid plan.
+ *
+ * Returns the plan the org kept, or null when it is now on free.
+ */
+const settlePlanAfterLapse = async (
+  stripe: Stripe,
+  organizationId: string,
+  lapsed: Stripe.Subscription,
+): Promise<Plan | null> => {
+  let remainingPlan: Plan | null = null;
+  try {
+    const remaining = await findRemainingLiveSubscription(
+      stripe,
+      organizationId,
+      lapsed,
+    );
+    if (remaining) {
+      remainingPlan = resolveSubscriptionPlan(remaining).plan;
+      await adoptSubscriptionCustomer(organizationId, remaining);
+    }
+  } catch (err) {
+    logger.error(
+      { err, organizationId, subscriptionId: lapsed.id },
+      "failed to check for remaining subscriptions after a lapse",
+    );
+  }
+
+  const plan = remainingPlan ?? "free";
+  const { count } = await applySubscriptionStatus(organizationId, plan);
+  // The trail from a failed payment to a free-tier quota block days later:
+  // `written: false` means the row was already gone or marketplace-owned.
+  logger.info(
+    {
+      organizationId,
+      subscriptionId: lapsed.id,
+      subscriptionStatus: lapsed.status,
+      plan,
+      written: count > 0,
+    },
+    "settled org plan after subscription lapse",
+  );
+  return remainingPlan;
 };
 
 export const stripeWebhookRoutes = () => {
@@ -166,20 +267,29 @@ export const stripeWebhookRoutes = () => {
       const organizationId = subscription.metadata.organizationId ?? null;
       const stripe = getStripe();
 
-      // Apply plan changes (upgrade, downgrade, customer-portal edits) to the
-      // org as soon as Stripe reports them, instead of waiting for the next
-      // billing-page load to lazily reconcile. Stripe is the source of truth.
-      // Webhooks aren't delivered in order (https://docs.stripe.com/webhooks),
-      // so reconcile against the *freshly retrieved* subscription and only
-      // while it's live — a stale "updated" arriving after a cancellation must
-      // not re-provision a dead sub. Terminal churn (dunning cancel, manual
-      // cancel) flows through customer.subscription.deleted below → free.
+      // Apply plan changes (upgrade, downgrade, customer-portal edits, a
+      // failed or recovered payment) to the org as soon as Stripe reports
+      // them, instead of waiting for the next billing-page load to lazily
+      // reconcile. Stripe is the source of truth. Webhooks aren't delivered in
+      // order (https://docs.stripe.com/webhooks), so reconcile against the
+      // *freshly retrieved* subscription:
+      // - live: the org gets its plan (this is also how a payment that
+      //   succeeds after a failure restores the plan);
+      // - past due: a payment failed, so the org drops to free at once rather
+      //   than riding out Stripe's retries, unless it holds another live
+      //   subscription;
+      // - anything else is left alone: a stale "updated" arriving after a
+      //   cancellation must not re-provision a dead sub, and terminal churn
+      //   (dunning cancel, manual cancel) flows through
+      //   customer.subscription.deleted below → free.
       if (organizationId) {
         try {
           const fresh = await stripe.subscriptions.retrieve(subscription.id);
-          if (fresh.status === "active" || fresh.status === "trialing") {
+          if (isLiveSubscription(fresh)) {
             const { plan } = resolveSubscriptionPlan(fresh);
             await applySubscriptionStatus(organizationId, plan);
+          } else if (isPastDueSubscription(fresh)) {
+            await settlePlanAfterLapse(stripe, organizationId, fresh);
           }
         } catch (err) {
           logger.error(
@@ -243,78 +353,11 @@ export const stripeWebhookRoutes = () => {
           typeof subscription.latest_invoice === "object" &&
           subscription.latest_invoice.amount_paid > 0);
 
-      // The org may still hold another live subscription (a superseded trial
-      // whose marker didn't stick, an ops duplicate cleanup): converge on its
+      // The org may still hold another live subscription: converge on its
       // plan instead of downgrading a still-subscribed org to free.
-      let remainingPlan: Plan | null = null;
-      if (organizationId) {
-        try {
-          // Searched by org metadata, not just this subscription's customer:
-          // after a Checkout conversion the org's live subscription can sit on
-          // a DIFFERENT customer, and looking only at this one would report
-          // "nothing left" and downgrade a still-paying org to free.
-          //
-          // Scoped to the org's OWN stored customer, not the dead sub's: the
-          // lookup's metadata-less fallback is only legitimate on the customer
-          // the org row uniquely claims, and the dead sub's customer can be a
-          // shared one whose unlabeled (dashboard-created) subscription
-          // belongs to another org.
-          //
-          // The sub that just died is excluded by id: Stripe's search index is
-          // eventually consistent and can still return it as "active" for a
-          // while after the deletion — without the filter, a churned org keeps
-          // its paid plan until the next reconcile-on-read.
-          const orgRow = await db.organization.findUnique({
-            where: { id: organizationId },
-            select: { stripeCustomerId: true },
-          });
-          const storedCustomerId = orgRow?.stripeCustomerId ?? null;
-          let remaining = (
-            await findOrgLiveSubscriptions(
-              stripe,
-              organizationId,
-              storedCustomerId,
-            )
-          ).find((m) => m.subscription.id !== subscription.id);
-
-          // Mid-drift the dead sub's customer can differ from the stored one,
-          // and when search is unavailable the lookup above cannot see it. A
-          // metadata-fenced subscription there still counts — only the
-          // unlabeled fallback stays reserved for the org-claimed customer.
-          const eventCustomerId =
-            typeof subscription.customer === "string"
-              ? subscription.customer
-              : subscription.customer?.id;
-          if (!remaining && eventCustomerId) {
-            const labeled = await findActivePlanSubscription(
-              stripe,
-              eventCustomerId,
-              organizationId,
-            );
-            if (labeled && labeled.id !== subscription.id) {
-              remaining = {
-                subscription: labeled,
-                customerId: eventCustomerId,
-              };
-            }
-          }
-          if (remaining) {
-            remainingPlan = resolveSubscriptionPlan(
-              remaining.subscription,
-            ).plan;
-            await adoptSubscriptionCustomer(
-              organizationId,
-              remaining.subscription,
-            );
-          }
-        } catch (err) {
-          logger.error(
-            { err, subscriptionId: subscription.id },
-            "failed to check for remaining subscriptions on deletion",
-          );
-        }
-        await applySubscriptionStatus(organizationId, remainingPlan ?? "free");
-      }
+      const remainingPlan = organizationId
+        ? await settlePlanAfterLapse(stripe, organizationId, subscription)
+        : null;
 
       if (remainingPlan === null) {
         notifyDiscord("subscription_churned", {
@@ -330,21 +373,29 @@ export const stripeWebhookRoutes = () => {
 
     if (event.type === "invoice.paid") {
       const invoice = event.data.object as Stripe.Invoice;
-      const subDetails = invoice.parent?.subscription_details;
+      const subscriptionId = stripeRefId(
+        invoice.parent?.subscription_details?.subscription,
+      );
 
-      if (
-        subDetails?.subscription &&
-        invoice.billing_reason === "subscription_cycle"
-      ) {
+      if (subscriptionId) {
+        const stripe = getStripe();
+        // One retrieve serves both steps: the adoption reads the sub's
+        // customer and default payment method, the notification its metadata.
+        // Both are best-effort, so a Stripe failure is logged and the webhook
+        // still acks.
         try {
-          await notifyPaymentCollected(
-            invoice,
-            subDetails.subscription as string,
-          );
+          const subscription =
+            await stripe.subscriptions.retrieve(subscriptionId);
+
+          await adoptPayingPaymentMethod(stripe, invoice, subscription);
+
+          if (invoice.billing_reason === "subscription_cycle") {
+            await notifyPaymentCollected(invoice, subscription);
+          }
         } catch (err) {
           logger.error(
-            { err, invoiceId: invoice.id },
-            "failed to send payment collected notification",
+            { err, invoiceId: invoice.id, subscriptionId },
+            "failed to process paid subscription invoice",
           );
         }
       }
@@ -391,13 +442,75 @@ async function cancelSupersededSubscription(
   }
 }
 
+/**
+ * Makes the payment method that just paid a subscription invoice the
+ * subscription's default, so the next renewal charges it too.
+ *
+ * A subscription-level `default_payment_method` beats the customer default,
+ * and paying a past-due invoice with a new card (hosted invoice page, portal,
+ * dashboard) does not always move it. Live incident, 2026-09: a Pro customer
+ * whose Link wallet was closed paid August with a new card, which became the
+ * CUSTOMER default only; September's renewal and all 7 dunning retries went
+ * to the dead Link method and the org fell to free.
+ *
+ * Stripe's own switch for this, `payment_settings.save_default_payment_method:
+ * "on_subscription"`, is not used: Checkout's `subscription_data` cannot set
+ * it at creation, and every existing subscription would need a backfill
+ * update. This webhook covers new and existing subscriptions alike.
+ *
+ * Only adopts a method attached to the subscription's own customer (anything
+ * else would fail the update and is not ours to pin). Best-effort: logged,
+ * never thrown, so a failure here never skips the payment notification.
+ */
+async function adoptPayingPaymentMethod(
+  stripe: Stripe,
+  invoice: Stripe.Invoice,
+  subscription: Stripe.Subscription,
+) {
+  if (!invoice.id || invoice.amount_paid <= 0) return;
+  try {
+    const payments = await stripe.invoicePayments.list({
+      invoice: invoice.id,
+      status: "paid",
+      limit: 10,
+    });
+    const intentId = stripeRefId(
+      payments.data.find((p) => p.payment.type === "payment_intent")?.payment
+        .payment_intent,
+    );
+    if (!intentId) return;
+
+    const intent = await stripe.paymentIntents.retrieve(intentId, {
+      expand: ["payment_method"],
+    });
+    const pm = intent.payment_method;
+    if (!pm || typeof pm === "string") return;
+
+    const subCustomer = stripeRefId(subscription.customer);
+    if (!subCustomer || stripeRefId(pm.customer) !== subCustomer) return;
+
+    // Only a subscription-level default can shadow the customer default. With
+    // none, renewals already follow the customer default (which paying via
+    // the hosted invoice page updates), and pinning one here would freeze the
+    // sub on this card through later customer-level card changes.
+    const current = stripeRefId(subscription.default_payment_method);
+    if (!current || current === pm.id) return;
+
+    await stripe.subscriptions.update(subscription.id, {
+      default_payment_method: pm.id,
+    });
+  } catch (err) {
+    logger.error(
+      { err, invoiceId: invoice.id, subscriptionId: subscription.id },
+      "failed to adopt paying payment method as subscription default",
+    );
+  }
+}
+
 async function notifyPaymentCollected(
   invoice: Stripe.Invoice,
-  subscriptionId: string,
+  subscription: Stripe.Subscription,
 ) {
-  const stripe = getStripe();
-  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-
   const organizationId = subscription.metadata.organizationId;
   if (!organizationId) return;
 
@@ -405,7 +518,6 @@ async function notifyPaymentCollected(
     where: { id: organizationId },
     select: {
       name: true,
-      subscriptionStatus: true,
       members: {
         where: { role: "admin" },
         take: 1,
@@ -415,7 +527,10 @@ async function notifyPaymentCollected(
   });
   if (!org) return;
 
-  const plan = normalizePlan(org.subscriptionStatus ?? "free");
+  // The plan of the subscription this invoice paid, not the org row: a
+  // payment that settles a failed renewal can arrive before the
+  // subscription.updated event that restores the row from free.
+  const { plan } = resolveSubscriptionPlan(subscription);
 
   const amountPaid =
     invoice.amount_paid != null

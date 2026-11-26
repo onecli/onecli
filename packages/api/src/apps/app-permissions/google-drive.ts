@@ -2,6 +2,7 @@ import type { AppPermissionDefinition } from "./types";
 
 export const googleDrivePermissions: AppPermissionDefinition = {
   provider: "google-drive",
+  unlistedReads: "allow",
   groups: [
     {
       category: "read",

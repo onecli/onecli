@@ -1,6 +1,13 @@
 import type { ConnectionGrantInput } from "@onecli/api/validations/grants";
 import type { ToolChoice } from "./tri-state-control";
 
+/** The two catch-all rows: requests the app's tool list does not describe,
+ * split into reads (GET/HEAD) and writes (everything else). */
+export interface OtherChoices {
+  otherReads: ToolChoice;
+  otherWrites: ToolChoice;
+}
+
 /**
  * The tri-state tool grid → grant intent. Extracted from
  * `ManagePermissionsDialog` so the rule is unit-testable without mounting the
@@ -8,7 +15,9 @@ import type { ToolChoice } from "./tri-state-control";
  *
  * Every tool on Allow IS the whole-app grant — the same shape the connect
  * picker writes — so it compiles to `full`: one allow row matching host-only,
- * with tools added to the catalog later arriving auto-allowed.
+ * with tools added to the catalog later arriving auto-allowed. That holds only
+ * while the two catch-all rows are on Allow too: full access allows them, so
+ * an all-Allow grid with a catch-all held back is a customization.
  *
  * This deliberately does NOT also require the grant to already be `full`.
  * Requiring that made the transition ONE-WAY: once a grant became `custom`,
@@ -20,13 +29,17 @@ import type { ToolChoice } from "./tri-state-control";
 export const grantIntentFromChoices = (
   toolIds: string[],
   choices: Record<string, ToolChoice>,
+  other: OtherChoices,
 ): ConnectionGrantInput => {
   const allAllow =
     toolIds.length > 0 && toolIds.every((id) => choices[id] === "allow");
-  if (allAllow) return { access: "full" };
+  const otherAllAllow =
+    other.otherReads === "allow" && other.otherWrites === "allow";
+  if (allAllow && otherAllAllow) return { access: "full" };
   return {
     access: "custom",
     allow: toolIds.filter((id) => choices[id] === "allow"),
     ask: toolIds.filter((id) => choices[id] === "ask"),
+    ...other,
   };
 };

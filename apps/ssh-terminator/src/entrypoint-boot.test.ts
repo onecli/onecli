@@ -12,7 +12,7 @@ import { beforeAll, describe, expect, it } from "vitest";
  * is a class of bug that passes every test, builds clean, and then
  * crash-loops on deploy. It has happened once for real: the terminator
  * shipped `import { Server } from "ssh2"` (ssh2 is CJS with runtime-attached
- * exports, so Node's lexer cannot see the named export) and every pod died at
+ * exports, so Node's lexer cannot see the named export) and every instance died at
  * process start with a SyntaxError while the whole suite stayed green.
  *
  * So: build for real, then start the entrypoint with an EMPTY environment.

@@ -1,13 +1,11 @@
 import { db } from "@onecli/db";
+import { isChannelProviderId } from "@onecli/channels";
 import { ServiceError } from "./errors";
-import {
-  requireConversation,
-  requireSystemConversation,
-} from "./conversation-service";
 import {
   createFollowUp,
   createTurn,
   promoteOldestParkedFollowUp,
+  requireConversationFor,
   type TurnOrigin,
 } from "./turn-service";
 import { listConversationsWithParkedFollowUps } from "./due-work";
@@ -17,8 +15,42 @@ import {
   MAX_JOINING_FOLLOW_UPS,
 } from "../validations/conversation";
 import { logger } from "../lib/logger";
+import { supersedeHeldApprovals } from "./approval-supersede-service";
 
 const log = logger.child({ component: "follow-up-service" });
+
+/** A person typed this (web or a channel), not an automation or a peer
+ * agent: only a person may speak for a held request. */
+const isPersonOrigin = (origin: TurnOrigin): boolean =>
+  origin.userId !== null &&
+  origin.directWake === undefined &&
+  (origin.source === "web" || isChannelProviderId(origin.source));
+
+/**
+ * Ask whether a person's message changes a request the agent has held at
+ * the gateway, and withdraw it when it does. Off the send's path (never
+ * delays or fails it), fail-safe to keeping the card. `turnId` is where
+ * the outcome notice lands: the live turn the message joined, or the new
+ * turn it opened.
+ */
+const checkSupersede = (
+  workspaceId: string,
+  conversationId: string,
+  turnId: string,
+  message: string,
+  origin: TurnOrigin,
+): void => {
+  if (!isPersonOrigin(origin)) return;
+  void supersedeHeldApprovals({
+    workspaceId,
+    conversationId,
+    targetTurnId: turnId,
+    message,
+    origin,
+  }).catch((err: unknown) =>
+    log.warn({ err, conversationId }, "supersede failed"),
+  );
+};
 
 /**
  * THE MESSAGE DOOR (mid-run follow-ups): say something to an agent whatever
@@ -26,8 +58,10 @@ const log = logger.child({ component: "follow-up-service" });
  * turn is in flight the message becomes a follow-up row that steers into it —
  * never a 409, never a silent drop. Every human surface (web `POST
  * /conversations/:id/messages`, the channel ingestion doors) speaks through
- * here; automation (cron/watch) deliberately does not — a schedule must skip
- * a busy conversation, not steer into a human's live exchange.
+ * here, and so does a webhook event (its own sourced conversation, where an
+ * event must queue rather than be lost). Clock automation (cron/watch)
+ * deliberately does not — a schedule must skip a busy conversation, not
+ * steer into a human's live exchange.
  */
 
 export type SendMessageOutcome =
@@ -60,10 +94,11 @@ export const sendConversationMessage = async (
   // write into a direct thread they could not read, whichever arm serves
   // the message. (`createTurn` below re-runs it — one redundant indexed
   // read on the plain path, in exchange for no arm ever missing it.)
-  const conversation =
-    origin.userId === null
-      ? await requireSystemConversation(workspaceId, conversationId)
-      : await requireConversation(workspaceId, conversationId, origin.userId);
+  const conversation = await requireConversationFor(
+    workspaceId,
+    conversationId,
+    origin,
+  );
 
   for (let attempt = 0; attempt < SEND_ATTEMPTS; attempt += 1) {
     let target = await activeTurnOf(conversation.id);
@@ -85,6 +120,17 @@ export const sendConversationMessage = async (
             message,
             origin,
             attachmentIds,
+          );
+          // A held request can outlive the turn that sent it (the agent
+          // answered "Sent, will confirm" and its turn closed while the
+          // gateway still holds the call), so the person's next message
+          // opens a NEW turn: it may still be changing that request.
+          checkSupersede(
+            workspaceId,
+            conversation.id,
+            turn.id,
+            message,
+            origin,
           );
           return { kind: "turn", turn };
         } catch (err) {
@@ -131,6 +177,10 @@ export const sendConversationMessage = async (
         ),
       );
     }
+
+    // A person speaking while the agent waits on a held approval may be
+    // changing that very request.
+    checkSupersede(workspaceId, conversation.id, target.id, message, origin);
 
     return { kind: "followUp", turn: followUp };
   }

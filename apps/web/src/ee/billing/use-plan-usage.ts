@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { extractOrgId } from "@/lib/org-navigation";
 import { WORKSPACE_PATH_RE } from "@/lib/navigation";
+import { queryKeys } from "@/lib/api/keys";
 import { getPlanUsage, type PlanUsage } from "./api-request-actions";
 import { CAPS } from "@/lib/env";
 
@@ -36,7 +37,7 @@ export const usePlanUsage = () => {
   const queryClient = useQueryClient();
 
   const { data } = useQuery<PlanUsage>({
-    queryKey: ["billing", "planUsage", routeKey],
+    queryKey: [...queryKeys.billing.planUsage(), routeKey],
     queryFn: getPlanUsage,
     // Billing-less editions never fetch plan usage.
     enabled: CAPS.billing,
@@ -46,11 +47,33 @@ export const usePlanUsage = () => {
     if (!window.location.search.includes("checkout=success")) return;
     const timer = setTimeout(() => {
       queryClient.invalidateQueries({
-        queryKey: ["billing", "planUsage", routeKey],
+        queryKey: [...queryKeys.billing.planUsage(), routeKey],
       });
     }, 3000);
     return () => clearTimeout(timer);
   }, [queryClient, routeKey]);
 
   return data ?? null;
+};
+
+/**
+ * One resource's quota read off the plan usage the header already loads (one
+ * cached query per org scope), so a create button costs no request of its own
+ * and no per-mount server action. `null` until usage loads, and always on
+ * billing-less editions (their usage query never runs): a create gate then
+ * lets the click through, and the server's own assert is the backstop.
+ */
+export const useResourceQuota = (resourceName: string) => {
+  const usage = usePlanUsage();
+  if (!usage) return null;
+  const resource = usage.resources.find((r) => r.name === resourceName);
+  return {
+    current: resource?.current ?? 0,
+    limit: resource?.limit ?? Infinity,
+    plan: usage.plan,
+    atLimit: resource
+      ? resource.limit !== Infinity && resource.current >= resource.limit
+      : false,
+    organizationId: usage.organizationId,
+  };
 };

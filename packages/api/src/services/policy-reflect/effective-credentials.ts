@@ -26,7 +26,8 @@ import {
 } from "./effective-tools";
 import { injectionIdentityMatches } from "./injection";
 
-// The "Credential access" dialog's reflection (step 9.7b),
+// An agent's effective-credentials reflection (step 9.7b, read by the agent's
+// Connections section),
 // framed around EFFECTIVE ACCESS (the user decision — reflections lead with what
 // the rules ALLOW, never the raw injection view): the credentials an agent can
 // inject, each tagged with what it can actually DO under the enforced rules
@@ -108,11 +109,40 @@ export interface EffectiveCredentialsCtx {
   viewerSeesOrgRules: boolean;
 }
 
-interface RuleRef {
+export interface RuleRef {
   scope: "organization" | "workspace";
   logicalId: string;
   name: string;
 }
+
+/** Collapse rule refs into provenance: each rule once (by logicalId), and for
+ * non-admins every org ref collapses to ONE redacted marker — their count is
+ * org information too. Shared with the effective-agents reflection. */
+export const toProvenance = (
+  refs: RuleRef[],
+  viewerSeesOrgRules: boolean,
+): CredentialProvenance[] => {
+  const out: CredentialProvenance[] = [];
+  const seen = new Set<string>();
+  let redactedEmitted = false;
+  for (const ref of refs) {
+    if (ref.scope === "organization" && !viewerSeesOrgRules) {
+      if (!redactedEmitted) {
+        out.push({ kind: "rule", scope: "organization", redacted: true });
+        redactedEmitted = true;
+      }
+      continue;
+    }
+    if (seen.has(ref.logicalId)) continue;
+    seen.add(ref.logicalId);
+    out.push({
+      kind: "rule",
+      scope: ref.scope,
+      rule: { logicalId: ref.logicalId, name: ref.name },
+    });
+  }
+  return out;
+};
 
 /** Accumulates provenance per credential, collapsing org refs for non-admins. */
 class ProvenanceMap {
@@ -124,29 +154,7 @@ class ProvenanceMap {
     this.rules.set(key, list);
   }
   for(key: string, viewerSeesOrgRules: boolean): CredentialProvenance[] {
-    const out: CredentialProvenance[] = [];
-    const refs = this.rules.get(key) ?? [];
-    const seen = new Set<string>();
-    let redactedEmitted = false;
-    for (const ref of refs) {
-      if (ref.scope === "organization" && !viewerSeesOrgRules) {
-        // Collapse ALL org refs to ONE redacted marker — their count is org
-        // information too.
-        if (!redactedEmitted) {
-          out.push({ kind: "rule", scope: "organization", redacted: true });
-          redactedEmitted = true;
-        }
-        continue;
-      }
-      if (seen.has(ref.logicalId)) continue;
-      seen.add(ref.logicalId);
-      out.push({
-        kind: "rule",
-        scope: ref.scope,
-        rule: { logicalId: ref.logicalId, name: ref.name },
-      });
-    }
-    return out;
+    return toProvenance(this.rules.get(key) ?? [], viewerSeesOrgRules);
   }
 }
 

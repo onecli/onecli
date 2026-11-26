@@ -191,4 +191,40 @@ describe("decodeSlackTokens", () => {
     );
     expect(called).toBe(false);
   });
+
+  it("unescapes `&amp;` `&lt;` `&gt;` back to what was typed (the docs' escaping rule)", async () => {
+    expect(
+      await decodeSlackTokens(
+        "R&amp;D: 3 &lt; 5 &gt; 1, ping <@UBOT>",
+        resolver,
+      ),
+    ).toBe("R&D: 3 < 5 > 1, ping @[Kelly]");
+    expect(await decodeSlackTokens("Q&amp;A only", resolver)).toBe("Q&A only");
+  });
+
+  it("an escaped token stays TEXT: an entity never becomes live grammar", async () => {
+    let called = false;
+    const spy = () => {
+      called = true;
+      return "Admin";
+    };
+    // What Slack sends when someone types `<@U0B0WPLS8MC>` or `<!channel>`
+    // literally, and `&amp;lt;` when they type `&lt;`.
+    expect(
+      await decodeSlackTokens(
+        "&lt;@U0B0WPLS8MC&gt; &lt;!channel&gt; &amp;lt;b&amp;gt;",
+        spy,
+      ),
+    ).toBe("<@U0B0WPLS8MC> <!channel> &lt;b&gt;");
+    expect(called).toBe(false);
+  });
+
+  it("unescapes labels and urls inside tokens", async () => {
+    expect(
+      await decodeSlackTokens(
+        "<https://x.example/?a=1&amp;b=2|Tom &amp; Jerry> <#C0AAA|r&amp;d>",
+        resolver,
+      ),
+    ).toBe("Tom & Jerry (https://x.example/?a=1&b=2) #r&d");
+  });
 });

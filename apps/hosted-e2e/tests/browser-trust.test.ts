@@ -21,7 +21,7 @@ import { runTurn, waitFor } from "../src/v1.js";
  * auth only ("C,,"), exactly once — and a relaunch onto the same home (park
  * + wake = recreate-on-start) finds it and adds nothing. The handshake
  * itself — chromium loading a page signed by an NSS-imported CA with no
- * ignore flag — is the image's build gate (agent.Dockerfile), where it runs
+ * ignore flag — is the image's build gate (agent-base.Dockerfile), where it runs
  * without needing egress.
  */
 

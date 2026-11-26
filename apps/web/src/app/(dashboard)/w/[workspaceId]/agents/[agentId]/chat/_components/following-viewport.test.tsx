@@ -179,4 +179,31 @@ describe("FollowingViewport", () => {
 
     expect(onWheel).toHaveBeenCalledTimes(1);
   });
+
+  // jsdom has no layout, so the contract is pinned on the classes: during a
+  // follow-scroll the gutter keeps its width (no sideways jump of the
+  // centered transcript) and the bar is hidden by colour instead.
+  it("keeps the scrollbar gutter width while autoscrolling", () => {
+    const viewport = renderViewport();
+
+    expect(viewport).toHaveClass(
+      "data-autoscrolling:[scrollbar-width:thin]!",
+      "data-autoscrolling:[scrollbar-color:transparent_transparent]!",
+    );
+  });
+
+  it("still merges a caller's className", () => {
+    render(
+      <MessageScrollerProvider autoScroll defaultScrollPosition="end">
+        <FollowingViewport className="custom-viewport">
+          <div>transcript</div>
+        </FollowingViewport>
+      </MessageScrollerProvider>,
+    );
+
+    expect(screen.getByRole("region", { name: "Messages" })).toHaveClass(
+      "custom-viewport",
+      "scrollbar-gutter-stable",
+    );
+  });
 });

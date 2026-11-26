@@ -1,6 +1,6 @@
 "use client";
 
-import { Ban, CircleCheck, Hand, Lock } from "lucide-react";
+import { Ban, CircleCheck, Hand } from "lucide-react";
 import { cn } from "@onecli/ui/lib/utils";
 import {
   Tooltip,
@@ -46,9 +46,10 @@ interface TriStateControlProps {
   isOptionDisabled?: (value: ToolChoice) => { disabled: boolean; why?: string };
   /** Whole-control disable (saving, read-only org-granted view). */
   disabled?: boolean;
-  /** Plan lock on Needs approval: the option stays CLICKABLE (the click routes
-   * through the paywall guard) and wears a mini lock badge. */
-  askLocked?: boolean;
+  /** The group's accessible name (what the choices decide). */
+  label?: string;
+  /** Which options to show (default all three, in order). */
+  options?: readonly ToolChoice[];
 }
 
 /** The icon-only tri-state segmented control (the recovered pre-step-10
@@ -59,16 +60,19 @@ export const TriStateControl = ({
   onSelect,
   isOptionDisabled,
   disabled,
-  askLocked,
+  label: groupLabel,
+  options: shown,
 }: TriStateControlProps) => (
-  <div role="group" className="flex items-center gap-0.5">
-    {OPTIONS.map((option) => {
+  <div
+    role="group"
+    aria-label={groupLabel}
+    className="flex items-center gap-0.5"
+  >
+    {OPTIONS.filter((o) => !shown || shown.includes(o.value)).map((option) => {
       const gate = isOptionDisabled?.(option.value) ?? { disabled: false };
       const isActive = value === option.value;
-      const planLocked = option.value === "ask" && askLocked === true;
       const Icon = option.icon;
-      const label =
-        gate.why ?? (planLocked ? `${option.label} · Team` : option.label);
+      const label = gate.why ?? option.label;
       return (
         <Tooltip key={option.value}>
           <TooltipTrigger asChild>
@@ -92,12 +96,6 @@ export const TriStateControl = ({
                   className={cn("size-4", isActive && "stroke-[2.5]")}
                   aria-hidden
                 />
-                {planLocked && (
-                  <Lock
-                    className="text-muted-foreground absolute -top-1 -right-1 size-3"
-                    aria-hidden
-                  />
-                )}
               </button>
             </span>
           </TooltipTrigger>

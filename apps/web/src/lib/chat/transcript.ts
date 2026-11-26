@@ -1,5 +1,14 @@
 import {
-  activityForReasoning,
+  readDesktopRequestStamp,
+  readPeerMessageStamp,
+  readPeerTaskStamp,
+  readSupersededApprovalsStamp,
+  type DesktopRequestOutcome,
+  type PeerTaskOutcome,
+} from "@onecli/agent-protocol";
+import {
+  REASONING_TAIL_MAX,
+  activityForReasoningStream,
   activityForTool,
 } from "@onecli/agent-protocol/activity";
 import type { TurnEvent } from "@/lib/api/types";
@@ -15,48 +24,82 @@ import type { TurnEvent } from "@/lib/api/types";
 export interface ToolCall {
   callId: string;
   name: string;
+  /** The arguments the agent sent, when the harness reported them. */
+  input?: string;
   /** Absent until the tool reports back — that is what "running" looks like. */
   output?: string;
+  /** The TOOL failed (it could not do what was asked). */
   isError?: boolean;
+  /** A shell command ran and exited with this non-zero status. */
+  exitCode?: number;
 }
 
 /**
- * One entry in the turn's live work log, in true stream order: the agent
- * narrates ("Let me check the logs."), a tool runs, it narrates again. The
- * SUPERVISOR's segment rule, mirrored (supervisor.ts, 2026-08-31): a tool
- * call is the one structural break the model cannot write across, so it is
- * the one boundary that closes a narration segment. Thinking is NOT a
- * boundary — reasoning interleaves inside one message, and cutting there
- * would publish half a sentence.
+ * One entry of a turn's work timeline, in the order it happened.
  *
- * Tool items share object identity with `RenderedTurn.tools`, so a
- * `tool.finished` folding onto its start updates both views at once.
+ * - `tool`: a call (by its index in `tools`, so the timeline and every other
+ *   reader of `tools` see the same object).
+ * - `note`: what the agent SAID between two tool calls ("Now the config.").
+ *   Narration the run discarded from the answer, kept so the timeline can
+ *   show the thread of the work. Live only: history carries no deltas.
+ * - `thought`: a reasoning step's title ("Structuring content"), the
+ *   caption that stood when the step closed. Live only, for the same reason.
  *
- * SECURITY: narration text is UNTRUSTED model output from a sandbox that
- * reads the open internet. It is PROGRESS, not the answer — render it as
- * TEXT, never markdown (the answer path stays the only markdown surface).
+ * SECURITY: `note` and `thought` text is UNTRUSTED sandbox output. It renders
+ * as TEXT, never markdown. `thought` is already bounded and control-stripped
+ * (`activityForReasoningStream`); `note` is bounded here (`MAX_NOTE_CHARS`).
  */
-export type WorkItem =
-  | { kind: "tool"; tool: ToolCall }
-  | { kind: "narration"; text: string };
+export type WorkStep =
+  | { kind: "tool"; index: number }
+  | { kind: "note"; text: string }
+  | { kind: "thought"; text: string };
+
+/** A note is a sentence or two between tools, not a document: past this it
+ *  is cut, so a runaway narration cannot grow the timeline unboundedly. */
+export const MAX_NOTE_CHARS = 600;
 
 /** One turn as the reader sees it: what was asked, what happened, what came back. */
 export interface RenderedTurn {
   turnId: string;
   /**
    * The agent's ANSWER — the durable `text` event, nothing else. Empty while
-   * the turn still runs: mid-turn deltas build `liveText`/`work`, never this,
+   * the turn still runs: mid-turn deltas build `lead`/`liveText`, never this,
    * so a consumer of `text` can never mistake narration for the answer.
    */
   text: string;
+  /** Every tool call in the turn, in the order it started (an orphaned
+   *  finish, in the order it finished). */
   tools: ToolCall[];
+  /** The turn's work in the order it happened: tool calls, the narration
+   *  between them, and the reasoning steps' titles. See `WorkStep`. */
+  steps: WorkStep[];
   /**
-   * The work as it happened, chronologically: closed narration segments
-   * interleaved with the tool calls that closed them. Live-tail only in
-   * practice — history carries no deltas, so a reader who joins late gets
-   * tools without narration, which is exactly what the transcript records.
+   * The reasoning streamed since the last tool call, glued back together.
+   * Internal to the fold (the caption is derived from it, never a single
+   * delta), and reset when a tool starts. Bounded (twice the tail the
+   * caption reads), so a long reasoning block cannot grow it.
    */
-  work: WorkItem[];
+  reasoning: string;
+  /**
+   * What the agent said BEFORE its first tool call: its opening sentence,
+   * usually the plan ("I'll fetch the docs."). Kept above the work while the
+   * turn runs. Narration between later tool calls is not kept: it is
+   * transient progress, and the run header already says what is happening.
+   * The SUPERVISOR's answer rule decides where it ends (the sandbox
+   * supervisor's answer.ts, 2026-08-31): a tool call is the one structural
+   * break the model cannot write across, so the first one closes the opening
+   * sentence. Thinking is NOT a boundary: reasoning interleaves inside one
+   * message, and cutting there would publish half a sentence.
+   *
+   * Live-tail only in practice. History carries no deltas, so a reader who
+   * joins late gets tools without it, which is exactly what the transcript
+   * records.
+   *
+   * SECURITY: UNTRUSTED model output from a sandbox that reads the open
+   * internet. It is PROGRESS, not the answer: render it as TEXT, never
+   * markdown (the answer path stays the only markdown surface).
+   */
+  lead: string;
   /**
    * The narration segment CURRENTLY streaming — everything said since the
    * last tool call. Rendered as the transient tail while the turn runs, and
@@ -68,30 +111,101 @@ export interface RenderedTurn {
    * What the agent is doing RIGHT NOW, in a few words — the live loader
    * caption ("Reading a file", "Architecting the narrative arc").
    *
-   * Derived from the ephemeral stream, never from history: `thinking.delta`
-   * says it in the agent's own words, `tool.started` says it by name. It is
+   * Derived from the ephemeral stream, never from history: the accumulated
+   * reasoning says it in the agent's own words (`activityForReasoningStream`:
+   * a whole heading or sentence, never a fragment of one delta), and
+   * `tool.started` says it by name. It is
    * REPLACED as work moves and dropped the moment the turn ends, because it
    * describes the present — a finished turn has no current activity, and a
    * reader who joins late gets the answer, not a stale caption.
    *
    * UNTRUSTED: model text from a sandbox. Bounded and control-stripped at the
-   * source (`activityForReasoning`), and rendered as TEXT, never markup.
+   * source (`activityForReasoningStream`), and rendered as TEXT, never markup.
    */
   activity?: string;
   /** Set when the turn ended badly — rendered instead of a silent stop. */
   error?: string;
+  /**
+   * Held approvals the person's newer message withdrew on this turn (the
+   * `supersededApprovalIds` stamp on the control plane's "Replaced by your
+   * message" notice). The chat's approval cards settle these as replaced.
+   */
+  supersededApprovalIds: string[];
   /**
    * Non-fatal warnings about the run ("that model isn't available, so this is
    * running the default"). Distinct from `error` because they do NOT end the
    * turn — the agent goes on to answer, and both belong on screen.
    */
   notices: string[];
+  /**
+   * The desktop takeover asks this turn raised, by notice index: the
+   * `desktopRequest` stamp the control plane puts on the "Needs you"
+   * notice and on its settling line. The chat
+   * renders a `pending` one as the in-chat card (an Open computer action);
+   * a settled one reads as the plain notice it is.
+   */
+  desktopRequests: Map<number, { id: string; outcome: DesktopRequestOutcome }>;
+  /**
+   * What THIS agent said to a peer agent on this turn (PR 5b): the sender's
+   * record of a `message_agent` delivery, the structured `peerMessage` the
+   * control plane stamps on the notice. The pair-conversation view renders
+   * these as this agent's own bubbles; the regular chat ignores the field
+   * (the notice text already reads "To Ray: …").
+   */
+  peerMessages: string[];
+  /**
+   * Which of `peerMessages` (by index) OPENED a peer task for a person
+   * (the `opensTask` mark on the stamp): the pair view captions that bubble.
+   */
+  peerMessagesOpeningTask: Set<number>;
+  /**
+   * A peer task CLOSED on this turn (the `peerTask` stamp on the pair
+   * record): why. The pair view draws the dialog's end from it.
+   */
+  peerTaskClosed?: PeerTaskOutcome;
   /** True once a terminal event landed, so the composer can re-enable. */
   ended: boolean;
+  /**
+   * SEND NOW's answer for a waiting mid-run follow-up,
+   * folded under the follow-up's own id. Live-only: a reader who arrives
+   * later never sees it, and by then the row's status says the rest.
+   */
+  sentNow?: SentNowOutcome;
+}
+
+/** What SEND NOW did: `toolName` is untrusted sandbox text, never shown
+ *  raw (see `TOOL_PHRASES` in agent-protocol's activity.ts). */
+export interface SentNowOutcome {
+  moved: boolean;
+  toolName?: string;
 }
 
 const str = (payload: Record<string, unknown>, key: string): string =>
   typeof payload[key] === "string" ? (payload[key] as string) : "";
+
+const isInteger = (value: unknown): value is number => Number.isInteger(value);
+
+/** Cap a note at `MAX_NOTE_CHARS`, on a word boundary when one is near. */
+const boundNote = (text: string): string => {
+  const trimmed = text.trim();
+  if (trimmed.length <= MAX_NOTE_CHARS) return trimmed;
+  const window = trimmed.slice(0, MAX_NOTE_CHARS);
+  const space = window.lastIndexOf(" ");
+  return `${window.slice(0, space > MAX_NOTE_CHARS / 2 ? space : MAX_NOTE_CHARS).trimEnd()}…`;
+};
+
+/**
+ * Glue a reasoning delta on, bounded. Twice the tail the caption reads is
+ * kept, so the caption's own slice (which skips to the first sentence
+ * boundary) always has a cut to skip: a held string that STARTED mid-word
+ * would otherwise hand the caption a sentence's back half as a whole one.
+ */
+const appendReasoning = (held: string, delta: string): string => {
+  const next = held + delta;
+  return next.length > REASONING_TAIL_MAX * 2
+    ? next.slice(-REASONING_TAIL_MAX * 2)
+    : next;
+};
 
 /**
  * Fold the transcript into per-turn views.
@@ -112,10 +226,16 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
     const created: RenderedTurn = {
       turnId,
       text: "",
-      work: [],
+      lead: "",
       liveText: "",
       notices: [],
+      supersededApprovalIds: [],
+      desktopRequests: new Map(),
+      peerMessages: [],
+      peerMessagesOpeningTask: new Set(),
       tools: [],
+      steps: [],
+      reasoning: "",
       ended: false,
     };
     byTurn.set(turnId, created);
@@ -140,20 +260,38 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         turn.liveText = "";
         break;
       case "tool.started": {
+        // The reasoning step is over: the caption it reached is its title on
+        // the timeline (once, never a repeat of the step before). A tool
+        // call closes the thought, so its last line counts as finished even
+        // without a newline. Thinking comes before the words that act on
+        // it, so the title goes in ahead of the note.
+        const thought = turn.reasoning
+          ? activityForReasoningStream(`${turn.reasoning}\n`)
+          : null;
+        const previous = turn.steps.at(-1);
+        if (
+          thought &&
+          !(previous?.kind === "thought" && previous.text === thought)
+        ) {
+          turn.steps.push({ kind: "thought", text: thought });
+        }
+        turn.reasoning = "";
         // The tool call CLOSES the current narration segment (the
-        // supervisor's segment rule, mirrored). Blank segments are never
-        // pushed — back-to-back tools must not litter the log.
+        // supervisor's answer rule in answer.ts, mirrored). The segment the
+        // FIRST tool closes is the lead; a later one becomes a timeline
+        // note. A blank one is never kept, so a model's stray newline cannot
+        // become the turn's opening line or an empty note.
         if (turn.liveText.trim()) {
-          turn.work.push({ kind: "narration", text: turn.liveText });
+          if (turn.tools.length === 0) turn.lead = turn.liveText;
+          else
+            turn.steps.push({ kind: "note", text: boundNote(turn.liveText) });
         }
         turn.liveText = "";
-        const tool: ToolCall = {
+        turn.tools.push({
           callId: str(event.payload, "callId"),
           name: str(event.payload, "name"),
-        };
-        turn.tools.push(tool);
-        // Same object in both views: the finish below mutates it once.
-        turn.work.push({ kind: "tool", tool });
+        });
+        turn.steps.push({ kind: "tool", index: turn.tools.length - 1 });
         // A started tool IS the current activity, and it outranks whatever
         // the agent was thinking a moment ago: the reasoning explains the
         // plan, the tool call is the plan happening.
@@ -163,30 +301,48 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
       case "tool.finished": {
         const callId = str(event.payload, "callId");
         const started = turn.tools.find((t) => t.callId === callId);
+        const input = str(event.payload, "input");
+        const exitCode = event.payload.exitCode;
         const finished = {
+          ...(input !== "" && { input }),
           output: str(event.payload, "output"),
           ...(event.payload.isError === true && { isError: true }),
+          ...(isInteger(exitCode) && { exitCode }),
         };
         if (started) Object.assign(started, finished);
         // A finish with no start still happened — show it rather than drop it.
         else {
-          const orphan: ToolCall = {
+          turn.tools.push({
             callId,
             name: str(event.payload, "name"),
             ...finished,
-          };
-          turn.tools.push(orphan);
-          turn.work.push({ kind: "tool", tool: orphan });
+          });
+          turn.steps.push({ kind: "tool", index: turn.tools.length - 1 });
         }
         break;
       }
-      case "notice":
+      case "notice": {
         // Deliberately does NOT set `ended`. This is the whole reason it is
         // not an `error` event: a degraded preference travels alongside a turn
         // that then succeeds, and `error` is terminal by definition here and
         // in `isTerminalEvent`.
         turn.notices.push(str(event.payload, "text"));
+        const desktop = readDesktopRequestStamp(event.payload);
+        if (desktop) turn.desktopRequests.set(turn.notices.length - 1, desktop);
+        turn.supersededApprovalIds.push(
+          ...readSupersededApprovalsStamp(event.payload),
+        );
+        const stamp = readPeerMessageStamp(event.payload);
+        if (stamp?.text) {
+          if (stamp.opensTask) {
+            turn.peerMessagesOpeningTask.add(turn.peerMessages.length);
+          }
+          turn.peerMessages.push(stamp.text);
+        }
+        const task = readPeerTaskStamp(event.payload);
+        if (task) turn.peerTaskClosed = task.outcome;
         break;
+      }
       case "error":
         turn.error = str(event.payload, "message");
         turn.ended = true;
@@ -199,13 +355,26 @@ export const foldTranscript = (events: TurnEvent[]): RenderedTurn[] => {
         turn.activity = undefined;
         break;
       case "thinking.delta": {
-        // The agent saying what it is about to do, in its own words — the
-        // line that makes the loader feel alive rather than generic. Only
-        // the first line survives (see `activityForReasoning`); null means
-        // the block said nothing worth showing, so the previous caption
-        // stands rather than blanking the row.
-        const said = activityForReasoning(str(event.payload, "text"));
+        // The agent saying what it is about to do, in its own words: the
+        // line that makes the loader feel alive rather than generic. Read
+        // from the ACCUMULATED reasoning, never one delta: a delta is cut
+        // wherever a network batch closed, so its first line starts
+        // mid-word. Null means no whole thought yet, so the previous caption
+        // stands rather than blanking or flashing a fragment.
+        turn.reasoning = appendReasoning(
+          turn.reasoning,
+          str(event.payload, "text"),
+        );
+        const said = activityForReasoningStream(turn.reasoning);
         if (said) turn.activity = said;
+        break;
+      }
+      case "message.sent_now": {
+        const toolName = str(event.payload, "toolName");
+        turn.sentNow = {
+          moved: event.payload.moved === true,
+          ...(toolName !== "" && { toolName }),
+        };
         break;
       }
       default:
@@ -250,3 +419,48 @@ export const mergeEvents = (
 /** The cursor to resume a stream from: the highest `seq` we hold. */
 export const highestSeq = (events: TurnEvent[]): number =>
   events.reduce((max, e) => (e.seq > max ? e.seq : max), 0);
+
+/**
+ * Whether a live event moves a turn ROW's status, so the turns list (the
+ * poll view) should refetch now instead of on its next interval: a turn
+ * opened or closed (`turn.started`, `turn.done`, `error`), or a mid-run
+ * follow-up the run just picked up (`message.joined`: its row flips from
+ * `joining` to `joined` the moment the agent has the message).
+ */
+export const movesTurnStatus = (event: TurnEvent): boolean =>
+  event.type === "turn.started" ||
+  event.type === "turn.done" ||
+  event.type === "error" ||
+  event.type === "message.joined";
+
+/** Platform tools whose call can hold an approval card in the chat (every
+ * `requestActionApproval` caller). MCP names arrive prefixed
+ * (`mcp__onecli__<tool>`), so match the suffix. */
+const APPROVAL_TOOLS = [
+  "propose_custom_connection",
+  "send_message",
+  "message_agent",
+  "preview_expose",
+  "update_webhook",
+  // Act as you (licensed): an "Ask" read or write holds a card for the
+  // person whose Slack would be used.
+  "read_conversation",
+  "send_as_me",
+  "edit_my_message",
+  "delete_my_message",
+] as const;
+
+/**
+ * Whether a live event just finished a tool that may have raised an approval
+ * card, so the pending-approvals list should refetch now instead of on its
+ * slow poll: the agent's "review the card" text and the card then land
+ * together.
+ */
+export const raisesApproval = (event: TurnEvent): boolean => {
+  if (event.type !== "tool.finished") return false;
+  const name = event.payload.name;
+  return (
+    typeof name === "string" &&
+    APPROVAL_TOOLS.some((tool) => name === tool || name.endsWith(`__${tool}`))
+  );
+};

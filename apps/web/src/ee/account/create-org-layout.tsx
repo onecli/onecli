@@ -115,7 +115,7 @@ export default function CreateOrgLayout({
               <DropdownMenuItem asChild>
                 <Link href="/account/preferences">
                   <Settings className="size-4" />
-                  Account preferences
+                  Profile
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />

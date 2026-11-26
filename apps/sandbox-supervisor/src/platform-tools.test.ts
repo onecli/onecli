@@ -25,6 +25,14 @@ const TOOLS: PlatformToolDefinition[] = [
   },
 ];
 
+/** A tool that appears only once a peer exists — the conditional shape a
+ * deploy or a mid-run presence change adds to the surface. */
+const MESSAGE_AGENT: PlatformToolDefinition = {
+  name: "message_agent",
+  description: "d",
+  inputSchema: { type: "object" },
+};
+
 let cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
   for (const fn of cleanup.reverse()) await fn();
@@ -48,16 +56,23 @@ interface Rig {
 
 const rig = async (options?: {
   timeoutMs?: number;
+  forwardReserveMs?: number;
   activeTurn?: () => { conversationId: string; turnId: string } | null;
+  /** A live tool set — the supervisor's production shape since the
+   * capability set can change under a running container. */
+  tools?: () => PlatformToolDefinition[];
 }): Promise<Rig> => {
   const sent: SupervisorMessage[] = [];
   const socketPath = testSocketPath();
   const tools = await startPlatformTools({
     socketPath,
-    tools: TOOLS,
+    tools: options?.tools ?? TOOLS,
     send: (message) => sent.push(message),
     activeTurn: options?.activeTurn ?? (() => null),
     ...(options?.timeoutMs && { timeoutMs: options.timeoutMs }),
+    ...(options?.forwardReserveMs && {
+      forwardReserveMs: options.forwardReserveMs,
+    }),
   });
   cleanup.push(() => tools.close());
 
@@ -158,6 +173,169 @@ describe("platform tools", () => {
     expect(answer.result).toEqual({ cronId: "cr-1" });
   });
 
+  describe("loop guard", () => {
+    const loopRig = async () => {
+      let turnId = "t-loop";
+      const r = await rig({
+        activeTurn: () => ({ conversationId: "c-1", turnId }),
+        tools: () => [...TOOLS, MESSAGE_AGENT],
+      });
+      const call = async (tool: string, ok: boolean) => {
+        const before = r.sent.length;
+        const answer = r.request({ op: "call", tool, args: {} });
+        await expect.poll(() => r.sent.length).toBe(before + 1);
+        const sentCall = r.sent[before] as Extract<
+          SupervisorMessage,
+          { kind: "tool.call" }
+        >;
+        r.tools.handleToolResult(
+          ok
+            ? {
+                kind: "tool.result",
+                callId: sentCall.callId,
+                ok: true,
+                result: { done: true },
+              }
+            : {
+                kind: "tool.result",
+                callId: sentCall.callId,
+                ok: false,
+                error: "nope",
+              },
+        );
+        return answer;
+      };
+      return { call, nextTurn: (id: string) => (turnId = id) };
+    };
+    const stops = (answer: { error?: unknown }) =>
+      String(answer.error).includes("Stop calling it");
+
+    it("from the 2nd failure in a row of one tool in one turn, the refusal says stop (and keeps the tool's own error)", async () => {
+      const { call } = await loopRig();
+      const first = await call("schedule_task", false);
+      expect(first.error).toBe("nope");
+      const second = await call("schedule_task", false);
+      expect(second.ok).toBe(false);
+      expect(String(second.error)).toContain("nope");
+      expect(String(second.error)).toContain("2 times in a row");
+      expect(stops(second)).toBe(true);
+    });
+
+    it("a success in between resets it: work spread over many calls is never cut off", async () => {
+      const { call } = await loopRig();
+      for (let i = 0; i < 3; i += 1) {
+        expect(stops(await call("schedule_task", false))).toBe(false);
+        expect((await call("schedule_task", true)).ok).toBe(true);
+      }
+    });
+
+    it("counts per tool and per turn: another tool's failures, or the last turn's, don't add up", async () => {
+      const { call, nextTurn } = await loopRig();
+      expect(stops(await call("schedule_task", false))).toBe(false);
+      expect(stops(await call("message_agent", false))).toBe(false);
+      nextTurn("t-next");
+      expect(stops(await call("schedule_task", false))).toBe(false);
+    });
+
+    it("a local prepare refusal counts too: the 2nd in a row says stop, nothing forwarded", async () => {
+      const r = await rig({
+        activeTurn: () => ({ conversationId: "c-1", turnId: "t-prep" }),
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async () => ({ ok: false, error: "a.csv: No file." }),
+          },
+        ],
+      });
+      const call = () =>
+        r.request({ op: "call", tool: "send_message", args: {} });
+      expect((await call()).error).toBe("a.csv: No file.");
+      const second = await call();
+      expect(String(second.error)).toContain("a.csv: No file.");
+      expect(stops(second)).toBe(true);
+      expect(r.sent).toHaveLength(0);
+    });
+  });
+
+  describe("prepare (a local step before the forward)", () => {
+    it("shares the call's clock: prepare gets a deadline leaving the forward its reserve, and the forward only what is left", async () => {
+      // Relationships, not wall-clock bounds (a loaded CI host stretches
+      // any absolute window): prepare's deadline sits a reserve before the
+      // call's end, and the forward then times out on what is LEFT, so the
+      // whole call ends after prepare's deadline by about the reserve, far
+      // short of a fresh full timeout.
+      const TIMEOUT = 2_000;
+      const RESERVE = 300;
+      let deadlineSeen = 0;
+      let calledAt = 0;
+      const r = await rig({
+        timeoutMs: TIMEOUT,
+        forwardReserveMs: RESERVE,
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async (args, _context, deadline) => {
+              calledAt = Date.now();
+              deadlineSeen = deadline;
+              // Spend the prepare's whole share of the clock.
+              await new Promise((resolve) =>
+                setTimeout(resolve, Math.max(0, deadline - Date.now())),
+              );
+              return { ok: true, args: { ...(args as object), staged: 1 } };
+            },
+          },
+        ],
+      });
+      const answer = await r.request({
+        op: "call",
+        tool: "send_message",
+        args: { to: "#x" },
+      });
+      const endedAt = Date.now();
+      // The forward went out with the rewritten args, then timed out.
+      expect(r.sent[0]).toMatchObject({
+        kind: "tool.call",
+        args: { to: "#x", staged: 1 },
+      });
+      expect(String(answer.error)).toContain("did not answer");
+      // prepare's deadline = the call's deadline minus the reserve.
+      expect(deadlineSeen - calledAt).toBeLessThanOrEqual(TIMEOUT - RESERVE);
+      expect(deadlineSeen - calledAt).toBeGreaterThan(TIMEOUT - RESERVE - 500);
+      // MUTATION-PROOF: give the forward a fresh timeout and the call ends
+      // ~TIMEOUT after prepare's deadline instead of ~RESERVE.
+      expect(endedAt - deadlineSeen).toBeLessThan(TIMEOUT - 500);
+    });
+
+    it("a prepare that overran the whole call forwards nothing", async () => {
+      const r = await rig({
+        timeoutMs: 100,
+        forwardReserveMs: 50,
+        tools: () => [
+          {
+            ...MESSAGE_AGENT,
+            name: "send_message",
+            prepare: async (args) => {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              return { ok: true, args };
+            },
+          },
+        ],
+      });
+      const answer = await r.request({
+        op: "call",
+        tool: "send_message",
+        args: { to: "#x" },
+      });
+      expect(answer).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Nothing was sent"),
+      });
+      expect(r.sent).toHaveLength(0);
+    });
+  });
+
   it("times out into a tool error the model can read — the channel cannot retry", async () => {
     const { request } = await rig({ timeoutMs: 50 });
     const answer = await request({
@@ -183,6 +361,56 @@ describe("platform tools", () => {
     const answer = await pendingAnswer;
     expect(answer.ok).toBe(false);
     expect(String(answer.error)).toContain("shutting down");
+  });
+
+  it("a LIVE tool set is read on every bridge startup — a capability attached mid-life is advertised to the next session", async () => {
+    // jcode spawns a bridge per harness session and the bridge asks once at
+    // its start, so the answer must reflect the container's CURRENT
+    // capabilities, not the boot-time set: a Slack presence attached while
+    // the container ran must reach the session started after it.
+    // MUTATION-PROOF: resolve `options.tools` once at startPlatformTools
+    // and the second answer still lacks send_message.
+    let current: PlatformToolDefinition[] = [TOOLS[0]!];
+    const { request } = await rig({ tools: () => current });
+    const before = await request({ op: "tools" });
+    expect((before.tools as { name: string }[]).map((t) => t.name)).toEqual([
+      TOOLS[0]!.name,
+    ]);
+    current = [...TOOLS, { ...TOOLS[0]!, name: "send_message" }];
+    const after = await request({ op: "tools" });
+    expect((after.tools as { name: string }[]).map((t) => t.name)).toContain(
+      "send_message",
+    );
+  });
+
+  it("a call to a tool this container ONCE offered but withdrew is refused with an explanation, not 'unknown tool'", async () => {
+    // Observed live (2026-09-15): a jcode session resumed after a capability
+    // was withdrawn keeps the tool in its own registry — discovered tools
+    // are unioned across attaches and never dropped — so the model can
+    // still call send_message after its Slack app was removed. The socket
+    // is the last honest voice: say what happened and what to do.
+    // MUTATION-PROOF: drop the `everOffered` branch and the answer reverts
+    // to `Unknown tool`.
+    let current: PlatformToolDefinition[] = [
+      ...TOOLS,
+      { ...TOOLS[0]!, name: "send_message" },
+    ];
+    const { sent, request } = await rig({ tools: () => current });
+    await request({ op: "tools" }); // the bridge saw send_message once
+    current = TOOLS; // ...then the presence was removed
+    const answer = await request({
+      op: "call",
+      tool: "send_message",
+      args: {},
+    });
+    expect(answer.ok).toBe(false);
+    expect(String(answer.error)).toContain("no longer available");
+    expect(String(answer.error)).toContain("re-attached");
+    expect(String(answer.error)).not.toContain("Unknown tool");
+    expect(sent).toHaveLength(0);
+    // A name that was NEVER offered keeps the plain refusal.
+    const never = await request({ op: "call", tool: "made_up", args: {} });
+    expect(String(never.error)).toContain("Unknown tool");
   });
 
   it("refuses a tool it does not serve without touching the wire", async () => {
@@ -312,5 +540,97 @@ describe("the local-executor seam (step 10)", () => {
     });
     expect(response.ok).toBe(false);
     expect(String(response.error)).toContain("too large");
+  });
+});
+
+/**
+ * The tool-listing signal: how a starting session tells the supervisor it
+ * has taken the CURRENT tool list rather than jcode's on-disk cache
+ * (`.jcode-home/mcp-schema-cache.json`, served while MCP discovery is still
+ * in flight). Without it, the first turn after a deploy that changed the
+ * tool set advertises the previous boot's tools — observed live as
+ * `complete_task` reading "unknown tool" in a resumed conversation.
+ */
+describe("platform tools: the tool-listing signal", () => {
+  it("resolves the wait when a session lists tools AFTER the marker", async () => {
+    const { tools, request } = await rig();
+    // The supervisor's order: marker first, THEN start the session, so a
+    // listing that races the start still counts.
+    const marker = tools.listingMarker();
+    const waited = tools.toolsListedSince(marker, 5_000);
+    await request({ op: "tools" });
+    await expect(waited).resolves.toBe(true);
+  });
+
+  it("does NOT count a listing that happened BEFORE the marker", async () => {
+    // MUTATION-PROOF: make `toolsListedSince` ignore the marker (e.g.
+    // `toolsListings > 0`) and this passes true immediately — which in
+    // production means a new session proceeding on the PREVIOUS session's
+    // listing, the exact stale-surface bug.
+    const { tools, request } = await rig();
+    await request({ op: "tools" }); // a previous session's listing
+    const marker = tools.listingMarker();
+    await expect(tools.toolsListedSince(marker, 150)).resolves.toBe(false);
+  });
+
+  it("times out to FALSE rather than stranding a turn with no MCP bridge", async () => {
+    // A harness that never asks (no bridge) must still be able to answer:
+    // a stale tool list is a far smaller harm than a turn that never runs.
+    const { tools } = await rig();
+    const started = Date.now();
+    await expect(
+      tools.toolsListedSince(tools.listingMarker(), 150),
+    ).resolves.toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+  });
+
+  it("returns immediately when the listing already landed", async () => {
+    const { tools, request } = await rig();
+    const marker = tools.listingMarker();
+    await request({ op: "tools" });
+    // Already satisfied: a zero timeout must still resolve true, or a slow
+    // path would be indistinguishable from a missing listing.
+    await expect(tools.toolsListedSince(marker, 0)).resolves.toBe(true);
+  });
+
+  it("releases EVERY waiter on one listing (concurrent conversations)", async () => {
+    // Two conversations can start sessions at once; one listing must not
+    // leave the other hanging until its timeout.
+    const { tools, request } = await rig();
+    const marker = tools.listingMarker();
+    const first = tools.toolsListedSince(marker, 5_000);
+    const second = tools.toolsListedSince(marker, 5_000);
+    await request({ op: "tools" });
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+  });
+
+  it("still advertises the CURRENT tool set when the listing arrives", async () => {
+    // The signal is only useful if the list it accompanies is live: the
+    // bridge must answer from the callback, not a boot-time snapshot.
+    let peers = false;
+    const { tools, request } = await rig({
+      tools: () => (peers ? [...TOOLS, MESSAGE_AGENT] : TOOLS),
+    });
+    peers = true;
+    const marker = tools.listingMarker();
+    const response = await request({ op: "tools" });
+    await expect(tools.toolsListedSince(marker, 5_000)).resolves.toBe(true);
+    const names = (response.tools as { name: string }[] | undefined)?.map(
+      (definition) => definition.name,
+    );
+    expect(names).toContain("message_agent");
+  });
+
+  it("releases a waiting first turn on shutdown instead of hanging", async () => {
+    // MUTATION-PROOF: drop the waiter release from `close()` and this waits
+    // the full timeout — in production, a container shutting down during a
+    // session start would stall for TOOL_LISTING_WAIT_MS before exiting.
+    const { tools } = await rig();
+    // A long bound, so passing can only mean close() released the waiter.
+    const waited = tools.toolsListedSince(tools.listingMarker(), 60_000);
+    await tools.close();
+    // False, not true: no listing ever happened, and saying otherwise would
+    // claim the session holds a tool list it never took.
+    await expect(waited).resolves.toBe(false);
   });
 });

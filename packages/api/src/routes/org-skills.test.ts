@@ -39,6 +39,24 @@ const services = vi.hoisted(() => ({
   createOrgSkill: vi.fn(),
   updateOrgSkill: vi.fn(),
   deleteOrgSkill: vi.fn(),
+  importOrgSkills: vi.fn(),
+}));
+
+// The audit rows the routes write, as the database receives them.
+const audits = vi.hoisted(() => ({
+  create: vi.fn<(args: { data: Record<string, unknown> }) => Promise<unknown>>(
+    async () => ({}),
+  ),
+}));
+
+// The zip reader is unit-tested on its own (skill-import.test.ts); here it
+// hands the route one readable skill so the import door's contract shows.
+vi.mock("../services/skill-import", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/skill-import")>()),
+  importSkillZip: async () => ({
+    skills: [{ name: "notes", description: "d", content: "c", files: [] }],
+    problems: [],
+  }),
 }));
 
 vi.mock("@onecli/db", () => ({
@@ -69,7 +87,7 @@ vi.mock("@onecli/db", () => ({
       findFirst: async () => ({ organizationId: "org-1" }),
     },
     workspace: { findFirst: async () => null },
-    auditLog: { create: async () => ({}) },
+    auditLog: { create: audits.create },
   },
 }));
 
@@ -79,6 +97,8 @@ vi.mock("../services/skill-service", () => ({
   createOrgSkill: services.createOrgSkill,
   updateOrgSkill: services.updateOrgSkill,
   deleteOrgSkill: services.deleteOrgSkill,
+  importOrgSkills: services.importOrgSkills,
+  importAgentSkills: vi.fn(),
   listSkillsForWorkspace: vi.fn(),
   getSkill: vi.fn(),
   createSkill: vi.fn(),
@@ -279,5 +299,48 @@ describe("the write gate where roles are ENFORCED (CAPS.rbac on)", () => {
     });
     expect(created.status).toBe(201);
     expect(services.createOrgSkill).toHaveBeenCalled();
+  });
+});
+
+describe("the org zip import door", () => {
+  it("returns each saved skill's id and audits it by id", async () => {
+    services.importOrgSkills.mockResolvedValue([
+      {
+        id: "sk-org-new",
+        name: "notes",
+        description: "d",
+        files: 2,
+        bytes: 10,
+        groups: { files: 1 },
+        skipped: [],
+        replaced: false,
+      },
+    ]);
+    const response = await app.request("/v1/org/skills/import", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ORG_KEY}`,
+        "content-type": "application/zip",
+      },
+      body: new Uint8Array([1, 2, 3]),
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      imported: { id: string; name: string }[];
+    };
+    expect(body.imported[0]).toMatchObject({ id: "sk-org-new", name: "notes" });
+    const rows = audits.create.mock.calls.map(([args]) => args.data);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: "create",
+        service: "skill",
+        organizationId: "org-1",
+        metadata: expect.objectContaining({
+          skillId: "sk-org-new",
+          name: "notes",
+          source: "zip",
+        }),
+      }),
+    ]);
   });
 });

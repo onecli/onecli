@@ -5,8 +5,8 @@ import { NODE_ENV, LOG_LEVEL } from "@/lib/env";
  *
  * In production, patches console.* to route all output through pino
  * as structured JSON. This captures both our code AND Next.js internal
- * logs (startup, errors, request logging) in a format CloudWatch
- * Insights can parse.
+ * logs (startup, errors, request logging) in a format log aggregators
+ * can parse.
  *
  * In development, console.* is left untouched (pino-pretty handles
  * our explicit logger calls, and Next.js dev output stays readable).

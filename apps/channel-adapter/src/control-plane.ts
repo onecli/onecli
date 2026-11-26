@@ -1,13 +1,19 @@
 import { z } from "zod";
+import { readCappedBinaryBody } from "@onecli/channels";
 import {
   adapterActionDecisionResponseSchema,
+  adapterCardFollowUpActionResponseSchema,
+  adapterCardStopResponseSchema,
   adapterConfigResponseSchema,
   adapterCursorResponseSchema,
   adapterDecisionResponseSchema,
+  adapterGroupDecisionResponseSchema,
   adapterIngestResponseSchema,
   adapterPromptClaimResponseSchema,
+  adapterPromptOutcomesResponseSchema,
   adapterReachDecisionResponseSchema,
   adapterRegisterResponseSchema,
+  adapterReplyClaimResponseSchema,
   adapterMentionResolveResponseSchema,
   adapterTranscriptResponseSchema,
   type AdapterMentionReportRequest,
@@ -16,11 +22,18 @@ import {
   adapterWorkResponseSchema,
   type AdapterActionDecisionRequest,
   type AdapterActionDecisionResponse,
+  type AdapterCardFollowUpActionRequest,
+  type AdapterCardFollowUpActionResponse,
+  type AdapterCardStopRequest,
+  type AdapterCardStopResponse,
   type AdapterConfigResponse,
   type AdapterDecisionRequest,
   type AdapterDecisionResponse,
+  type AdapterGroupDecisionRequest,
+  type AdapterGroupDecisionResponse,
   type AdapterIngestRequest,
   type AdapterIngestResponse,
+  type AdapterPromptOutcome,
   type AdapterReachDecisionRequest,
   type AdapterReachDecisionResponse,
   type AdapterWorkResponse,
@@ -32,6 +45,10 @@ import {
  * cast, so a contract drift fails loudly here instead of somewhere deep in a
  * poll loop.
  */
+
+/** A byte pull is a 25 MB-class body over an internal hop; the JSON calls' budget
+ * would cut a slow fetch mid-stream. */
+const ATTACHMENT_TIMEOUT_MS = 60_000;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -58,6 +75,11 @@ export interface ControlPlaneClient {
   getWork(): Promise<AdapterWorkResponse>;
   ingest(request: AdapterIngestRequest): Promise<AdapterIngestResponse>;
   decide(request: AdapterDecisionRequest): Promise<AdapterDecisionResponse>;
+  /** Forward a grouped-card click; the presence fence and the clicker's
+   * authorization are control-plane-side. */
+  decideGroup(
+    request: AdapterGroupDecisionRequest,
+  ): Promise<AdapterGroupDecisionResponse>;
   /** Forward a reach-card click; authorization is control-plane-side. */
   decideReach(
     request: AdapterReachDecisionRequest,
@@ -67,6 +89,17 @@ export interface ControlPlaneClient {
   decideAction(
     request: AdapterActionDecisionRequest,
   ): Promise<AdapterActionDecisionResponse>;
+  /** Forward a Stop pressed on the narration card; the turn is resolved from
+   * the presence's live card and the clicker authorized control-plane-side. */
+  stopFromCard(
+    request: AdapterCardStopRequest,
+  ): Promise<AdapterCardStopResponse>;
+  /** Forward a control pressed on a waiting message's row of the card; the
+   * row is checked against the card's own turn and the clicker against its
+   * author control-plane-side. */
+  actOnCardFollowUp(
+    request: AdapterCardFollowUpActionRequest,
+  ): Promise<AdapterCardFollowUpActionResponse>;
   claimPrompt(input: {
     approvalId: string;
     presenceId: string;
@@ -82,6 +115,11 @@ export interface ControlPlaneClient {
   listUnsettledPrompts(): Promise<
     z.infer<typeof adapterUnsettledPromptsResponseSchema>["prompts"]
   >;
+  /** How the approvals behind these cards ended, from the control plane's
+   * record (only cards of presences this adapter owns are answered). An
+   * approval with no record yet is simply absent. An older control plane
+   * without the read answers `[]`: no outcome, never an error. */
+  listPromptOutcomes(approvalIds: string[]): Promise<AdapterPromptOutcome[]>;
   /** `turnId` lets the control plane clear the turn's reaction receipt on a
    * CAS win — the answer is posting, so the "seen" reaction comes off. */
   advanceCursor(
@@ -90,6 +128,10 @@ export interface ControlPlaneClient {
     next: string,
     turnId?: string,
   ): Promise<boolean>;
+  /** Claim a mid-run follow-up's reply before posting it: true on the
+   * winning compare-and-set, false when a twin or the completion pass got
+   * there first (post nothing then). */
+  claimReply(followUpId: string): Promise<boolean>;
   reportApprovalHealth(presenceId: string, healthy: boolean): Promise<void>;
   /** The proactive credential sweep — staleness is decided server-side.
    * `deferred` counts pairs a transient provider refusal left in place for
@@ -107,6 +149,14 @@ export interface ControlPlaneClient {
     conversationId: string,
     since: number | undefined,
   ): Promise<z.infer<typeof adapterTranscriptResponseSchema>>;
+  /** The bytes of one of the agent's outbound files (a work item's
+   * `turn.attachments[i].id`). Null when the control plane refuses (not this
+   * instance's to read, or gone) — the mirror then posts a link line. Capped
+   * at `maxBytes`; a larger body is treated as a refusal, never buffered. */
+  fetchAttachment(
+    attachmentId: string,
+    maxBytes: number,
+  ): Promise<Uint8Array | null>;
   /** Resolve `@[Name]` names for the completion pass (normalized in). The
    * conversation carries the find_recipient anchors that outrank the
    * directory. */
@@ -265,6 +315,14 @@ export const createControlPlane = (options: {
         body: request,
       }),
 
+    decideGroup: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/group-decision",
+        adapterGroupDecisionResponseSchema,
+        { body: request },
+      ),
+
     decideReach: (request) =>
       call(
         "POST",
@@ -278,6 +336,22 @@ export const createControlPlane = (options: {
         "POST",
         "/channel-adapter/action-decision",
         adapterActionDecisionResponseSchema,
+        { body: request },
+      ),
+
+    stopFromCard: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/card-stop",
+        adapterCardStopResponseSchema,
+        { body: request },
+      ),
+
+    actOnCardFollowUp: (request) =>
+      call(
+        "POST",
+        "/channel-adapter/card-follow-up-action",
+        adapterCardFollowUpActionResponseSchema,
         { body: request },
       ),
 
@@ -318,6 +392,24 @@ export const createControlPlane = (options: {
       return parsed.prompts;
     },
 
+    async listPromptOutcomes(approvalIds) {
+      if (approvalIds.length === 0) return [];
+      const ids = approvalIds.map(encodeURIComponent).join(",");
+      try {
+        const parsed = await call(
+          "GET",
+          `/channel-adapter/prompts/outcomes?ids=${ids}`,
+          adapterPromptOutcomesResponseSchema,
+        );
+        return parsed.outcomes;
+      } catch (err) {
+        // Version skew: a control plane older than this read has no such
+        // route. That is "no record", so the card says no more than it saw.
+        if (err instanceof ControlPlaneError && err.status === 404) return [];
+        throw err;
+      }
+    },
+
     async advanceCursor(linkId, expect, next, turnId) {
       const parsed = await call(
         "POST",
@@ -326,6 +418,16 @@ export const createControlPlane = (options: {
         { body: { linkId, expect, next, ...(turnId && { turnId }) } },
       );
       return parsed.advanced;
+    },
+
+    async claimReply(followUpId) {
+      const parsed = await call(
+        "POST",
+        "/channel-adapter/replies/claim",
+        adapterReplyClaimResponseSchema,
+        { body: { followUpId } },
+      );
+      return parsed.claimed;
     },
 
     async reportApprovalHealth(presenceId, healthy) {
@@ -361,6 +463,32 @@ export const createControlPlane = (options: {
         }),
         { body: {} },
       ),
+
+    fetchAttachment: async (attachmentId, maxBytes) => {
+      const path = `/channel-adapter/attachments/${encodeURIComponent(attachmentId)}`;
+      const doFetch = () =>
+        fetch(`${options.baseUrl}/v1${path}`, {
+          headers: { authorization: `Bearer ${bearer}` },
+          signal: AbortSignal.timeout(ATTACHMENT_TIMEOUT_MS),
+        });
+      let response = await doFetch();
+      if (response.status === 401 && (await recoverFromDisplacement())) {
+        response = await doFetch();
+      }
+      if (response.status === 404) {
+        await response.body?.cancel().catch(() => {});
+        return null;
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new ControlPlaneError(
+          response.status,
+          `control plane answered ${response.status} for ${path}`,
+        );
+      }
+      const body = await readCappedBinaryBody(response, maxBytes);
+      return body.ok ? body.bytes : null;
+    },
 
     readTranscript: (conversationId, since) =>
       call(

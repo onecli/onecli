@@ -1,0 +1,33 @@
+apiVersion: v2
+name: onecli
+description: >-
+  OneCLI on Kubernetes: the dashboard, API, credential-injecting gateway and
+  the hosted-agents runner, with each agent sandbox as its own Job + PVC in a
+  fenced namespace.
+type: application
+# Both versions are stamped at publish time from the release tag
+# (`helm package --version <tag> --app-version <tag>` in publish.yml), so the
+# chart and the images it pulls always carry the same OneCLI version. The
+# values here are what a checkout renders with; they are never published.
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
+# Pod Security Admission `restricted` profiles, `batch/v1` Job fields and
+# `networking.k8s.io/v1` are all older; 1.30 is the floor the chart is tested
+# against (EKS and kind), and the pre-release suffix lets `-eks` style
+# server versions pass.
+kubeVersion: ">= 1.30.0-0"
+home: https://onecli.sh
+sources:
+  - https://github.com/onecli/onecli
+keywords:
+  - onecli
+  - ai-agents
+  - credentials
+  - gateway
+maintainers:
+  - name: OneCLI
+    url: https://onecli.sh
+annotations:
+  # artifacthub.io/* keys are read by Artifact Hub when the chart is listed.
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: security

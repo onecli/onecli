@@ -19,8 +19,18 @@ import { SecretGrantsTab } from "./secret-grants-tab";
  * Connections section's door — a key minted here is granted to THIS agent the
  * moment it lands, so fixing a dead key never requires leaving the page the
  * error pointed to.
+ *
+ * The picker is hosted-only: the platform chooses a hosted agent's model,
+ * while a BYO agent runs whatever its own harness picks (the models read
+ * answers 422 for one). A BYO agent gets the key list alone.
  */
-export const ModelsSection = ({ agentId }: { agentId: string }) => {
+export const ModelsSection = ({
+  agentId,
+  hosted,
+}: {
+  agentId: string;
+  hosted: boolean;
+}) => {
   const pathname = usePathname();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Secret | null>(null);
@@ -35,12 +45,12 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
   );
 
   // Create-then-attach: a key minted here is granted to THIS agent the
-  // moment it lands (the shared SecretActions interception seam).
-  const { secretActions, onSaved } = useCreateThenAttachSecret(agentId);
+  // moment it lands.
+  const { onSaved } = useCreateThenAttachSecret(agentId);
 
   return (
     <div className="flex flex-col gap-6">
-      <ModelCard agentId={agentId} />
+      {hosted && <ModelCard agentId={agentId} />}
       {/* Header + list grouped like the sibling agent sections (schedules,
           memory): the heading belongs to its list, not floating between
           cards. */}
@@ -49,8 +59,9 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
           <div>
             <h2 className="text-base font-semibold">LLM keys</h2>
             <p className="text-muted-foreground text-sm">
-              The keys this agent can answer with. The model above runs on
-              whichever key is attached.
+              {hosted
+                ? "The keys this agent can answer with. The model above runs on whichever key is attached."
+                : "The keys this agent can answer with."}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -84,7 +95,6 @@ export const ModelsSection = ({ agentId }: { agentId: string }) => {
         onOpenChange={setDialogOpen}
         onSaved={onSaved}
         allowedTypes={["anthropic", "openai"]}
-        secretActions={secretActions}
       />
       {/* Edit door: replace the stored value (write-only) or rename. Keyed so
           a different row always mounts a fresh form; the row survives the

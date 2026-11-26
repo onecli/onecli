@@ -1,5 +1,12 @@
+import { logger } from "../lib/logger";
 import { ensureOrgAwsExternalId } from "../services/aws-external-id-service";
-import type { AppDefinition, ConnectionMethod, ServerField } from "./types";
+import { ClientCredentialsExchangeError } from "./oauth/client-credentials";
+import {
+  isConnectFieldShown,
+  type AppDefinition,
+  type ConnectionMethod,
+  type ServerField,
+} from "./types";
 
 /** Request body accepted by the direct-connect endpoints (workspace and org). */
 export interface ConnectRequestBody {
@@ -7,7 +14,40 @@ export interface ConnectRequestBody {
   connectionId?: string;
   label?: string;
   method?: string;
+  /** The agent a workspace connect started from: a created or re-added
+   * connection is switched on for it (`agent-connect-grant-service`). */
+  agentId?: string;
 }
+
+/** Successful direct connect, with the resolved connection in either scope. */
+export interface ConnectResponse {
+  success: true;
+  connectionId: string;
+  /** Present only for a newly created workspace connection, for grant setup. */
+  connection?: { id: string; label: string | null };
+}
+
+/** What a rejected connect writes to the log: see `describeExchangeFailure`. */
+type ExchangeFailureLog =
+  | { status: number; error: string }
+  | { errorName: string };
+
+/**
+ * What a rejected connect may write to the log. Only a token endpoint's own
+ * answer (status + OAuth error fields, found anywhere in the `cause` chain)
+ * is logged in full. Any other error is reduced to its name, because an
+ * exchanger or a library (JSON.parse quotes its input) can echo part of a
+ * submitted secret into the message.
+ */
+export const describeExchangeFailure = (e: unknown): ExchangeFailureLog => {
+  for (let cur: unknown = e, depth = 0; cur && depth < 5; depth++) {
+    if (cur instanceof ClientCredentialsExchangeError) {
+      return { status: cur.status, error: cur.message };
+    }
+    cur = cur instanceof Error ? cur.cause : undefined;
+  }
+  return { errorName: e instanceof Error ? e.name : typeof e };
+};
 
 /** A connection method that accepts direct credentials (not OAuth). */
 export type DirectConnectionMethod = Extract<
@@ -114,12 +154,18 @@ export const resolveConnectCredentials = async (
     activeMethod.type === "credentials_import"
       ? (activeMethod.serverFields ?? [])
       : [];
-  const fields = {
+  const fields: Record<string, string> = {
     ...body.fields,
     ...(serverFields.length
       ? await resolveServerFields(serverFields, organizationId)
       : {}),
   };
+  // A field shown only for another field's value (a CA certificate only when
+  // the certificate is verified) is not stored when that value is not set,
+  // so a stale one can't ride along unseen.
+  for (const field of activeMethod.fields) {
+    if (!isConnectFieldShown(field, fields)) delete fields[field.name];
+  }
 
   let requiredFields: { name: string; label: string }[];
   if (
@@ -148,7 +194,26 @@ export const resolveConnectCredentials = async (
   let metadata: Record<string, unknown> | undefined;
 
   if (activeMethod.type === "credentials_import") {
-    const result = await activeMethod.exchangeCredentials(fields);
+    // A provider rejecting the submitted credentials is a user error, not a
+    // server fault: surface it as a 400 with the provider's reason, exactly
+    // like the api_key branch's resolveMetadata failure below.
+    let result: Awaited<ReturnType<typeof activeMethod.exchangeCredentials>>;
+    try {
+      result = await activeMethod.exchangeCredentials(fields);
+    } catch (e) {
+      // Never `fields` or a raw message: see describeExchangeFailure.
+      logger.warn(
+        { appId: appDef.id, ...describeExchangeFailure(e) },
+        "Credential exchange rejected on connect",
+      );
+      return {
+        ok: false,
+        error:
+          e instanceof Error
+            ? e.message
+            : "Could not validate the provided credentials",
+      };
+    }
     credentials = result.credentials;
     scopes = result.scopes;
     metadata = result.metadata;
@@ -170,6 +235,11 @@ export const resolveConnectCredentials = async (
       try {
         metadata = (await activeMethod.resolveMetadata(fields)) ?? undefined;
       } catch (e) {
+        // Same shape and the same message-safety as the exchange branch above.
+        logger.warn(
+          { appId: appDef.id, ...describeExchangeFailure(e) },
+          "Credential validation rejected on connect",
+        );
         return {
           ok: false,
           error:

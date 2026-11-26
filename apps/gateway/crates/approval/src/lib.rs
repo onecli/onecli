@@ -12,8 +12,10 @@
 //! **Redis decision delivery uses `BLPOP`** (not pub/sub) to avoid the
 //! subscribe-before-publish race condition that would lose decisions
 //! submitted between `store()` and `SUBSCRIBE`. New-approval notifications
-//! use pub/sub — the race there is benign (the SDK just polls again in 30s
-//! if a notification is missed).
+//! use pub/sub, so a poll subscribes ([`ApprovalStore::subscribe_new`])
+//! BEFORE its decisive list: an approval stored in between is then either in
+//! the list or delivered to the subscription, never lost (a missed
+//! notification would hold the poll for its whole 30s window).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,9 +27,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, warn};
 
+pub mod hold;
+pub mod similar;
+
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// How long a pending approval lives before auto-deny (seconds).
+/// How long a pending approval lives before it expires (seconds).
 pub const APPROVAL_TIMEOUT_SECS: u64 = 180;
 
 /// How often the background task cleans up expired approvals (seconds).
@@ -46,8 +51,8 @@ pub struct PendingApproval {
     /// Deserialize-only rename compat (temporary — deletion recipe in
     /// `compat.rs`): a post-rename binary reads PRE-rename Redis payloads
     /// (`project_id`), so approvals created before a deploy that crosses the
-    /// rename survive onto new pods. The REVERSE is deliberately uncovered —
-    /// rows a new pod writes are invisible to not-yet-replaced old pods for
+    /// rename survive onto new instances. The REVERSE is deliberately uncovered —
+    /// rows a new instance writes are invisible to not-yet-replaced old ones for
     /// the rolling window, bounded by the 190s Redis TTL (and moot under the
     /// planned scale-to-zero cutover).
     #[serde(alias = "project_id")]
@@ -65,8 +70,154 @@ pub struct PendingApproval {
     /// `None` for older records; consumers fall back to `body_preview`.
     #[serde(default)]
     pub summary: Option<summary::ApprovalSummary>,
+    /// The request body as the agent sent it, for the approver's "Raw
+    /// request" view. See [`RawBody::from_bytes`] for the bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_body: Option<RawBody>,
+    /// The catalog app this request is for (e.g. `salesforce`), so cards can
+    /// show its logo. `None` when the host matches no known app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// The agent's own claim that this request is one of several serving a
+    /// single task ("add 39 contacts"), so cards can group them. Grouping
+    /// only: it grants nothing, every request is still held and decided on
+    /// its own. From the `X-OneCLI-Batch*` headers, which are never forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<ApprovalBatch>,
+    /// What "Approve similar" would also allow, when the gateway offers it
+    /// for this request (a documented update of one record, see [`similar`]).
+    /// Built by the gateway from the request itself; the decision reads it
+    /// from here, never from the client. Its key is never sent to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar: Option<similar::SimilarScope>,
     pub created_at: u64,
     pub expires_at: u64,
+}
+
+/// Largest raw body an approval carries (it lives in Redis and on every poll).
+const RAW_BODY_MAX: usize = 8 * 1024;
+
+/// Request headers an agent sets to group the requests of one task.
+const BATCH_ID_HEADER: &str = "x-onecli-batch";
+const BATCH_LABEL_HEADER: &str = "x-onecli-batch-label";
+const BATCH_TOTAL_HEADER: &str = "x-onecli-batch-total";
+
+/// The three batch headers, for the forwarders' strip lists (HTTP and
+/// WebSocket): they are for OneCLI only and never reach the upstream API.
+pub const BATCH_HEADERS: [&str; 3] = [BATCH_ID_HEADER, BATCH_LABEL_HEADER, BATCH_TOTAL_HEADER];
+
+const BATCH_ID_MAX: usize = 64;
+const BATCH_LABEL_MAX: usize = 120;
+const BATCH_TOTAL_MAX: u32 = 500;
+
+/// A task grouping claimed by the agent. Every field is agent-supplied and
+/// shown as the agent's claim; nothing here changes what is allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalBatch {
+    /// Opaque id shared by the task's requests: 1-64 of `[A-Za-z0-9_-]`.
+    pub id: String,
+    /// What the agent says the task is, single line, at most 120 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// How many requests the agent says the task will send, 1-500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+}
+
+impl ApprovalBatch {
+    /// Parse the batch headers. `None` unless the id is well-formed; a bad
+    /// label or total is dropped on its own, never fails the id.
+    pub fn from_headers(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let id = get(BATCH_ID_HEADER)?.trim().to_string();
+        let well_formed = !id.is_empty()
+            && id.len() <= BATCH_ID_MAX
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !well_formed {
+            return None;
+        }
+        let label = get(BATCH_LABEL_HEADER)
+            .map(|l| {
+                let words = l
+                    .split(|c: char| c.is_whitespace() || is_unsafe_in_label(c))
+                    .filter(|w| !w.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut capped: String = words.chars().take(BATCH_LABEL_MAX).collect();
+                capped.truncate(capped.trim_end().len());
+                capped
+            })
+            .filter(|l| !l.is_empty());
+        let total = get(BATCH_TOTAL_HEADER)
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .filter(|t| (1..=BATCH_TOTAL_MAX).contains(t));
+        Some(Self { id, label, total })
+    }
+}
+
+/// Characters a one-line label must not carry: control characters, and the
+/// bidi controls that could reorder the text around the label on a card.
+fn is_unsafe_in_label(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The held request's body, for the approver's "Raw request" view, so the
+/// readable summary can be checked against what will be sent. Captured BEFORE
+/// credential injection (injection only touches headers, the query and the
+/// path), so it never holds a secret the gateway added. Secret-named fields
+/// the agent itself put in the body are masked by the readable card's own key
+/// list ([`summary::mask_secrets`]). Text only: a binary body is flagged, not
+/// shipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawBody {
+    /// UTF-8 text, at most 8 KiB, cut on a char boundary, with secret-named
+    /// values masked. Empty when `binary`.
+    pub text: String,
+    /// The body is longer than `text`.
+    pub truncated: bool,
+    /// The body is not UTF-8 text, so none of it is shown.
+    pub binary: bool,
+    /// At least one secret-named value was masked as `***`.
+    #[serde(default)]
+    pub redacted: bool,
+}
+
+impl RawBody {
+    /// `bytes` is the gateway's bounded peek of the body (larger than the
+    /// 8 KiB kept), so a longer `bytes` means truncated.
+    /// `None` for an empty body.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let truncated = bytes.len() > RAW_BODY_MAX;
+        let head = &bytes[..bytes.len().min(RAW_BODY_MAX)];
+        let text = match std::str::from_utf8(head) {
+            Ok(s) => s,
+            // A multi-byte char split by the cut is fine; anything else is binary.
+            Err(e) if truncated && e.error_len().is_none() => {
+                std::str::from_utf8(&head[..e.valid_up_to()]).unwrap_or_default()
+            }
+            Err(_) => {
+                return Some(Self {
+                    text: String::new(),
+                    truncated,
+                    binary: true,
+                    redacted: false,
+                })
+            }
+        };
+        let (text, redacted) = summary::mask_secrets(text);
+        Some(Self {
+            text,
+            truncated,
+            binary: false,
+            redacted,
+        })
+    }
 }
 
 /// The decision made by the SDK consumer.
@@ -80,7 +231,7 @@ pub enum ApprovalDecision {
 /// A submitted decision plus the identity that made it.
 ///
 /// `approved_by` carries the deciding user (from the gateway `AuthUser`), or
-/// `None` for a system auto-deny on timeout/cleanup. It is delivered to the
+/// `None` for a legacy decision without attribution. It is delivered to the
 /// held request so it can be stamped onto the request log (for Redis it is
 /// serialized as the decision payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,9 +239,44 @@ pub struct DecisionOutcome {
     pub decision: ApprovalDecision,
     #[serde(default)]
     pub approved_by: Option<String>,
+    /// Why a deny happened, when it was not a reviewer's plain no. Omitted
+    /// from the wire when absent, so instances on either side of a rolling
+    /// deploy read each other's decisions (serde ignores the unknown field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DenyReason>,
+}
+
+/// The cause of a deny that the agent must read differently from a plain no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyReason {
+    /// The person sent a message that changes this request while it was
+    /// held: the agent must read that message and send a revised request.
+    Superseded,
 }
 
 // ── DecisionReceiver ───────────────────────────────────────────────────
+
+/// A decision could not be observed. This is not a reviewer denial or expiry.
+/// Variants contain no backend payloads or credentials and are safe to log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionWaitError {
+    Connection,
+    InvalidDecision,
+    Receive,
+}
+
+impl std::fmt::Display for DecisionWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Connection => "approval store connection failed",
+            Self::InvalidDecision => "approval store returned an invalid decision",
+            Self::Receive => "approval store decision receive failed",
+        })
+    }
+}
+
+impl std::error::Error for DecisionWaitError {}
 
 /// One waiter behind [`ApprovalStore::prepare_wait`].
 ///
@@ -101,12 +287,33 @@ pub struct DecisionOutcome {
 /// with its store in `ee::ha`.
 #[async_trait]
 pub trait DecisionWait: Send {
-    /// Wait for a decision with timeout. Returns `None` on timeout (= auto-deny).
-    async fn wait(self: Box<Self>, timeout: Duration) -> Option<DecisionOutcome>;
+    /// `Ok(None)` means expiry, never a transport or decoding failure.
+    async fn wait(
+        self: Box<Self>,
+        timeout: Duration,
+    ) -> Result<Option<DecisionOutcome>, DecisionWaitError>;
 }
 
 /// Opaque receiver returned by [`ApprovalStore::prepare_wait`].
 pub type DecisionReceiver = Box<dyn DecisionWait>;
+
+/// A subscription to new-approval notifications, opened by
+/// [`ApprovalStore::subscribe_new`] / [`ApprovalStore::subscribe_new_for_org`].
+///
+/// Open it **before** listing pending approvals, then wait on it only if the
+/// list is empty. An approval stored after the subscription opened wakes the
+/// wait even if it landed before `wait` was called; one stored before it is
+/// in the list. Subscribing only after an empty list leaves a gap where a
+/// store notifies nobody and the poll sleeps its whole window.
+#[async_trait]
+pub trait NewApprovalWait: Send {
+    /// `true` once an approval was stored after the subscription opened,
+    /// `false` on timeout (or when the subscription could not be opened).
+    async fn wait(self: Box<Self>, timeout: Duration) -> bool;
+}
+
+/// Opaque subscription returned by [`ApprovalStore::subscribe_new`].
+pub type NewApprovalReceiver = Box<dyn NewApprovalWait>;
 
 /// In-memory waiter: a watch channel completed by `submit_decision`.
 struct InMemoryDecisionWait {
@@ -115,8 +322,11 @@ struct InMemoryDecisionWait {
 
 #[async_trait]
 impl DecisionWait for InMemoryDecisionWait {
-    async fn wait(self: Box<Self>, timeout: Duration) -> Option<DecisionOutcome> {
-        wait_in_memory(self.rx, timeout).await
+    async fn wait(
+        self: Box<Self>,
+        timeout: Duration,
+    ) -> Result<Option<DecisionOutcome>, DecisionWaitError> {
+        Ok(wait_in_memory(self.rx, timeout).await)
     }
 }
 
@@ -261,25 +471,25 @@ pub trait ApprovalStore: Send + Sync {
     /// Remove a pending approval (after decision or expiry).
     async fn remove(&self, org_id: &str, workspace_id: &str, id: &str);
 
-    /// Block until a new approval arrives for this workspace, or timeout.
-    /// Returns `true` if notified, `false` on timeout.
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool;
+    /// Subscribe to approvals stored for this workspace from now on.
+    ///
+    /// **Must be called before the list it guards** (see [`NewApprovalWait`]).
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver;
 
-    /// Block until a new approval arrives in any of the org's workspaces, or
-    /// timeout. Org-scoped counterpart of [`ApprovalStore::wait_for_new`];
-    /// backs the org long-poll (`ee`'s `org_routes`).
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool;
+    /// Subscribe to approvals stored in any of the org's workspaces from now
+    /// on. Org-scoped counterpart of [`ApprovalStore::subscribe_new`]; backs
+    /// the org long-poll (`ee`'s `org_routes`).
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver;
 
-    /// Submit a decision for a pending approval. Wakes the held request.
-    /// `approved_by` is the deciding user, or `None` for a system auto-deny.
+    /// Deliver a decision (with its attribution and any deny reason) to a
+    /// pending approval. Wakes the held request.
     /// Returns `true` if the approval was found and decision delivered.
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         org_id: &str,
         workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool;
 }
 
@@ -303,6 +513,31 @@ impl InMemoryApprovalStore {
             new_notify: DashMap::new(),
             decisions: DashMap::new(),
         }
+    }
+
+    /// Subscribe to a notify key. The receiver buffers a send that lands
+    /// before `wait` is called, which is what closes the list/wait gap.
+    fn subscribe_key(&self, notify_key: String) -> NewApprovalReceiver {
+        // Subscribe under the DashMap guard and drop it at once: the guard is
+        // never held across an await.
+        let rx = self
+            .new_notify
+            .entry(notify_key)
+            .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0)
+            .subscribe();
+        Box::new(InMemoryNewApprovalWait { rx })
+    }
+}
+
+/// In-memory new-approval subscription: a broadcast receiver.
+struct InMemoryNewApprovalWait {
+    rx: broadcast::Receiver<()>,
+}
+
+#[async_trait]
+impl NewApprovalWait for InMemoryNewApprovalWait {
+    async fn wait(mut self: Box<Self>, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, self.rx.recv()).await.is_ok()
     }
 }
 
@@ -371,48 +606,24 @@ impl ApprovalStore for InMemoryApprovalStore {
         self.decisions.remove(id);
     }
 
-    async fn wait_for_new(&self, org_id: &str, workspace_id: &str, timeout: Duration) -> bool {
-        let notify_key = format!("{org_id}:{workspace_id}");
-        // Get or create broadcast sender, subscribe, then drop the guard
-        // before awaiting (critical: never hold DashMap guard across .await).
-        let mut rx = {
-            let sender = self
-                .new_notify
-                .entry(notify_key)
-                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
-            sender.subscribe()
-        }; // guard dropped here — safe to await
-
-        tokio::time::timeout(timeout, rx.recv()).await.is_ok()
+    async fn subscribe_new(&self, org_id: &str, workspace_id: &str) -> NewApprovalReceiver {
+        self.subscribe_key(format!("{org_id}:{workspace_id}"))
     }
 
-    async fn wait_for_new_for_org(&self, org_id: &str, timeout: Duration) -> bool {
-        // Org-scoped notify keyed by the bare org id (see `store`). Never held
-        // across an await: subscribe under the guard, drop it, then wait.
-        let mut rx = {
-            let sender = self
-                .new_notify
-                .entry(org_id.to_string())
-                .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
-            sender.subscribe()
-        };
-
-        tokio::time::timeout(timeout, rx.recv()).await.is_ok()
+    async fn subscribe_new_for_org(&self, org_id: &str) -> NewApprovalReceiver {
+        // Org-scoped notify keyed by the bare org id (see `store`).
+        self.subscribe_key(org_id.to_string())
     }
 
-    async fn submit_decision(
+    async fn submit_outcome(
         &self,
         _org_id: &str,
         _workspace_id: &str,
         id: &str,
-        decision: ApprovalDecision,
-        approved_by: Option<String>,
+        outcome: DecisionOutcome,
     ) -> bool {
         if let Some((_, tx)) = self.decisions.remove(id) {
-            let _ = tx.send(Some(DecisionOutcome {
-                decision,
-                approved_by,
-            }));
+            let _ = tx.send(Some(outcome));
             self.pending.remove(id);
             true
         } else {
@@ -429,36 +640,34 @@ pub fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// Remove expired approvals and close their waiters without inventing a review.
+fn cleanup_expired(store: &InMemoryApprovalStore, now: u64) {
+    let expired: Vec<String> = store
+        .pending
+        .iter()
+        .filter(|e| e.expires_at <= now)
+        .map(|e| e.id.clone())
+        .collect();
+
+    for id in &expired {
+        store.decisions.remove(id);
+        store.pending.remove(id);
+    }
+
+    if !expired.is_empty() {
+        debug!(count = expired.len(), "cleaned up expired approvals");
+    }
+}
+
 /// Background task that cleans up expired approvals every 30 seconds.
-/// Sends `Deny` through decision channels to unblock held requests.
+/// Dropping decision senders unblocks held requests as expired, not declined.
 /// In-memory only — the Redis backend expires keys via their TTLs.
 fn start_cleanup_task(store: Arc<InMemoryApprovalStore>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         loop {
             interval.tick().await;
-            let now = unix_now();
-
-            let expired: Vec<String> = store
-                .pending
-                .iter()
-                .filter(|e| e.expires_at <= now)
-                .map(|e| e.id.clone())
-                .collect();
-
-            for id in &expired {
-                if let Some((_, tx)) = store.decisions.remove(id) {
-                    let _ = tx.send(Some(DecisionOutcome {
-                        decision: ApprovalDecision::Deny,
-                        approved_by: None,
-                    }));
-                }
-                store.pending.remove(id);
-            }
-
-            if !expired.is_empty() {
-                debug!(count = expired.len(), "cleaned up expired approvals");
-            }
+            cleanup_expired(&store, unix_now());
 
             // Prune notification channels for workspaces with no pending approvals.
             // Prevents unbounded growth of the new_notify map over time.
@@ -495,7 +704,25 @@ pub struct PendingParams {
     /// Allows the server to enter long-poll when all pending approvals are in-flight.
     #[serde(default)]
     pub exclude: String,
+    /// `wait=0` answers the current pending set at once instead of
+    /// long-polling while it is empty: a one-shot read for a server-side
+    /// check that must not sit in a 30s hold. Absent = long-poll (default).
+    #[serde(default)]
+    pub wait: Option<u8>,
 }
+
+impl PendingParams {
+    /// Whether an empty pending set should be long-polled.
+    pub fn long_poll(&self) -> bool {
+        self.wait != Some(0)
+    }
+}
+
+/// How long a woken approval long-poll waits before answering, so a burst of
+/// parallel requests (which land a few hundred ms apart) reaches every
+/// surface as one set. Shared by the workspace and org polls; every poll
+/// client's timeout leaves room for the 30s hold plus this.
+pub const BURST_COALESCE: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Format a unix timestamp (seconds) as an ISO 8601 UTC string.
 /// Falls back to epoch if the timestamp is invalid.
@@ -522,6 +749,16 @@ pub fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
         "headers": a.headers,
         "bodyPreview": a.body_preview,
         "summary": a.summary,
+        "rawBody": a.raw_body,
+        "app": a.app,
+        "batch": a.batch,
+        // What the window covers and its bounds; its key stays inside the
+        // gateway.
+        "similar": a.similar.as_ref().map(|s| serde_json::json!({
+            "label": s.label,
+            "windowMinutes": similar::SIMILAR_WINDOW_SECS / 60,
+            "maxRequests": similar::SIMILAR_WINDOW_MAX_REQUESTS,
+        })),
         "agent": { "id": a.agent_id, "name": a.agent_name, "externalId": a.agent_identifier },
         "createdAt": format_unix_ts(a.created_at),
         "expiresAt": format_unix_ts(a.expires_at),
@@ -536,9 +773,129 @@ pub fn pending_approval_row(a: &PendingApproval) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    fn headers<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn batch_parses_a_well_formed_task() {
+        let b = ApprovalBatch::from_headers(headers(&[
+            (BATCH_ID_HEADER, "b7f3-task_1"),
+            (
+                BATCH_LABEL_HEADER,
+                "  Add 39 contacts\n from\u{202E} the list  ",
+            ),
+            (BATCH_TOTAL_HEADER, "39"),
+        ]))
+        .unwrap();
+        assert_eq!(b.id, "b7f3-task_1");
+        // Control and bidi characters and runs of whitespace collapse to
+        // single spaces.
+        assert_eq!(b.label.as_deref(), Some("Add 39 contacts from the list"));
+        assert_eq!(b.total, Some(39));
+    }
+
+    #[test]
+    fn batch_rejects_a_malformed_id_and_drops_bad_fields_alone() {
+        for bad in ["", "has space", "a/b", "<script>", &"x".repeat(65)] {
+            assert!(
+                ApprovalBatch::from_headers(headers(&[(BATCH_ID_HEADER, bad)])).is_none(),
+                "{bad:?}"
+            );
+        }
+        let b = ApprovalBatch::from_headers(headers(&[
+            (BATCH_ID_HEADER, "ok"),
+            (BATCH_LABEL_HEADER, &"é".repeat(300)),
+            (BATCH_TOTAL_HEADER, "9999"),
+        ]))
+        .unwrap();
+        assert_eq!(b.label.as_ref().map(|l| l.chars().count()), Some(120));
+        assert_eq!(b.total, None, "out-of-range total is dropped, not clamped");
+        assert!(ApprovalBatch::from_headers(headers(&[])).is_none());
+        // A cut never leaves a trailing space; a blank label is no label.
+        let cut = format!("{} tail", "w".repeat(BATCH_LABEL_MAX));
+        let b = ApprovalBatch::from_headers(headers(&[
+            (BATCH_ID_HEADER, "ok"),
+            (BATCH_LABEL_HEADER, &cut),
+        ]))
+        .unwrap();
+        assert_eq!(b.label.as_deref(), Some(&*"w".repeat(BATCH_LABEL_MAX)));
+        let blank = ApprovalBatch::from_headers(headers(&[
+            (BATCH_ID_HEADER, "ok"),
+            (BATCH_LABEL_HEADER, " \u{202E}\t"),
+        ]))
+        .unwrap();
+        assert_eq!(blank.label, None);
+    }
+
+    #[test]
+    fn batch_is_on_the_poll_row_only_when_present() {
+        let mut a = make_approval("ap-1", "ws-1");
+        assert!(pending_approval_row(&a)["batch"].is_null());
+        a.batch = ApprovalBatch::from_headers(headers(&[(BATCH_ID_HEADER, "t1")]));
+        assert_eq!(pending_approval_row(&a)["batch"]["id"], "t1");
+    }
+
+    /// Masking itself is `summary::mask_secrets`'s (tested there); this pins
+    /// that the raw body applies it, and flags it.
+    #[test]
+    fn raw_body_masks_secret_named_fields_like_the_card_does() {
+        let b = RawBody::from_bytes(br#"{"username":"ada","password":"hunter2"}"#).unwrap();
+        assert!(b.redacted);
+        assert_eq!(b.text, r#"{"username":"ada","password":"***"}"#);
+    }
+
+    #[test]
+    fn raw_body_masks_a_secret_cut_off_by_truncation() {
+        let mut body = br#"{"a":""#.to_vec();
+        body.extend(std::iter::repeat_n(b'x', RAW_BODY_MAX - 20));
+        body.extend_from_slice(br#"","token":"abcdefghijklmnopqrstuvwxyz0123456789"}"#);
+        let b = RawBody::from_bytes(&body).unwrap();
+        assert!(b.truncated);
+        assert!(!b.text.contains("abcdefgh"), "partial secret leaked");
+    }
+
+    #[test]
+    fn raw_body_keeps_text_verbatim() {
+        let b = RawBody::from_bytes(br#"{"FirstName":"Test"}"#).unwrap();
+        assert_eq!(b.text, r#"{"FirstName":"Test"}"#);
+        assert!(!b.truncated && !b.binary && !b.redacted);
+        assert_eq!(RawBody::from_bytes(b""), None);
+    }
+
+    #[test]
+    fn raw_body_truncates_on_a_char_boundary() {
+        // "é" is 2 bytes; the cut at RAW_BODY_MAX lands mid-char.
+        let mut body = "a".repeat(RAW_BODY_MAX - 1).into_bytes();
+        body.extend_from_slice("éééé".as_bytes());
+        let b = RawBody::from_bytes(&body).unwrap();
+        assert!(b.truncated && !b.binary);
+        assert_eq!(b.text.len(), RAW_BODY_MAX - 1);
+    }
+
+    #[test]
+    fn raw_body_flags_binary_without_shipping_it() {
+        let b = RawBody::from_bytes(&[0xff, 0xfe, 0x00, 0x01]).unwrap();
+        assert!(b.binary);
+        assert!(b.text.is_empty());
+    }
+
+    #[test]
+    fn raw_body_is_on_the_poll_row_only_when_present() {
+        let mut a = make_approval("ap-1", "ws-1");
+        assert!(pending_approval_row(&a).get("rawBody").unwrap().is_null());
+        a.raw_body = RawBody::from_bytes(b"{}");
+        assert_eq!(pending_approval_row(&a)["rawBody"]["text"], "{}");
+    }
+
     /// Old-format Redis payloads (`project_id`) written by a pre-rename
     /// binary must deserialize on the new one, or every in-flight approval
-    /// silently vanishes (auto-deny at timeout) during a rolling deploy.
+    /// silently vanishes (expires unreviewed) during a rolling deploy.
     #[test]
     fn pending_approval_reads_the_pre_rename_redis_field() {
         let old_format = r#"{
@@ -563,6 +920,27 @@ mod tests {
         Arc::new(InMemoryApprovalStore::new())
     }
 
+    /// A plain decision (no deny reason), as every reviewer click sends it.
+    async fn submit_decision(
+        store: &dyn ApprovalStore,
+        id: &str,
+        decision: ApprovalDecision,
+        approved_by: Option<String>,
+    ) -> bool {
+        store
+            .submit_outcome(
+                TEST_ORG,
+                "acc-1",
+                id,
+                DecisionOutcome {
+                    decision,
+                    approved_by,
+                    reason: None,
+                },
+            )
+            .await
+    }
+
     const TEST_ORG: &str = "org-1";
 
     fn make_approval(id: &str, workspace_id: &str) -> PendingApproval {
@@ -581,6 +959,10 @@ mod tests {
             headers: HashMap::new(),
             body_preview: None,
             summary: None,
+            raw_body: None,
+            app: None,
+            batch: None,
+            similar: None,
             created_at: now,
             expires_at: now + APPROVAL_TIMEOUT_SECS,
         }
@@ -601,6 +983,10 @@ mod tests {
             headers: HashMap::new(),
             body_preview: None,
             summary: None,
+            raw_body: None,
+            app: None,
+            batch: None,
+            similar: None,
             created_at: 0,
             expires_at: 1, // expired long ago
         }
@@ -673,12 +1059,10 @@ mod tests {
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            store2
-                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve, None)
-                .await;
+            submit_decision(&*store2, "a1", ApprovalDecision::Approve, None).await;
         });
 
-        let decision = rx.wait(Duration::from_secs(5)).await;
+        let decision = rx.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(
             decision.map(|o| o.decision),
             Some(ApprovalDecision::Approve)
@@ -692,24 +1076,67 @@ mod tests {
 
         let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
-        store
-            .submit_decision(
-                TEST_ORG,
-                "acc-1",
-                "a1",
-                ApprovalDecision::Approve,
-                Some("user-7".to_string()),
-            )
-            .await;
+        submit_decision(
+            &*store,
+            "a1",
+            ApprovalDecision::Approve,
+            Some("user-7".to_string()),
+        )
+        .await;
 
-        let outcome = rx.wait(Duration::from_secs(5)).await;
+        let outcome = rx.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(
             outcome,
             Some(DecisionOutcome {
                 decision: ApprovalDecision::Approve,
                 approved_by: Some("user-7".to_string()),
+                reason: None,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn submit_outcome_delivers_deny_reason() {
+        let store = new_store().await;
+        let approval = make_approval("a1", "acc-1");
+
+        let rx = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
+        store.store(&approval).await.unwrap();
+        let superseded = DecisionOutcome {
+            decision: ApprovalDecision::Deny,
+            approved_by: Some("user-7".to_string()),
+            reason: Some(DenyReason::Superseded),
+        };
+        assert!(
+            store
+                .submit_outcome(TEST_ORG, "acc-1", "a1", superseded.clone())
+                .await
+        );
+
+        assert_eq!(
+            rx.wait(Duration::from_secs(5)).await.unwrap(),
+            Some(superseded)
+        );
+        assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
+    }
+
+    #[test]
+    fn decision_outcome_wire_is_backward_compatible() {
+        // A plain decision serializes exactly as before (no `reason` key), so
+        // an older instance on a rolling deploy reads it unchanged...
+        let plain = DecisionOutcome {
+            decision: ApprovalDecision::Deny,
+            approved_by: None,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"decision":"deny","approved_by":null}"#
+        );
+        // ...and a superseded one carries it as a snake_case string.
+        let superseded: DecisionOutcome =
+            serde_json::from_str(r#"{"decision":"deny","reason":"superseded"}"#).unwrap();
+        assert_eq!(superseded.reason, Some(DenyReason::Superseded));
     }
 
     #[tokio::test]
@@ -723,12 +1150,10 @@ mod tests {
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            store2
-                .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Deny, None)
-                .await;
+            submit_decision(&*store2, "a1", ApprovalDecision::Deny, None).await;
         });
 
-        let decision = rx.wait(Duration::from_secs(5)).await;
+        let decision = rx.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(decision.map(|o| o.decision), Some(ApprovalDecision::Deny));
     }
 
@@ -741,8 +1166,43 @@ mod tests {
         store.store(&approval).await.unwrap();
 
         // No decision submitted — should timeout
-        let decision = rx.wait(Duration::from_millis(100)).await;
+        let decision = rx.wait(Duration::from_millis(100)).await.unwrap();
         assert_eq!(decision, None);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expiry_closes_waiter_without_fabricating_a_denial() {
+        let store = InMemoryApprovalStore::new();
+        let expired = make_expired_approval("expired", "acc-1");
+        let valid = make_approval("valid", "acc-1");
+        let expired_rx = store.prepare_wait(TEST_ORG, "acc-1", "expired").await;
+        let valid_rx = store.prepare_wait(TEST_ORG, "acc-1", "valid").await;
+        store.store(&expired).await.unwrap();
+        store.store(&valid).await.unwrap();
+
+        // Exercise the same helper as the background interval, without waiting
+        // for wall-clock expiry or relying on a timer/cleanup race.
+        cleanup_expired(&store, expired.expires_at);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            expired_rx.wait(Duration::from_secs(60)),
+        )
+        .await
+        .expect("cleanup must immediately release the waiter");
+        assert_eq!(outcome, Ok(None));
+        assert!(!store.pending.contains_key("expired"));
+        assert!(!store.decisions.contains_key("expired"));
+        assert!(!submit_decision(&store, "expired", ApprovalDecision::Approve, None).await);
+        assert!(store.pending.contains_key("valid"));
+        assert!(submit_decision(&store, "valid", ApprovalDecision::Deny, None).await);
+        assert_eq!(
+            valid_rx.wait(Duration::from_secs(1)).await,
+            Ok(Some(DecisionOutcome {
+                decision: ApprovalDecision::Deny,
+                approved_by: None,
+                reason: None,
+            }))
+        );
     }
 
     #[tokio::test]
@@ -787,9 +1247,7 @@ mod tests {
         let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
         store.store(&approval).await.unwrap();
 
-        store
-            .submit_decision(TEST_ORG, "acc-1", "a1", ApprovalDecision::Approve, None)
-            .await;
+        submit_decision(&*store, "a1", ApprovalDecision::Approve, None).await;
 
         assert!(store.get_pending(TEST_ORG, "acc-1", "a1").await.is_none());
     }
@@ -797,21 +1255,14 @@ mod tests {
     #[tokio::test]
     async fn submit_decision_nonexistent_returns_false() {
         let store = new_store().await;
-        let result = store
-            .submit_decision(
-                TEST_ORG,
-                "acc-1",
-                "nonexistent",
-                ApprovalDecision::Approve,
-                None,
-            )
-            .await;
+        let result = submit_decision(&*store, "nonexistent", ApprovalDecision::Approve, None).await;
         assert!(!result);
     }
 
     #[tokio::test]
-    async fn wait_for_new_notified_on_store() {
+    async fn subscription_wakes_when_an_approval_is_stored_later() {
         let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
@@ -821,19 +1272,56 @@ mod tests {
             store2.store(&approval).await.unwrap();
         });
 
-        let got_new = store
-            .wait_for_new(TEST_ORG, "acc-1", Duration::from_secs(5))
-            .await;
-        assert!(got_new);
+        assert!(new_approval.wait(Duration::from_secs(5)).await);
+    }
+
+    /// The lost-wakeup race of the approval long-poll, pinned without timing:
+    /// a store that lands after the subscription opened but BEFORE anyone
+    /// waits on it (the poll's list/wait gap) must still wake the wait. A
+    /// subscribe that only happens after the empty list misses it and the
+    /// poll sleeps its whole 30s window.
+    #[tokio::test]
+    async fn a_store_between_subscribe_and_wait_is_not_lost() {
+        let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
+        assert!(store.list_pending(TEST_ORG, "acc-1").await.is_empty());
+
+        let approval = make_approval("a1", "acc-1");
+        let _ = store.prepare_wait(TEST_ORG, "acc-1", "a1").await;
+        store.store(&approval).await.unwrap();
+
+        // A zero timeout: the notification must already be buffered.
+        assert!(new_approval.wait(Duration::ZERO).await);
+        assert!(new_for_org.wait(Duration::ZERO).await);
     }
 
     #[tokio::test]
-    async fn wait_for_new_timeout() {
+    async fn subscription_times_out_without_a_store() {
         let store = new_store().await;
-        let got_new = store
-            .wait_for_new(TEST_ORG, "acc-1", Duration::from_millis(100))
-            .await;
-        assert!(!got_new);
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        assert!(!new_approval.wait(Duration::from_millis(100)).await);
+    }
+
+    #[tokio::test]
+    async fn subscription_ignores_other_workspaces_and_orgs() {
+        let store = new_store().await;
+        let new_approval = store.subscribe_new(TEST_ORG, "acc-1").await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
+
+        let elsewhere = make_approval("a1", "acc-2");
+        let _ = store.prepare_wait(TEST_ORG, "acc-2", "a1").await;
+        store.store(&elsewhere).await.unwrap();
+        let other_org = make_approval_in_org("a2", "org-2", "acc-1");
+        let _ = store.prepare_wait("org-2", "acc-1", "a2").await;
+        store.store(&other_org).await.unwrap();
+
+        assert!(!new_approval.wait(Duration::ZERO).await);
+        // The org subscription hears its own org's other workspace only.
+        assert!(new_for_org.wait(Duration::ZERO).await);
+        let new_for_other_org = store.subscribe_new_for_org("org-3").await;
+        store.store(&other_org).await.unwrap();
+        assert!(!new_for_other_org.wait(Duration::ZERO).await);
     }
 
     // ── Org-scoped listing / long-poll ──────────────────────────────────────
@@ -896,8 +1384,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_for_new_for_org_notified_on_store_in_any_workspace() {
+    async fn org_subscription_wakes_on_a_store_in_any_workspace() {
         let store = new_store().await;
+        let new_for_org = store.subscribe_new_for_org(TEST_ORG).await;
 
         let store2 = Arc::clone(&store);
         tokio::spawn(async move {
@@ -907,9 +1396,6 @@ mod tests {
             store2.store(&approval).await.unwrap();
         });
 
-        let got_new = store
-            .wait_for_new_for_org(TEST_ORG, Duration::from_secs(5))
-            .await;
-        assert!(got_new);
+        assert!(new_for_org.wait(Duration::from_secs(5)).await);
     }
 }

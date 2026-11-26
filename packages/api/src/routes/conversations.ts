@@ -13,11 +13,14 @@ import {
   createTurn,
   listTurns,
   readTranscript,
+  requestSendNow,
 } from "../services/turn-service";
 import { sendConversationMessage } from "../services/follow-up-service";
 import {
   createPendingAttachment,
+  getAttachmentDownloadUrl,
   getAttachmentForDownload,
+  getAttachmentMeta,
 } from "../services/attachment-service";
 import { streamTranscript } from "./transcript-stream";
 import {
@@ -32,7 +35,11 @@ import {
   attachmentNameSchema,
 } from "../validations/attachments";
 import { readCappedBinaryBody } from "@onecli/channels";
-import { MAX_ATTACHMENT_BYTES } from "@onecli/agent-protocol";
+import {
+  MAX_ATTACHMENT_BYTES,
+  attachmentDownloadDisposition,
+} from "@onecli/agent-protocol";
+import { parseBody, parsed } from "../lib/request-body";
 
 /**
  * Conversations, turns, and the transcript (step 4; per-user direct threads
@@ -43,30 +50,6 @@ import { MAX_ATTACHMENT_BYTES } from "@onecli/agent-protocol";
  * these columns. No `withAudit` either — it flushes that cache unconditionally,
  * which is exactly the flush we do not want.
  */
-
-const parseBody = async (raw: Request) =>
-  await raw
-    .clone()
-    .json()
-    .catch(() => null);
-
-/** Validation failures throw so they render as the standard error envelope. */
-const parsed = <T>(
-  result: {
-    success: boolean;
-    data?: T;
-    error?: { issues: { message?: string }[] };
-  },
-  fallback: string,
-): T => {
-  if (!result.success || result.data === undefined) {
-    throw new ServiceError(
-      "UNPROCESSABLE",
-      result.error?.issues[0]?.message ?? fallback,
-    );
-  }
-  return result.data;
-};
 
 export const conversationRoutes = () => {
   const app = new Hono<ApiEnv>();
@@ -209,6 +192,47 @@ export const conversationRoutes = () => {
   // `Content-Disposition: attachment` + nosniff always (a stored SVG/HTML
   // must never execute on this origin — previews fetch blobs with auth and
   // render via object URLs, so inline disposition buys nothing).
+  // GET /conversations/:id/attachments/:attachmentId/meta — the row's
+  // metadata (name, type, size, caption), for a download page that shows what
+  // it offers before fetching the bytes. The same fence as the bytes route;
+  // a foreign or unknown id is a hint-free 404.
+  app.get("/:conversationId/attachments/:attachmentId/meta", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    const conversationId = c.req.param("conversationId");
+    await requireConversation(workspaceId, conversationId, auth.userId);
+    return c.json(
+      await getAttachmentMeta(conversationId, c.req.param("attachmentId")),
+    );
+  });
+
+  // GET /conversations/:id/attachments/:attachmentId/download-url — where
+  // the browser should fetch the bytes from. `{ url, expiresAt }` when the
+  // row's backend mints presigned URLs (object storage: the api leaves the
+  // byte path entirely); 204 when the bytes are inline and the client must
+  // use the streaming route below instead. Same fence as the bytes route.
+  // The URL is short-lived and pins attachment disposition in its signature,
+  // so it is safe to hand to a `location.assign` — it can only ever download.
+  app.get(
+    "/:conversationId/attachments/:attachmentId/download-url",
+    async (c) => {
+      const auth = c.get("auth");
+      const workspaceId = requireWorkspaceId(auth);
+      const conversationId = c.req.param("conversationId");
+      await requireConversation(workspaceId, conversationId, auth.userId);
+      const signed = await getAttachmentDownloadUrl(
+        conversationId,
+        c.req.param("attachmentId"),
+      );
+      if (!signed) return c.body(null, 204);
+      c.header("Cache-Control", "no-store");
+      return c.json({
+        url: signed.url,
+        expiresAt: signed.expiresAt.toISOString(),
+      });
+    },
+  );
+
   app.get("/:conversationId/attachments/:attachmentId", async (c) => {
     const auth = c.get("auth");
     const workspaceId = requireWorkspaceId(auth);
@@ -219,12 +243,12 @@ export const conversationRoutes = () => {
       conversationId,
       c.req.param("attachmentId"),
     );
-    // RFC 5987 encoding: the name is user-chosen and may be non-ASCII.
-    const asciiName = meta.name.replace(/[^ -~]/g, "_").replace(/"/g, "'");
     return c.body(new Uint8Array(bytes), 200, {
       "Content-Type": meta.mimeType,
       "Content-Length": String(bytes.byteLength),
-      "Content-Disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(meta.name)}`,
+      // The one disposition builder (agent-protocol): attachment, ASCII
+      // fallback, UTF-8 real name, quoted-string escapes stripped.
+      "Content-Disposition": attachmentDownloadDisposition(meta.name),
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "private, max-age=3600",
     });
@@ -323,6 +347,18 @@ export const turnRoutes = () => {
     const workspaceId = requireWorkspaceId(auth);
     return c.json(
       await abortTurn(workspaceId, c.req.param("turnId"), auth.userId),
+    );
+  });
+
+  // POST /turns/:id/send-now: read this waiting mid-run follow-up now. A
+  // request the sandbox acts on, so 202: the outcome
+  // arrives on the conversation's stream as `message.sent_now`.
+  app.post("/:turnId/send-now", async (c) => {
+    const auth = c.get("auth");
+    const workspaceId = requireWorkspaceId(auth);
+    return c.json(
+      await requestSendNow(workspaceId, c.req.param("turnId"), auth.userId),
+      202,
     );
   });
 

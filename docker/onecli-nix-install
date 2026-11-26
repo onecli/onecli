@@ -2,9 +2,9 @@
 # onecli-nix-install — set up Nix for THIS agent, once, on the durable home.
 #
 # What it does (plans/agent-owns-its-machine.md Tier 1.5):
-#   1. Refuses unless /nix is a mount point the caller can write. On the
-#      hosted platform the boot phase creates /workspace/.nix as the agent
-#      uid and bind-mounts it onto /nix on every boot, so this is simply
+#   1. Refuses unless /nix is a mount point the caller can write. A
+#      deployment that provides it mounts the agent's durable /workspace/.nix
+#      onto /nix, writable by the agent uid, so this is simply
 #      true. On a self-hosted Docker deployment there is no root boot phase,
 #      /nix is never mounted, and this command says so honestly.
 #   2. Runs the OFFICIAL Nix installer in single-user mode from the release
@@ -41,7 +41,7 @@ if [ -x "$HOME/.nix-profile/bin/nix" ]; then
   exit 0
 fi
 
-# ── 1. /nix must be the boot phase's bind mount, writable by this uid. ───
+# ── 1. /nix must be the deployment's mount, writable by this uid. ───
 if ! mountpoint -q "$STORE_MOUNT" 2>/dev/null; then
   say "$STORE_MOUNT is not mounted, so Nix cannot be installed here."
   say ""

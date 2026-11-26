@@ -119,21 +119,47 @@ describe("unconnected", () => {
     const user = userEvent.setup();
     render(<SlackIntegrationCard />);
 
+    // Step 1 (where to go) is inline under the field, and again as step 1 of
+    // the dialog, so someone with the Slack tab already open never has to
+    // open anything.
     expect(
       screen.getByRole("link", { name: /api\.slack\.com\/apps/ }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps");
+    expect(
+      screen.getByText("Your App Configuration Tokens"),
+    ).toBeInTheDocument();
+    // The rest of the walkthrough (three steps plus Slack's screen) is too
+    // tall for the stacked form, so it stays behind the dialog.
+    expect(screen.queryByText("Generate Token")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "How do I get this?" }),
+    );
+
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByRole("link", { name: /api\.slack\.com\/apps/ }),
     ).toHaveAttribute("href", "https://api.slack.com/apps");
     // The one fact the paste flow lives or dies on: a refresh token is
     // single-use, so it must be pasted freshly generated and unused. Slack's
     // own page does not say so, and a stale one answers an opaque
     // `internal_error`.
     expect(
-      screen.getByText(/Each refresh token works once/),
+      within(dialog).getByText(/Each refresh token works once/),
     ).toBeInTheDocument();
-    // Slack's page has two Copy buttons; the hint names which one.
+    // Slack's page has two identical Copy buttons; the steps name which one,
+    // in text (the screenshot beside them is decorative).
     expect(
-      screen.getByText(/paste the Refresh Token \(not the Access Token\)/),
+      within(dialog).getByText(/not the Access Token/),
     ).toBeInTheDocument();
+    expect(within(dialog).getByText("Generate Token")).toBeInTheDocument();
+    // Slack's real tokens row, arrow on the Refresh Token's Copy. `alt=""`
+    // makes it presentational, so step 3 above must carry the fact in words.
+    expect(within(dialog).getByRole("presentation")).toHaveAttribute(
+      "src",
+      expect.stringContaining("slack-app-config-tokens.png"),
+    );
 
+    await user.keyboard("{Escape}");
     const field = screen.getByLabelText("App Configuration refresh token");
     await user.type(field, "xoxe-1-refresh");
     await user.click(screen.getByRole("button", { name: "Connect" }));
@@ -146,13 +172,16 @@ describe("unconnected", () => {
 });
 
 describe("connected", () => {
-  it("shows the workspace, presence count and Disconnect — no paste field", () => {
+  it("names the workspace and offers Disconnect — no paste field, no agent count", () => {
     state.view = view({ integrations: [integration()] });
     render(<SlackIntegrationCard />);
 
-    expect(screen.getByText(/Acme/)).toBeInTheDocument();
-    expect(screen.getByText(/T123/)).toBeInTheDocument();
-    expect(screen.getByText(/3 agent apps/)).toBeInTheDocument();
+    // The NAME leads ("Connected to Acme."); the raw T… id only shows when
+    // there is no name, and the agent count lives in the agents list below.
+    expect(screen.getByText(/Connected to/)).toBeInTheDocument();
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+    expect(screen.queryByText(/T123/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/agent apps?/)).not.toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
@@ -160,6 +189,17 @@ describe("connected", () => {
     expect(
       screen.queryByLabelText("App Configuration refresh token"),
     ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the T… id when the workspace has no name, Disconnect still on the line", () => {
+    state.view = view({ integrations: [integration({ name: null })] });
+    render(<SlackIntegrationCard />);
+
+    expect(screen.getByText(/Connected to/)).toBeInTheDocument();
+    expect(screen.getByText("T123")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Disconnect" }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -216,7 +256,7 @@ describe("needs credentials", () => {
     // new one) — not "expired", which the old copy claimed even when the
     // token had been consumed by another tool.
     expect(
-      screen.getByText(/could not be refreshed: Slack refused the rotation/),
+      screen.getByText(/Slack refused to rotate the stored token/),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("App Configuration refresh token"),

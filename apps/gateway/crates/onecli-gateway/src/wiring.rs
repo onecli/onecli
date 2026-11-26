@@ -48,7 +48,7 @@ pub(crate) async fn create_approval_store() -> anyhow::Result<Arc<dyn ApprovalSt
 /// `SECRET_ENCRYPTION_KEY` set → local AES-256-GCM. Otherwise the KMS envelope
 /// backend (licensed hosted-platform plumbing in `crate::ee::kms_crypto`):
 /// AWS credentials and region come from the standard SDK chain (env vars,
-/// instance metadata, ECS task role), and `KMS_KEY_ARN` is read at encrypt
+/// instance metadata, an attached role), and `KMS_KEY_ARN` is read at encrypt
 /// time. Construction is either/or, never both; decrypt still dispatches per
 /// ciphertext shape inside `CryptoService`.
 pub(crate) async fn create_crypto_service() -> Result<CryptoService> {

@@ -1,0 +1,303 @@
+diff --git a/core/rfb.js b/core/rfb.js
+index 80011e4a10203806f14df1ffc3b8425861a965a7..0e33150792f91eab8d767d0897c8005da45deeae 100644
+--- a/core/rfb.js
++++ b/core/rfb.js
+@@ -157,6 +157,14 @@ export default class RFB extends EventTargetMixin {
+         this._extendedPointerEventSupported = false;
+ 
+         this._clipboardText = null;
++        // Embedders can opt out of automatically fetching remote clipboard data.
++        this._clipboardAutoRequest = options.clipboardAutoRequest ?? true;
++        this._clipboardMaxBytes = options.clipboardMaxBytes ?? 262144;
++        if (!Number.isSafeInteger(this._clipboardMaxBytes) || this._clipboardMaxBytes < 8 || this._clipboardMaxBytes > 1048576) {
++            throw new Error("Invalid clipboard byte limit");
++        }
++        this._clipboardPaste = null;
++        this._clipboardRead = null;
+         this._clipboardServerCapabilitiesActions = {};
+         this._clipboardServerCapabilitiesFormats = {};
+ 
+@@ -309,6 +317,10 @@ export default class RFB extends EventTargetMixin {
+ 
+     get viewOnly() { return this._viewOnly; }
+     set viewOnly(viewOnly) {
++        if (viewOnly) {
++            this.releaseKeys();
++            this.clearClipboard();
++        }
+         this._viewOnly = viewOnly;
+ 
+         if (this._rfbConnectionState === "connecting" ||
+@@ -416,6 +428,7 @@ export default class RFB extends EventTargetMixin {
+     // ===== PUBLIC METHODS =====
+ 
+     disconnect() {
++        this.clearClipboard();
+         this._updateConnectionState('disconnecting');
+         this._sock.off('error');
+         this._sock.off('message');
+@@ -497,6 +510,69 @@ export default class RFB extends EventTargetMixin {
+         this._canvas.blur();
+     }
+ 
++    // Release keys through Keyboard so its own pressed-key bookkeeping agrees.
++    releaseKeys() {
++        this._keyboard._allKeysUp();
++    }
++
++    // Cancel outstanding operations and discard only our own clipboard buffers.
++    clearClipboard() {
++        this._clipboardText = null;
++        const paste = this._clipboardPaste;
++        const read = this._clipboardRead;
++        this._clipboardPaste = null;
++        this._clipboardRead = null;
++        paste?.reject(new Error("Clipboard operation cancelled"));
++        read?.reject(new Error("Clipboard operation cancelled"));
++    }
++
++    // Resolves after the data has been written to the same ordered stream as
++    // sendKey(), not when an application has consumed it. One operation at a time.
++    clipboardPaste(text) {
++        if (this._rfbConnectionState !== 'connected' || this._viewOnly ||
++            this._clipboardPaste || this._clipboardRead) {
++            return Promise.reject(new Error("Clipboard is unavailable"));
++        }
++        if (typeof text !== 'string' || text.length > this._clipboardMaxBytes ||
++            new TextEncoder().encode(text.replace(/\r\n|\r|\n/g, "\r\n") + "\0").length > this._clipboardMaxBytes) {
++            return Promise.reject(new Error("Clipboard text is too large"));
++        }
++        const extended = this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] &&
++                         this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify];
++        if (extended && !this._clipboardServerCapabilitiesActions[extendedClipboardActionProvide]) {
++            return Promise.reject(new Error("Clipboard transfer is unsupported"));
++        }
++        if (!extended && /[^\x00-\xff]/u.test(text)) {
++            return Promise.reject(new Error("Unicode clipboard is unsupported"));
++        }
++        return new Promise((resolve, reject) => {
++            this._clipboardPaste = { resolve, reject };
++            try {
++                this.clipboardPasteFrom(text);
++                if (!extended) {
++                    this._clipboardPaste = null;
++                    resolve();
++                }
++            } catch {
++                this._clipboardPaste = null;
++                this._clipboardText = null;
++                reject(new Error("Clipboard transfer failed"));
++            }
++        });
++    }
++
++    // Wait for the fresh ownership announcement caused by a copy shortcut.
++    clipboardRead() {
++        if (this._rfbConnectionState !== 'connected' || this._viewOnly ||
++            this._clipboardPaste || this._clipboardRead ||
++            !this._clipboardServerCapabilitiesActions[extendedClipboardActionRequest]) {
++            return Promise.reject(new Error("Clipboard read is unsupported"));
++        }
++        return new Promise((resolve, reject) => {
++            this._clipboardRead = { resolve, reject, requested: false };
++        });
++    }
++
+     clipboardPasteFrom(text) {
+         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+ 
+@@ -606,6 +682,7 @@ export default class RFB extends EventTargetMixin {
+     }
+ 
+     _disconnect() {
++        this.clearClipboard();
+         Log.Debug(">> RFB.disconnect");
+         this._cursor.detach();
+         this._canvas.removeEventListener("gesturestart", this._eventHandlers.handleGesture);
+@@ -2332,16 +2409,19 @@ export default class RFB extends EventTargetMixin {
+ 
+         let length = this._sock.rQshift32();
+         length = toSigned32bit(length);
++        if (Math.abs(length) > this._clipboardMaxBytes || (length < 0 && length > -4)) {
++            return this._fail("Invalid clipboard message length");
++        }
+ 
+         if (this._sock.rQwait("ServerCutText content", Math.abs(length), 8)) { return false; }
++        if (this._viewOnly) {
++            this._sock.rQskipBytes(Math.abs(length));
++            return true;
++        }
+ 
+         if (length >= 0) {
+             //Standard msg
+             const text = this._sock.rQshiftStr(length);
+-            if (this._viewOnly) {
+-                return true;
+-            }
+-
+             this.dispatchEvent(new CustomEvent(
+                 "clipboard",
+                 { detail: { text: text } }));
+@@ -2355,6 +2435,10 @@ export default class RFB extends EventTargetMixin {
+ 
+             let isCaps = (!!(actions & extendedClipboardActionCaps));
+             if (isCaps) {
++                const count = formats.toString(2).replaceAll('0', '').length;
++                if (length !== 4 + 4 * count) {
++                    return this._fail("Invalid clipboard capabilities length");
++                }
+                 this._clipboardServerCapabilitiesFormats = {};
+                 this._clipboardServerCapabilitiesActions = {};
+ 
+@@ -2386,27 +2470,27 @@ export default class RFB extends EventTargetMixin {
+                     extendedClipboardActionNotify,
+                     extendedClipboardActionProvide
+                 ];
+-                RFB.messages.extendedClipboardCaps(this._sock, clientActions, {extendedClipboardFormatText: 0});
++                RFB.messages.extendedClipboardCaps(this._sock, clientActions, {0: 0});
+ 
++            } else if (actions !== extendedClipboardActionProvide && length !== 4) {
++                return this._fail("Invalid clipboard action length");
+             } else if (actions === extendedClipboardActionRequest) {
+-                if (this._viewOnly) {
+-                    return true;
+-                }
+-
+                 // Check if server has told us it can handle Provide and there is clipboard data to send.
+                 if (this._clipboardText != null &&
+                     this._clipboardServerCapabilitiesActions[extendedClipboardActionProvide]) {
+ 
+                     if (formats & extendedClipboardFormatText) {
+                         RFB.messages.extendedClipboardProvide(this._sock, [extendedClipboardFormatText], [this._clipboardText]);
++                        if (this._clipboardPaste) {
++                            const pending = this._clipboardPaste;
++                            this._clipboardPaste = null;
++                            this._clipboardText = null;
++                            pending.resolve();
++                        }
+                     }
+                 }
+ 
+             } else if (actions === extendedClipboardActionPeek) {
+-                if (this._viewOnly) {
+-                    return true;
+-                }
+-
+                 if (this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
+ 
+                     if (this._clipboardText != null) {
+@@ -2417,72 +2501,62 @@ export default class RFB extends EventTargetMixin {
+                 }
+ 
+             } else if (actions === extendedClipboardActionNotify) {
+-                if (this._viewOnly) {
+-                    return true;
+-                }
+-
+-                if (this._clipboardServerCapabilitiesActions[extendedClipboardActionRequest]) {
+-
+-                    if (formats & extendedClipboardFormatText) {
++                if (this._clipboardServerCapabilitiesActions[extendedClipboardActionRequest] &&
++                    (formats & extendedClipboardFormatText)) {
++                    this.dispatchEvent(new CustomEvent("clipboardchange"));
++                    if (this._clipboardRead && !this._clipboardRead.requested) {
++                        this._clipboardRead.requested = true;
++                        RFB.messages.extendedClipboardRequest(this._sock, [extendedClipboardFormatText]);
++                    } else if (!this._clipboardRead && this._clipboardAutoRequest) {
+                         RFB.messages.extendedClipboardRequest(this._sock, [extendedClipboardFormatText]);
+                     }
+                 }
+ 
+             } else if (actions === extendedClipboardActionProvide) {
+-                if (this._viewOnly) {
+-                    return true;
+-                }
+-
+-                if (!(formats & extendedClipboardFormatText)) {
++                // Consume the entire frame even when it is unsolicited. Otherwise
++                // compressed bytes would be interpreted as the next RFB message.
++                let zlibStream = this._sock.rQshiftBytes(length - 4);
++                if ((!this._clipboardRead?.requested && !this._clipboardAutoRequest) ||
++                    !(formats & extendedClipboardFormatText)) {
+                     return true;
+                 }
+-                // Ignore what we had in our clipboard client side.
+                 this._clipboardText = null;
+-
+-                // FIXME: Should probably verify that this data was actually requested
+-                let zlibStream = this._sock.rQshiftBytes(length - 4);
+                 let streamInflator = new Inflator();
+                 let textData = null;
+-
+-                streamInflator.setInput(zlibStream);
+-                for (let i = 0; i <= 15; i++) {
+-                    let format = 1 << i;
+-
+-                    if (formats & format) {
+-
+-                        let size = 0x00;
+-                        let sizeArray = streamInflator.inflate(4);
+-
+-                        size |= (sizeArray[0] << 24);
+-                        size |= (sizeArray[1] << 16);
+-                        size |= (sizeArray[2] << 8);
+-                        size |= (sizeArray[3]);
+-                        let chunk = streamInflator.inflate(size);
+-
++                let total = 0;
++
++                try {
++                    streamInflator.setInput(zlibStream);
++                    for (let i = 0; i <= 15; i++) {
++                        const format = 1 << i;
++                        if (!(formats & format)) continue;
++                        const sizeArray = streamInflator.inflate(4);
++                        const size = ((sizeArray[0] << 24) | (sizeArray[1] << 16) |
++                                      (sizeArray[2] << 8) | sizeArray[3]) >>> 0;
++                        total += size + 4;
++                        if (total > this._clipboardMaxBytes) {
++                            return this._fail("Clipboard data exceeds byte limit");
++                        }
++                        const chunk = streamInflator.inflate(size);
+                         if (format === extendedClipboardFormatText) {
+-                            textData = chunk;
++                            textData = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(chunk);
+                         }
+                     }
+-                }
+-                streamInflator.setInput(null);
+-
+-                if (textData !== null) {
+-                    let tmpText = "";
+-                    for (let i = 0; i < textData.length; i++) {
+-                        tmpText += String.fromCharCode(textData[i]);
+-                    }
+-                    textData = tmpText;
+-
+-                    textData = decodeUTF8(textData);
+-                    if ((textData.length > 0) && "\0" === textData.charAt(textData.length - 1)) {
+-                        textData = textData.slice(0, -1);
++                    if (textData !== null) {
++                        if (!textData.endsWith('\0')) {
++                            return this._fail("Invalid clipboard text terminator");
++                        }
++                        textData = textData.slice(0, -1).replaceAll("\r\n", "\n");
++                        const pending = this._clipboardRead;
++                        this._clipboardRead = null;
++                        pending?.resolve(textData);
++                        this.dispatchEvent(new CustomEvent(
++                            "clipboard", { detail: { text: textData } }));
+                     }
+-
+-                    textData = textData.replaceAll("\r\n", "\n");
+-
+-                    this.dispatchEvent(new CustomEvent(
+-                        "clipboard",
+-                        { detail: { text: textData } }));
++                } catch {
++                    return this._fail("Invalid clipboard data");
++                } finally {
++                    streamInflator.setInput(null);
+                 }
+             } else {
+                 return this._fail("Unexpected action in extended clipboard message: " + actions);

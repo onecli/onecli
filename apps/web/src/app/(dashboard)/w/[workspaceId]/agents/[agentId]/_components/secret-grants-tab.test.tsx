@@ -31,6 +31,7 @@ vi.mock("@/hooks/use-grants", () => ({
   }),
   useAttachSecret: () => ({ mutate: vi.fn(), isPending: false }),
   useDetachSecret: () => ({ mutate: vi.fn(), isPending: false }),
+  useGrantSettling: () => false,
 }));
 
 vi.mock("@/lib/api/policy-visibility", async (importOriginal) => {
@@ -51,7 +52,7 @@ const secret = (id: string, scope: "workspace" | "organization") =>
     id,
     name: id,
     type: "anthropic",
-    typeLabel: "Anthropic API Key",
+    typeLabel: "Anthropic",
     hostPattern: "api.anthropic.com",
     scope,
     lastError: null,
@@ -91,5 +92,29 @@ describe("SecretGrantsTab", () => {
 
     expect(screen.getByText("ws-key")).toBeInTheDocument();
     expect(screen.queryByText("generic-token")).not.toBeInTheDocument();
+  });
+
+  const generic = (id: string) =>
+    ({ ...secret(id, "workspace"), type: "generic" }) as Secret;
+
+  it("folds custom secrets that are off for the agent by default", () => {
+    hoisted.secretsData = [generic("stripe")];
+    render(<SecretGrantsTab agentId="agent-1" kind="secret" />);
+
+    expect(screen.getByText(/None are on for this agent yet/)).toBeTruthy();
+    expect(screen.queryByText("stripe")).not.toBeInTheDocument();
+  });
+
+  it("lays the new agent's chooser out A to Z, every secret in view", () => {
+    hoisted.secretsData = [generic("stripe"), generic("Anthropic proxy")];
+    render(<SecretGrantsTab agentId="agent-1" kind="secret" chooser />);
+
+    const switches = screen.getAllByRole("switch");
+    expect(switches.map((s) => s.getAttribute("aria-label"))).toEqual([
+      "Attach Anthropic proxy",
+      "Attach stripe",
+    ]);
+    // Nothing folded away: each one starts off and IS the choice.
+    expect(screen.queryByText(/None are on for this agent yet/)).toBeNull();
   });
 });

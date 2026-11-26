@@ -1,4 +1,3 @@
-import { unpackThreadAddress } from "@onecli/channels/slack";
 import type { AdapterLink } from "@onecli/agent-protocol";
 
 /**
@@ -21,22 +20,35 @@ export interface ChannelPostTarget {
   iconUrl?: string;
 }
 
-/** `direct` links address the IM channel; `group` links pack
- * `<channel>:<threadRootTs>` into the external thread id — the codec lives
- * in @onecli/channels/slack so both runtimes decode the one format. */
+/**
+ * A provider's decoding of its own thread address (`externalThreadId` is
+ * provider-opaque to everything in this directory): which space to post in
+ * and, for a thread, the thread key. Supplied by the provider module
+ * (`ChannelAdapterProvider.threadAddress`), never assumed here.
+ *
+ * The ADDRESS alone decides — not the link's `kind`. Slack packs
+ * `<channel>:<threadRootTs>` for every thread, in a channel or inside a DM
+ * (the codec lives in @onecli/channels/slack so both runtimes read the one
+ * format); only a DM's top level is a bare channel id. `kind` says which
+ * SURFACE the link is, which is a routing fact, not an address.
+ */
+export type ThreadAddressDecoder = (externalThreadId: string) => ReplyTarget;
+
 export const replyTargetForLink = (
-  link: Pick<AdapterLink, "kind" | "externalThreadId">,
-): ReplyTarget => unpackThreadAddress(link.kind, link.externalThreadId);
+  decode: ThreadAddressDecoder,
+  link: Pick<AdapterLink, "externalThreadId">,
+): ReplyTarget => decode(link.externalThreadId);
 
 /**
  * Where ONE TURN's answer belongs — the link's address, narrowed to the
  * thread the turn actually arrived in when the control plane recorded one.
  *
- * A link resolves a single address per conversation, which is exactly right
- * for a channel thread (the thread IS the conversation) but not for a DM:
- * one direct conversation carries every thread the person opens inside it,
- * so answering at the link alone posts a threaded question's answer at the
- * bottom of the DM, where nobody is looking.
+ * A link resolves a single address per conversation, which is right for a
+ * thread of its own (the thread IS the conversation) but not for a DM's top
+ * level: that one row carries the turns typed at the bottom of the DM, and
+ * a point-of-contact room link likewise spans the threads under it, so
+ * answering at the link alone posts a threaded question's answer where
+ * nobody is looking.
  *
  * The CHANNEL always comes from the link — never from the turn. The turn
  * only ever narrows WHERE IN that conversation the answer lands, so a
@@ -44,10 +56,11 @@ export const replyTargetForLink = (
  * already belongs to, and can never redirect it into another one.
  */
 export const replyTargetForTurn = (
-  link: Pick<AdapterLink, "kind" | "externalThreadId">,
+  decode: ThreadAddressDecoder,
+  link: Pick<AdapterLink, "externalThreadId">,
   turn: { sourceThreadId?: string | null },
 ): ReplyTarget => {
-  const target = replyTargetForLink(link);
+  const target = replyTargetForLink(decode, link);
   // Absent (an older control plane, or a turn that arrived at the link's own
   // address) keeps the link's target verbatim — the pre-existing behavior.
   return turn.sourceThreadId

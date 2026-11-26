@@ -343,13 +343,44 @@ export interface AnthropicSecretMetadata {
   authMode: AnthropicAuthMode;
 }
 
+/**
+ * Anthropic credential prefixes, per Anthropic's docs (Claude Platform
+ * "Authentication" / "Admin API keys", Claude Code "Authentication"):
+ * - `sk-ant-oat…`   an OAuth access token, e.g. the one-year token
+ *   `claude setup-token` prints for a Claude subscription; the gateway injects
+ *   it as `Authorization: Bearer`. The ONLY OAuth shape, matched positively.
+ * - `sk-ant-admin…` an Admin API key: organization management only, it can't
+ *   call the Messages API, so it is neither mode.
+ * - `sk-ant-ort…`   an OAuth REFRESH token (stored next to the access token
+ *   in Claude Code's credentials); it can't call the API either.
+ * - every other `sk-ant-…` key is a Console API key, injected as `x-api-key`:
+ *   the classic `sk-ant-api…` keys and the identity-backed personal and
+ *   service-account keys (`sk-ant-usr…`). Classifying API keys as "not OAuth"
+ *   rather than by an allow-list keeps a new Console prefix working the day it
+ *   ships, the same rule the gateway's injector uses (`secret_inject.rs`: only
+ *   `sk-ant-oat` is a bearer).
+ */
 export const detectAnthropicAuthMode = (
   value: string,
 ): AnthropicAuthMode | null => {
-  if (value.startsWith("sk-ant-api")) return "api-key";
+  if (!value.startsWith("sk-ant-")) return null;
   if (value.startsWith("sk-ant-oat")) return "oauth";
-  return null;
+  if (isAnthropicAdminKey(value) || isAnthropicRefreshToken(value)) return null;
+  return "api-key";
 };
+
+/** A Console Admin API key: it can't call Claude models, so it is never a
+ * usable Anthropic secret. (Claude Enterprise admin keys share the `api01`
+ * stem with older inference keys, so they are deliberately NOT matched here:
+ * a false "admin" warning on a working key is worse than a missed one.) */
+export const isAnthropicAdminKey = (value: string): boolean =>
+  value.startsWith("sk-ant-admin");
+
+/** A Claude OAuth refresh token: it only mints access tokens, so it can't
+ * call Claude models. Pasted by mistake from Claude Code's credentials, where
+ * it sits beside the `sk-ant-oat` access token. */
+export const isAnthropicRefreshToken = (value: string): boolean =>
+  value.startsWith("sk-ant-ort");
 
 export const looksLikeAnthropicKey = (value: string): boolean =>
   detectAnthropicAuthMode(value) !== null &&
@@ -373,9 +404,18 @@ export const parseAnthropicMetadata = (
 
 export const OPENAI_KEY_MIN_LENGTH = 40;
 
+/** An OpenAI Admin API key (`sk-admin-…`): administration endpoints only, it
+ * can't call models, so it is never a usable inference key. */
+export const isOpenaiAdminKey = (value: string): boolean =>
+  value.startsWith("sk-admin-");
+
+/** A usable OpenAI inference key: project (`sk-proj-…`), service account
+ * (`sk-svcacct-…`), or legacy user (`sk-…`). Not an Admin key, and not an
+ * Anthropic key (which shares the `sk-` stem). */
 export const looksLikeOpenaiKey = (value: string): boolean =>
   value.startsWith("sk-") &&
   !value.startsWith("sk-ant-") &&
+  !isOpenaiAdminKey(value) &&
   value.length >= OPENAI_KEY_MIN_LENGTH;
 
 export const openaiAuthModes = ["api-key", "oauth"] as const;

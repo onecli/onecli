@@ -17,22 +17,22 @@ import {
 import { createTerminatorServer, type TerminatorServer } from "./server";
 
 /**
- * Terminator composition root (step 5 — the SSH front door): the platform's
- * only public listener. Everything testable lives in server/session/relay;
- * this file wires the real config, the boot secrets (direct env, or Secrets
- * Manager when an ARN is set — config presence, never edition), the selected
- * substrate backend (kube in cloud, docker on self-host), metrics, and the
- * drain-on-SIGTERM contract. On the kube arm, zero standing K8s credential
- * by design: the only cluster credential this process ever holds is a
- * per-session, broker-minted, short-TTL token.
+ * Terminator composition root (the SSH front door): a public listener.
+ * Everything testable lives in server/session/relay;
+ * this file wires the real config, the boot secrets (direct env, or a
+ * secret store when an ARN is set — config presence, never edition), the
+ * selected substrate backend (docker on self-host), metrics, and the
+ * drain-on-SIGTERM contract. On the kube arm, zero standing cluster
+ * credential by design: the only cluster credential this process ever holds
+ * is a per-session, broker-minted, short-TTL token.
  */
 
 const SHUTDOWN_GRACE_MS = 20_000;
 
 const config = loadTerminatorConfig(process.env);
 
-// Boot secrets load the same way the manager's do: direct env for tests/dev
-// and self-host, Secrets Manager in cloud, fail-loud — a terminator that
+// Boot secrets: direct env for tests/dev and self-host, a secret store when
+// an ARN is set, fail-loud — a terminator that
 // cannot handshake, open sessions, or resolve sandboxes serves nobody.
 const secretsManager = new SecretsManagerClient({});
 const fetchSecret = async (arn: string, label: string): Promise<string> => {
@@ -67,7 +67,7 @@ const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  // Cloud mode = a Secrets-Manager-provisioned host key: the CloudWatch
+  // Cloud mode = a secret-store-provisioned host key: the metrics
   // pump publishes there; anywhere else (self-host, dev) metrics are a
   // deliberate no-op — a credential-less run must not warn-loop.
   const metrics = config.hostKeySecretArn
@@ -134,7 +134,7 @@ const main = async (): Promise<void> => {
 
   // One flush per minute: the live-session gauge (published zero included)
   // is the terminator's liveness heartbeat, and every counter drains here —
-  // never per event (step 6).
+  // never per event.
   const stopMetricsPump = metrics.startPump(() => server.liveSessions());
 
   // Drain, don't drop silently: a deploy severs live sessions (accepted and

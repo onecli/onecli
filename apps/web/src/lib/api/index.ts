@@ -24,13 +24,23 @@ import * as appPermissions from "./app-permissions";
 import * as awsExternalId from "./aws-external-id";
 import * as vaults from "./vaults";
 import * as dropbox from "./dropbox";
+import * as googleDrive from "./google-drive";
 import * as conversations from "./conversations";
 import * as attachments from "./attachments";
 import * as channels from "./channels";
 import * as crons from "./crons";
+import * as webhooks from "./webhooks";
+import * as ports from "./ports";
 import * as memories from "./memories";
+import * as runs from "./runs";
+import * as approvalOutcomes from "./approval-outcomes";
+import * as usage from "./usage";
+import * as evals from "./evals";
 import * as skills from "./skills";
 import * as sshKeys from "./ssh-keys";
+import * as user from "./user";
+import * as githubAppShare from "./github-app-share";
+import * as skillLibrary from "./skill-library";
 
 export {
   agents,
@@ -59,13 +69,23 @@ export {
   awsExternalId,
   vaults,
   dropbox,
+  googleDrive,
   conversations,
   attachments,
   channels,
   crons,
+  webhooks,
+  ports,
   memories,
+  runs,
+  approvalOutcomes,
+  usage,
+  evals,
   skills,
+  skillLibrary,
   sshKeys,
+  user,
+  githubAppShare,
 };
 export type {
   Agent,
@@ -107,16 +127,15 @@ export type {
   PolicyRuleV2,
   PolicyRuleTarget,
   PolicyRuleSource,
-  PublishResult,
   AgentGrants,
   AgentGrantConnection,
   AgentGrantSecret,
   ConnectionGrants,
   ConnectionGrantInput,
+  SecretAgentAccess,
+  SecretAgentAccessEntry,
+  SavedSecret,
   GrantResources,
-  AgentGrantsSummary,
-  AgentWithGrantsSummary,
-  GrantsSummaryEntry,
   InstanceInfo,
   OrgInfo,
   SshKey,
@@ -130,21 +149,25 @@ export type {
   TurnUsage,
   TurnEvent,
   TurnEventKind,
+  LiveOnlyTurnEventKind,
   TranscriptPage,
   TurnsPage,
   AbortTurnResult,
+  SendNowResult,
 } from "./types";
 export type { CreatePolicyRuleInput, UpdatePolicyRuleInput } from "./policy";
 export type {
   AgentChannelPresence,
   AgentChannelsView,
   ActionApprovalStatus,
-  AgentContact,
+  AgentPeer,
   ChannelPresenceStatus,
   ChannelProvider,
+  ChannelListenMode,
   ChannelSetupMaterial,
   ChannelPersonReach,
   ChannelReachState,
+  ReachDecision,
   ChannelSpaceReach,
   ChannelTransport,
   ChannelUserLink,
@@ -152,8 +175,14 @@ export type {
   CreatePresenceResult,
   OrgChannelIntegration,
   OrgChannelsView,
+  OrgChannelAgentState,
+  OrgChannelAgent,
+  OrgChannelAgents,
+  OrgChannelWorkspace,
 } from "./channels";
 export type { AgentCron, CronInput, CronUpdate } from "./crons";
+export type { AgentWebhook, WebhookInput, WebhookUpdate } from "./webhooks";
+export type { SandboxPortShare, SandboxPortsResponse } from "./ports";
 export type {
   AgentMemory,
   AgentMemorySummary,
@@ -164,28 +193,39 @@ export type {
   MemorySearchHit,
 } from "./memories";
 export type {
+  ImportedSkill,
   Skill,
+  SkillFile,
   SkillFileInput,
+  SkillImportResult,
   SkillInput,
   SkillPatch,
   SkillSummary,
 } from "./skills";
-export { appsPath } from "./scope";
 export type { PageScope } from "./scope";
+export type {
+  LibrarySkill,
+  LibraryUsage,
+  RepoSkill,
+  SkillSource,
+} from "./skill-library";
 export type { AppConfigStatus } from "./app-config";
 export type { AvailableApps } from "./app-availability";
 export type { VaultConnection } from "./vaults";
+export type { AccountDeletionOrgImpact } from "./user";
 export type {
   AppToolSummary,
   AppToolGroupSummary,
   AppPermissionDefinitionSummary,
 } from "@onecli/api/apps/app-permissions/types";
-export {
-  apiGet,
-  apiPost,
-  apiPatch,
-  apiPut,
-  apiDelete,
-  ApiError,
-} from "./client";
+export { apiGet, apiPut, ApiError } from "./client";
 export { queryKeys } from "./keys";
+export type { RunAppCall, RunDetail, RunListItem, RunToolCall } from "./runs";
+export type { AgentRuntimeUsage, OrgRuntimeUsage } from "./usage";
+export type {
+  EvalQuestion,
+  EvalRunDetail,
+  EvalRunSummary,
+  EvalSchedule,
+  EvalsView,
+} from "./evals";

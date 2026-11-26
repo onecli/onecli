@@ -7,7 +7,7 @@ import { createRedisEventBus, type RedisEventBusDeps } from "./redis-event-bus";
  * Redis. What matters: a publish goes onto the right channel; an inbound
  * message fans out to that conversation's local listeners and no others;
  * channel subscribe/unsubscribe is REF-COUNTED (one per conversation whatever
- * the listener count) so a pod carries only the channels it tails; and a
+ * the listener count) so an instance carries only the channels it tails; and a
  * failing publisher never throws onto the runner's critical path.
  */
 
@@ -156,7 +156,7 @@ describe("ref-counted channel subscription", () => {
     expect(redis.unsubscribed).toEqual([]);
 
     releaseB();
-    // Last tailer gone → drop the channel on this pod.
+    // Last tailer gone → drop the channel on this instance.
     expect(redis.unsubscribed).toEqual(["api:evt:cv-1"]);
   });
 
@@ -225,9 +225,9 @@ describe("ready ordering (the subscribe-before-snapshot guarantee)", () => {
     };
     const bus = createRedisEventBus(deps);
     bus.subscribe("cv-1", vi.fn());
-    // Second tab, same conversation, same pod, SUBSCRIBE still in flight:
+    // Second tab, same conversation, same instance, SUBSCRIBE still in flight:
     // its snapshot must wait for the same ack or an event committed on
-    // another pod inside the round-trip lands in neither snapshot nor tail.
+    // another instance inside the round-trip lands in neither snapshot nor tail.
     const { ready } = bus.subscribe("cv-1", vi.fn());
 
     let resolved = false;

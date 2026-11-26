@@ -2,8 +2,10 @@ import type { AppDefinition } from "./types";
 
 export const fathom: AppDefinition = {
   id: "fathom",
+  setupGuideUrl: "https://onecli.sh/docs/integrations/fathom",
   name: "Fathom",
   icon: "/icons/fathom.svg",
+  apiDocsUrl: "https://developers.fathom.ai/",
   darkIcon: "/icons/fathom-light.svg",
   description: "AI meeting notes: recordings, transcripts, and summaries.",
   connectionMethod: {

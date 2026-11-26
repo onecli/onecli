@@ -38,6 +38,31 @@ const refuseIconPosts = () => {
   );
 };
 
+describe("postBlocksMessage link previews", () => {
+  it("turns every link preview off when asked, and leaves them alone otherwise", async () => {
+    // MUTATION-TESTED: without the flags a Salesforce record link on an
+    // approval card gets the Salesforce app's own preview card under it.
+    await postBlocksMessage("xoxb-a", {
+      channel: "D1",
+      text: "card",
+      blocks: [],
+      noUnfurl: true,
+    });
+    await postBlocksMessage("xoxb-a", {
+      channel: "D1",
+      text: "plain",
+      blocks: [],
+    });
+    const [card, plain] = slack.callsTo("chat.postMessage");
+    expect(card?.form).toMatchObject({
+      unfurl_links: "false",
+      unfurl_media: "false",
+      unfurl_app_links: "false",
+    });
+    expect("unfurl_links" in (plain?.form ?? {})).toBe(false);
+  });
+});
+
 describe("postMessage", () => {
   it("carries icon_url when an avatar is set — and omits it when not", async () => {
     await postMessage("xoxb-a", { channel: "D1", text: "hi", iconUrl: ICON });

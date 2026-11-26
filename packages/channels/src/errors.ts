@@ -42,3 +42,31 @@ export class ChannelProviderApiError extends Error {
     this.name = "ChannelProviderApiError";
   }
 }
+
+/**
+ * Whether a provider refusal means the presence's credential is DEAD — the
+ * app was uninstalled, deleted, or its token revoked — as opposed to a
+ * transient or call-specific refusal (rate limit, missing scope, bad
+ * channel). The generic layer flips the presence to `disabled` on a dead
+ * credential exactly as it does for the provider's uninstall webhook, which
+ * is what covers the cases no webhook reaches: an app DELETED at
+ * api.slack.com (Slack's `app_deleted` event is org-admin only), a webhook
+ * lost while the adapter was offline, or an app created before the manifest
+ * subscribed to the removal events.
+ *
+ * Per provider, the codes the provider documents as terminal for its bot
+ * token (Slack, docs.slack.dev/reference/methods/chat.postMessage, checked
+ * 2026-09-15): `account_inactive` ("token is for a deleted user or workspace
+ * when using a bot token"), `token_revoked` ("the app has been removed"),
+ * `invalid_auth` ("the provided token is invalid"). `not_authed` is a
+ * caller bug (no token sent) and `token_expired` belongs to rotating user
+ * tokens, so neither is here. Unknown providers answer false: never flip on
+ * a code this table has not vouched for.
+ */
+export const isDeadCredentialError = (error: unknown): boolean =>
+  error instanceof ChannelProviderApiError &&
+  (DEAD_CREDENTIAL_CODES[error.providerId]?.has(error.code) ?? false);
+
+const DEAD_CREDENTIAL_CODES: Record<ChannelProviderId, ReadonlySet<string>> = {
+  slack: new Set(["account_inactive", "token_revoked", "invalid_auth"]),
+};
